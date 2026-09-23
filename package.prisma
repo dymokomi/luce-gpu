@@ -24,12 +24,12 @@ def package "luce-gpu" {
     }
 
     def native "macos" {
-        list libraries = ["objc"]
-        list frameworks = ["Metal", "CoreGraphics", "QuartzCore"]
+        str[] libraries = ["objc"]
+        str[] frameworks = ["Metal", "CoreGraphics", "QuartzCore"]
     }
 
     def native "windows" {
-        list libraries = ["vulkan-1"]
-        list link_search = ["$VULKAN_SDK/Lib"]
+        str[] libraries = ["vulkan-1"]
+        str[] link_search = ["$VULKAN_SDK/Lib"]
     }
 }
