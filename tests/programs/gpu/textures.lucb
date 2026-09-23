@@ -1,0 +1,198 @@
+import gpu
+import memory
+import shaders
+
+## Texture contracts that need a device but no window: uploads, offscreen
+## frames, image draws with both filters, readback, and refusals.
+pub func pixels(device: gpu.Device) -> !:
+    # A 2x2 sRGB texture: red, green / blue, opaque white with half alpha.
+    var source = try gpu.Texture.create(device, 2, 2, gpu.Format.rgba8)
+    defer source.destroy()
+    assert((try source.width()) == 2 and (try source.height()) == 2 and (try source.pixel_format()) == gpu.Format.rgba8)
+    var texels: u8[16] = [255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 128]
+    try source.upload(texels)
+    var back: u8[16]
+    try source.read(back)
+    for index in 0..<(usize)16:
+        assert(back[index] == texels[index])
+    # A partial upload and a partial readback address the same texels.
+    var corner: u8[4] = [10, 20, 30, 255]
+    try source.upload(corner, gpu.Region(1, 1, 1, 1))
+    var one: u8[4]
+    try source.read(one, gpu.Region(1, 1, 1, 1))
+    assert(one[0] == 10 and one[1] == 20 and one[2] == 30 and one[3] == 255)
+    try source.upload(texels)
+
+    # Nearest sampling scales each texel onto a 2x2 block of a linear target.
+    var target = try gpu.Texture.create(device, 4, 4, gpu.Format.rgba8_linear)
+    defer target.destroy()
+    let frame = try target.frame()
+    defer frame.release()
+    let root = try frame.value().target()
+    defer root.release()
+    try gpu.draw_image(root.value(), source, gpu.Rect(width = 4.0, height = 4.0), filter = gpu.Filter.nearest)
+    assert((try frame.value().present(gpu.Color(0.0, 0.0, 0.0, 0.0))) == gpu.PresentResult.submitted)
+    var result: u8[64]
+    try target.read(result)
+    # sRGB 255 decodes to linear 1.0; the linear target stores it unchanged.
+    assert(result[0] == 255 and result[1] == 0 and result[2] == 0 and result[3] == 255)
+    assert(result[8] == 0 and result[9] == 255 and result[10] == 0)
+    assert(result[32] == 0 and result[33] == 0 and result[34] == 255)
+    # Half-alpha white over a transparent clear stays premultiplied: 128, 128, 128, 128.
+    assert(result[60] >= 126 and result[60] <= 129 and result[63] >= 126 and result[63] <= 129)
+
+    # A solid quad, an opacity-scaled image and clipping compose on one frame.
+    var canvas = try gpu.Texture.create(device, 8, 8, gpu.Format.rgba8)
+    defer canvas.destroy()
+    let second = try canvas.frame()
+    defer second.release()
+    let whole = try second.value().target()
+    defer whole.release()
+    let vertices = [gpu.Vertex(x = -1.0, y = -1.0, blue = 1.0), gpu.Vertex(x = 1.0, y = -1.0, blue = 1.0), gpu.Vertex(x = 1.0, y = 1.0, blue = 1.0),
+                    gpu.Vertex(x = -1.0, y = -1.0, blue = 1.0), gpu.Vertex(x = 1.0, y = 1.0, blue = 1.0), gpu.Vertex(x = -1.0, y = 1.0, blue = 1.0)]
+    try whole.value().triangles(vertices)
+    let left = try whole.value().region(gpu.Rect(width = 4.0, height = 8.0))
+    defer left.release()
+    try gpu.draw_image(left.value(), source, gpu.Rect(x = -4.0, width = 8.0, height = 8.0), gpu.Region(0, 0, 1, 1), 1.0, gpu.Filter.nearest)
+    assert((try second.value().present()) == gpu.PresentResult.submitted)
+    var composed: u8[256]
+    try canvas.read(composed)
+    # Left half: the red texel drawn over blue; right half: untouched blue.
+    assert(composed[0] == 255 and composed[1] == 0 and composed[2] == 0)
+    assert(composed[7 * 4] == 0 and composed[7 * 4 + 2] == 255)
+
+    # Refusals: bad regions, wrong data length, self-sampling, another frame while open.
+    var rejected = false
+    source.upload(texels, gpu.Region(1, 1, 2, 2)) catch failure:
+        assert(failure.code == gpu.invalid_geometry)
+        rejected = true
+    assert(rejected)
+    rejected = false
+    source.upload(corner) catch failure:
+        assert(failure.code == gpu.invalid_pixels)
+        rejected = true
+    assert(rejected)
+    rejected = false
+    let loop = try source.frame()
+    defer loop.release()
+    let inside = try loop.value().target()
+    defer inside.release()
+    try gpu.draw_image(inside.value(), source, gpu.Rect(width = 2.0, height = 2.0))
+    discard(loop.value().present() catch failure:
+        assert(failure.code == gpu.invalid_geometry)
+        rejected = true
+        recover gpu.PresentResult.skipped)
+    assert(rejected)
+    rejected = false
+    let again = source.frame() catch failure:
+        assert(failure.code == gpu.frame_in_use)
+        rejected = true
+        recover try target.frame()
+    again.release()
+    # The failed present closed the loop frame, so the texture is free again.
+    assert(not rejected)
+    rejected = false
+    discard(gpu.Texture.create(device, 0, 4, gpu.Format.r8) catch failure:
+        assert(failure.code == gpu.invalid_geometry)
+        rejected = true
+        recover gpu.Texture())
+    assert(rejected)
+
+    # A destroyed handle refuses, while a draw recorded from it keeps drawing.
+    var doomed = try gpu.Texture.create(device, 1, 1, gpu.Format.r8)
+    var gray: u8[1] = [200]
+    try doomed.upload(gray)
+    let third = try target.frame()
+    defer third.release()
+    let full = try third.value().target()
+    defer full.release()
+    try gpu.draw_image(full.value(), doomed, gpu.Rect(width = 4.0, height = 4.0))
+    doomed.destroy()
+    rejected = false
+    discard(doomed.width() catch failure:
+        assert(failure.code == gpu.closed)
+        rejected = true
+        recover 0)
+    assert(rejected)
+    assert((try third.value().present()) == gpu.PresentResult.submitted)
+    try target.read(result)
+    # r8 samples as (r, 0, 0, 1): stored red 200 straight into the linear target.
+    assert(result[0] >= 199 and result[0] <= 201 and result[1] == 0 and result[3] == 255)
+
+## Client fragment shaders: uniforms, two sampled images, the three blend
+## modes, and the refusals for wrong targets and devices.
+pub func programs(device: gpu.Device) -> !:
+    var shader = try gpu.Shader.create(device, shaders.tint_frag_words, shaders.tint_frag_msl)
+    defer shader.destroy()
+    var over = try gpu.Pipeline.create(device, shader, gpu.Blend.over, gpu.Format.rgba8_linear)
+    defer over.destroy()
+    var replace = try gpu.Pipeline.create(device, shader, gpu.Blend.replace, gpu.Format.rgba8_linear)
+    defer replace.destroy()
+    var add = try gpu.Pipeline.create(device, shader, gpu.Blend.add, gpu.Format.rgba8_linear)
+    defer add.destroy()
+    assert((try over.blend()) == gpu.Blend.over)
+    var first = try gpu.Texture.create(device, 1, 1, gpu.Format.rgba8_linear)
+    defer first.destroy()
+    try first.upload([(u8)255, (u8)128, (u8)255, (u8)255])
+    var second = try gpu.Texture.create(device, 1, 1, gpu.Format.r8)
+    defer second.destroy()
+    try second.upload([(u8)64])
+    var target = try gpu.Texture.create(device, 4, 4, gpu.Format.rgba8_linear)
+    defer target.destroy()
+    # tint (1, 1, 0.5, 1), the rectangle in pixels, offset scale 1: fragment =
+    # white * tint * first + second.r = (1 + 0.25, 0.5, 0.5, 1), red clamped.
+    var uniforms: f32[9] = [1.0, 1.0, 0.5, 1.0, 0.0, 0.0, 4.0, 4.0, 1.0]
+    let bytes = u8[]((u8*)&uniforms[0], 36)
+    let frame = try target.frame()
+    defer frame.release()
+    let root = try frame.value().target()
+    defer root.release()
+    try gpu.shade(root.value(), over, gpu.Rect(width = 4.0, height = 4.0), bytes, [first, second])
+    assert((try frame.value().present(gpu.Color(0.0, 0.0, 1.0, 1.0))) == gpu.PresentResult.submitted)
+    var pixel: u8[4]
+    try target.read(pixel, gpu.Region(1, 1, 1, 1))
+    assert(pixel[0] == 255 and pixel[1] == 128 and pixel[2] == 128 and pixel[3] == 255)
+    # replace ignores the blue clear beneath a half-alpha draw; add sums with it.
+    uniforms[3] = 0.5
+    let half = try target.frame()
+    defer half.release()
+    let whole = try half.value().target()
+    defer whole.release()
+    try gpu.shade(whole.value(), replace, gpu.Rect(width = 2.0, height = 4.0), bytes, [first, second], gpu.Filter.nearest)
+    try gpu.shade(whole.value(), add, gpu.Rect(x = 2.0, width = 2.0, height = 4.0), bytes, [first, second], gpu.Filter.nearest)
+    assert((try half.value().present(gpu.Color(0.0, 0.0, 1.0, 1.0))) == gpu.PresentResult.submitted)
+    try target.read(pixel, gpu.Region(0, 0, 1, 1))
+    # replace: premultiplied (0.625, 0.25, 0.125, 0.5) as stored.
+    assert(pixel[0] >= 158 and pixel[0] <= 161 and pixel[1] >= 63 and pixel[1] <= 65 and pixel[3] == 128)
+    try target.read(pixel, gpu.Region(3, 0, 1, 1))
+    # add: the same plus the opaque blue clear: blue saturates, alpha saturates.
+    assert(pixel[0] >= 158 and pixel[0] <= 161 and pixel[2] == 255 and pixel[3] == 255)
+    # A pipeline made for rgba8_linear cannot draw into an rgba8 texture.
+    var other = try gpu.Texture.create(device, 2, 2, gpu.Format.rgba8)
+    defer other.destroy()
+    let wrong = try other.frame()
+    defer wrong.release()
+    let area = try wrong.value().target()
+    defer area.release()
+    try gpu.shade(area.value(), over, gpu.Rect(width = 2.0, height = 2.0))
+    var rejected = false
+    discard(wrong.value().present() catch failure:
+        assert(failure.code == gpu.wrong_target)
+        rejected = true
+        recover gpu.PresentResult.skipped)
+    assert(rejected)
+    # Bad SPIR-V and a closed shader are refused.
+    rejected = false
+    discard(gpu.Shader.create(device, [(u32)1, (u32)2, (u32)3, (u32)4, (u32)5], shaders.tint_frag_msl) catch failure:
+        assert(failure.code == gpu.invalid_shader)
+        rejected = true
+        recover gpu.Shader())
+    assert(rejected)
+    var closed = try gpu.Shader.create(device, shaders.tint_frag_words, shaders.tint_frag_msl)
+    closed.destroy()
+    rejected = false
+    discard(gpu.Pipeline.create(device, closed, gpu.Blend.over) catch failure:
+        assert(failure.code == gpu.closed)
+        rejected = true
+        recover gpu.Pipeline())
+    assert(rejected)

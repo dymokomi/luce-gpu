@@ -1,0 +1,35 @@
+#==============================================================================================
+#
+#   params - Per-draw fragment parameters
+#
+#   DESCRIPTION:
+#       The 48 bytes every draw hands its fragment shader on both backends: a pixel rectangle
+#       with either a coverage image (mode 1) or a texture's source rectangle (mode 2) mapped
+#       onto it. Mode 0 draws the interpolated vertex color alone. Layout is shared with the
+#       Metal and GLSL shader sources; change all three together.
+#
+#==============================================================================================
+
+extern struct DrawParams:
+    x: f32
+    y: f32
+    width: f32
+    height: f32
+    columns: u32
+    rows: u32
+    offset: u32
+    mode: u32
+    u0: f32
+    v0: f32
+    u1: f32
+    v1: f32
+
+let draw_solid: u32 = 0
+let draw_coverage: u32 = 1
+let draw_sampled: u32 = 2
+
+## The pixel-space parameters for `rectangle` mapped onto a texture's `source`.
+func image_params(rectangle: Rect, source: Region, texture_width: u32, texture_height: u32) -> DrawParams:
+    return DrawParams((f32)rectangle.x, (f32)rectangle.y, (f32)rectangle.width, (f32)rectangle.height, 0, 0, 0, draw_sampled,
+                      (f32)source.x / (f32)texture_width, (f32)source.y / (f32)texture_height,
+                      (f32)(source.x + source.width) / (f32)texture_width, (f32)(source.y + source.height) / (f32)texture_height)

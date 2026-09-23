@@ -1,0 +1,25 @@
+#==============================================================================================
+#
+#   module - Vulkan window-system integration
+#
+#   DESCRIPTION:
+#       Native window-system integration is independent of Vulkan rendering. An OS adapter
+#       supplies instance extensions, a queue preflight and surface creation. Actual support for
+#       the particular surface is checked by shared surface code.
+#
+#==============================================================================================
+
+func vulkan_presentation_extensions() -> const c.str[]!:
+    if platform.windows:
+        return vulkan_windows_extensions
+    error(unavailable, "Vulkan presentation is unavailable on this host")
+
+func vulkan_presentation_support(physical: u64, family: u32) -> bool:
+    if platform.windows:
+        return vulkan_windows_support(physical, family)
+    return false
+
+func vulkan_presentation_surface(instance: u64, host: window.Presentation) -> u64!:
+    if platform.windows:
+        return try vulkan_windows_surface(instance, host)
+    error(unavailable, "Vulkan presentation is unavailable on this host")

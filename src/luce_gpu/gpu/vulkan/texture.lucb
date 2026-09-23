@@ -1,0 +1,256 @@
+#==============================================================================================
+#
+#   texture - Vulkan images, samplers, transfers and offscreen passes
+#
+#   DESCRIPTION:
+#       Device-local Vulkan images with tracked layouts. Uploads and readbacks stage through
+#       host-visible buffers on the device's transfer command buffer and wait for the queue,
+#       so they are ordered after earlier submissions. An offscreen pass renders a canvas into
+#       the image and waits for completion. Shared drawing state (layouts, samplers, the
+#       placeholder image, the depth attachment) lives on the device and is built on first use.
+#
+#==============================================================================================
+
+struct VulkanTexture:
+    var image: u64
+    var memory: u64
+    var view: u64
+    var width: u32
+    var height: u32
+    var format: Format
+    var native_format: u32
+    var layout: u32
+
+func vulkan_native_format(pixel_format: Format) -> u32:
+    if pixel_format == Format.rgba8_linear: return VK_FORMAT_R8G8B8A8_UNORM
+    if pixel_format == Format.rgba16_float: return VK_FORMAT_R16G16B16A16_SFLOAT
+    if pixel_format == Format.r8: return VK_FORMAT_R8_UNORM
+    return VK_FORMAT_R8G8B8A8_SRGB
+
+# mark: Shared drawing state ==================================================================
+
+## Layouts, samplers, the placeholder image and the transfer command buffer,
+## created on first use by any surface or texture.
+func vulkan_drawing(device: VulkanDevice*) -> !:
+    if device.ready:
+        return
+    errdefer vulkan_drawing_destroy(device)
+    var pool_info = VkCommandPoolCreateInfo(sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, queueFamilyIndex = device.family)
+    try vulkan_check(vkCreateCommandPool(device.device, &pool_info, none, &device.pool), "the Vulkan transfer command pool could not be created")
+    var command_info = VkCommandBufferAllocateInfo(sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, commandPool = device.pool, commandBufferCount = 1)
+    try vulkan_check(vkAllocateCommandBuffers(device.device, &command_info, &device.command), "the Vulkan transfer command buffer could not be allocated")
+    # The fragment contract: sampled images at bindings 1..4, coverage words at 5,
+    # uniforms as push constants.
+    var bindings: VkDescriptorSetLayoutBinding[5]
+    for index in 0..<(usize)4:
+        bindings[index] = VkDescriptorSetLayoutBinding(binding = (u32)index + 1, descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, descriptorCount = 1, stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT)
+    bindings[4] = VkDescriptorSetLayoutBinding(binding = 5, descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, descriptorCount = 1, stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT)
+    var descriptor_info = VkDescriptorSetLayoutCreateInfo(sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, bindingCount = 5, pBindings = &bindings[0])
+    try vulkan_check(vkCreateDescriptorSetLayout(device.device, &descriptor_info, none, &device.descriptor_layout), "the Vulkan draw layout could not be created")
+    var push = VkPushConstantRange(stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT, size = (u32)uniform_limit)
+    var layout_info = VkPipelineLayoutCreateInfo(sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+                                                 setLayoutCount = 1, pSetLayouts = &device.descriptor_layout, pushConstantRangeCount = 1, pPushConstantRanges = &push)
+    try vulkan_check(vkCreatePipelineLayout(device.device, &layout_info, none, &device.layout), "the Vulkan pipeline layout could not be created")
+    device.nearest = try vulkan_sampler(device, VK_FILTER_NEAREST)
+    device.linear = try vulkan_sampler(device, VK_FILTER_LINEAR)
+    device.fill = try vulkan_shader(device, fill_frag_words)
+    device.ready = true
+    # Every draw binds an image; one opaque texel stands in for draws that sample none.
+    let placeholder = try vulkan_texture_create(device, 1, 1, Format.rgba8_linear)
+    device.placeholder = placeholder
+    var white: u8[4] = [255, 255, 255, 255]
+    try vulkan_texture_upload(device, placeholder, white, Region(0, 0, 1, 1))
+
+func vulkan_sampler(device: VulkanDevice*, filter: u32) -> u64!:
+    var info = VkSamplerCreateInfo(sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, magFilter = filter, minFilter = filter,
+                                   addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+                                   maxAnisotropy = 1.0)
+    var sampler: u64 = 0
+    try vulkan_check(vkCreateSampler(device.device, &info, none, &sampler), "a Vulkan sampler could not be created")
+    return sampler
+
+func vulkan_drawing_destroy(device: VulkanDevice*):
+    discard(vkDeviceWaitIdle(device.device))
+    if let placeholder = device.placeholder:
+        device.placeholder = none
+        vulkan_texture_destroy(device, placeholder)
+    vulkan_depth_destroy(device)
+    for state in device.formats[..<device.format_count]:
+        if state.overlay != 0: vkDestroyPipeline(device.device, state.overlay, none)
+        if state.depth_test != 0: vkDestroyPipeline(device.device, state.depth_test, none)
+        if state.pass_present != 0: vkDestroyRenderPass(device.device, state.pass_present, none)
+        if state.pass_texture != 0: vkDestroyRenderPass(device.device, state.pass_texture, none)
+    device.format_count = 0
+    if device.nearest != 0: vkDestroySampler(device.device, device.nearest, none)
+    if device.linear != 0: vkDestroySampler(device.device, device.linear, none)
+    if device.fill != 0: vkDestroyShaderModule(device.device, device.fill, none)
+    device.fill = 0
+    if device.layout != 0: vkDestroyPipelineLayout(device.device, device.layout, none)
+    if device.descriptor_layout != 0: vkDestroyDescriptorSetLayout(device.device, device.descriptor_layout, none)
+    if device.pool != 0: vkDestroyCommandPool(device.device, device.pool, none)
+    device.nearest = 0
+    device.linear = 0
+    device.layout = 0
+    device.descriptor_layout = 0
+    device.pool = 0
+    device.command = 0
+    device.ready = false
+
+## The device's depth attachment, reallocated when the extent changes.
+func vulkan_depth_for(device: VulkanDevice*, width: u32, height: u32) -> u64!:
+    if device.depth_view != 0 and device.depth_width == width and device.depth_height == height:
+        return device.depth_view
+    vulkan_depth_destroy(device)
+    errdefer vulkan_depth_destroy(device)
+    var properties: VkFormatProperties
+    vkGetPhysicalDeviceFormatProperties(device.physical, VK_FORMAT_D32_SFLOAT, &properties)
+    if (properties.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) == 0:
+        error(unavailable, "the Vulkan device has no 32-bit depth attachment support")
+    var info = VkImageCreateInfo(sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, imageType = VK_IMAGE_TYPE_2D, format = VK_FORMAT_D32_SFLOAT,
+                                 extent = VkExtent3D(width = width, height = height, depth = 1), mipLevels = 1, arrayLayers = 1, samples = VK_SAMPLE_COUNT_1_BIT, usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)
+    try vulkan_check(vkCreateImage(device.device, &info, none, &device.depth_image), "the Vulkan depth image could not be created")
+    var requirements: VkMemoryRequirements
+    vkGetImageMemoryRequirements(device.device, device.depth_image, &requirements)
+    device.depth_memory = try vulkan_memory(device, requirements, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+    try vulkan_check(vkBindImageMemory(device.device, device.depth_image, device.depth_memory, 0), "Vulkan depth memory could not be bound")
+    device.depth_view = try vulkan_image_view(device, device.depth_image, VK_FORMAT_D32_SFLOAT, VK_IMAGE_ASPECT_DEPTH_BIT)
+    device.depth_width = width
+    device.depth_height = height
+    return device.depth_view
+
+func vulkan_depth_destroy(device: VulkanDevice*):
+    if device.depth_view != 0: vkDestroyImageView(device.device, device.depth_view, none)
+    if device.depth_image != 0: vkDestroyImage(device.device, device.depth_image, none)
+    if device.depth_memory != 0: vkFreeMemory(device.device, device.depth_memory, none)
+    device.depth_view = 0
+    device.depth_image = 0
+    device.depth_memory = 0
+    device.depth_width = 0
+    device.depth_height = 0
+
+# mark: Images ================================================================================
+
+func vulkan_texture_create(device: VulkanDevice*, width: u32, height: u32, pixel_format: Format) -> VulkanTexture*!:
+    try vulkan_drawing(device)
+    let state = try new VulkanTexture(width = width, height = height, format = pixel_format, native_format = vulkan_native_format(pixel_format), layout = VK_IMAGE_LAYOUT_UNDEFINED) in memory.heap
+    errdefer vulkan_texture_destroy(device, state)
+    var info = VkImageCreateInfo(sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, imageType = VK_IMAGE_TYPE_2D, format = state.native_format,
+                                 extent = VkExtent3D(width = width, height = height, depth = 1), mipLevels = 1, arrayLayers = 1, samples = VK_SAMPLE_COUNT_1_BIT,
+                                 usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT)
+    try vulkan_check(vkCreateImage(device.device, &info, none, &state.image), "a Vulkan image could not be created")
+    var requirements: VkMemoryRequirements
+    vkGetImageMemoryRequirements(device.device, state.image, &requirements)
+    state.memory = try vulkan_memory(device, requirements, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+    try vulkan_check(vkBindImageMemory(device.device, state.image, state.memory, 0), "Vulkan image memory could not be bound")
+    state.view = try vulkan_image_view(device, state.image, state.native_format, VK_IMAGE_ASPECT_COLOR_BIT)
+    # Sampling needs a defined layout even before the first upload.
+    try vulkan_transfer_begin(device)
+    vulkan_transition(device.command, state, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+    try vulkan_transfer_end(device)
+    return state
+
+func vulkan_texture_destroy(device: VulkanDevice*, state: VulkanTexture*):
+    discard(vkDeviceWaitIdle(device.device))
+    if state.view != 0: vkDestroyImageView(device.device, state.view, none)
+    if state.image != 0: vkDestroyImage(device.device, state.image, none)
+    if state.memory != 0: vkFreeMemory(device.device, state.memory, none)
+    free(state) in memory.heap
+
+## Record a layout transition of the whole image, with the broadest matching
+## access masks; transfers are waited for, so precision buys nothing here.
+func vulkan_transition(command: u64, state: VulkanTexture*, layout: u32):
+    if state.layout == layout:
+        return
+    var barrier = VkImageMemoryBarrier(sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                                       srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                                       dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                                       oldLayout = state.layout, newLayout = layout, srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                                       image = state.image, subresourceRange = VkImageSubresourceRange(aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, levelCount = 1, layerCount = 1))
+    let stages = VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+    vkCmdPipelineBarrier(command, stages, stages, 0, 0, none, 0, none, 1, &barrier)
+    state.layout = layout
+
+func vulkan_transfer_begin(device: VulkanDevice*) -> !:
+    try vulkan_check(vkResetCommandPool(device.device, device.pool, 0), "the Vulkan transfer pool could not be reset")
+    var begin = VkCommandBufferBeginInfo(sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT)
+    try vulkan_check(vkBeginCommandBuffer(device.command, &begin), "Vulkan transfer recording could not begin")
+
+func vulkan_transfer_end(device: VulkanDevice*) -> !:
+    try vulkan_check(vkEndCommandBuffer(device.command), "Vulkan transfer recording could not finish")
+    var submit = VkSubmitInfo(sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, commandBufferCount = 1, pCommandBuffers = &device.command)
+    try vulkan_check(vkQueueSubmit(device.queue, 1, &submit, 0), "Vulkan transfer submission failed")
+    try vulkan_check(vkQueueWaitIdle(device.queue), "Vulkan transfer execution failed")
+
+struct VulkanStaging:
+    var buffer: u64
+    var block: u64
+
+func vulkan_staging(device: VulkanDevice*, bytes: usize, usage: u32) -> VulkanStaging!:
+    var staging: VulkanStaging
+    errdefer vulkan_staging_destroy(device, staging)
+    var info = VkBufferCreateInfo(sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, size = (u64)bytes, usage = usage)
+    try vulkan_check(vkCreateBuffer(device.device, &info, none, &staging.buffer), "a Vulkan staging buffer could not be created")
+    var requirements: VkMemoryRequirements
+    vkGetBufferMemoryRequirements(device.device, staging.buffer, &requirements)
+    staging.block = try vulkan_memory(device, requirements, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+    try vulkan_check(vkBindBufferMemory(device.device, staging.buffer, staging.block, 0), "Vulkan staging memory could not be bound")
+    return staging
+
+func vulkan_staging_destroy(device: VulkanDevice*, staging: VulkanStaging):
+    if staging.buffer != 0: vkDestroyBuffer(device.device, staging.buffer, none)
+    if staging.block != 0: vkFreeMemory(device.device, staging.block, none)
+
+func vulkan_copy_region(region: Region) -> VkBufferImageCopy:
+    return VkBufferImageCopy(imageSubresource = VkImageSubresourceLayers(aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, layerCount = 1),
+                             imageOffset = VkOffset3D(x = (i32)region.x, y = (i32)region.y, z = 0),
+                             imageExtent = VkExtent3D(width = region.width, height = region.height, depth = 1))
+
+func vulkan_texture_upload(device: VulkanDevice*, state: VulkanTexture*, pixels: const u8[], region: Region) -> !:
+    let staging = try vulkan_staging(device, pixels.length, VK_BUFFER_USAGE_TRANSFER_SRC_BIT)
+    defer vulkan_staging_destroy(device, staging)
+    var mapped: void*? = none
+    try vulkan_check(vkMapMemory(device.device, staging.block, 0, (u64)pixels.length, 0, &mapped), "Vulkan staging memory could not be mapped")
+    let destination = mapped else error(failed, "Vulkan returned an empty memory mapping")
+    memory.copy(u8[]((u8*)destination, pixels.length), pixels, pixels.length)
+    vkUnmapMemory(device.device, staging.block)
+    try vulkan_transfer_begin(device)
+    vulkan_transition(device.command, state, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
+    var copy = vulkan_copy_region(region)
+    vkCmdCopyBufferToImage(device.command, staging.buffer, state.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy)
+    vulkan_transition(device.command, state, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+    try vulkan_transfer_end(device)
+
+func vulkan_texture_read(device: VulkanDevice*, state: VulkanTexture*, pixels: u8[], region: Region) -> !:
+    let staging = try vulkan_staging(device, pixels.length, VK_BUFFER_USAGE_TRANSFER_DST_BIT)
+    defer vulkan_staging_destroy(device, staging)
+    try vulkan_transfer_begin(device)
+    vulkan_transition(device.command, state, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL)
+    var copy = vulkan_copy_region(region)
+    vkCmdCopyImageToBuffer(device.command, state.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging.buffer, 1, &copy)
+    vulkan_transition(device.command, state, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+    try vulkan_transfer_end(device)
+    var mapped: void*? = none
+    try vulkan_check(vkMapMemory(device.device, staging.block, 0, (u64)pixels.length, 0, &mapped), "Vulkan readback memory could not be mapped")
+    let source = mapped else error(failed, "Vulkan returned an empty memory mapping")
+    memory.copy(pixels, u8[]((u8*)source, pixels.length), pixels.length)
+    vkUnmapMemory(device.device, staging.block)
+
+## Render `canvas` into the image cleared to `color` and wait for it. The pass
+## leaves the image ready for sampling.
+func vulkan_texture_render(device: VulkanDevice*, state: VulkanTexture*, canvas: Canvas, color: Color) -> !:
+    let formats = try vulkan_format_state(device, state.native_format)
+    let depth = try vulkan_depth_for(device, state.width, state.height)
+    var attachments: u64[2] = [state.view, depth]
+    var framebuffer_info = VkFramebufferCreateInfo(sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+                                                   renderPass = formats.pass_texture, attachmentCount = 2, pAttachments = &attachments[0], width = state.width, height = state.height, layers = 1)
+    var framebuffer: u64 = 0
+    try vulkan_check(vkCreateFramebuffer(device.device, &framebuffer_info, none, &framebuffer), "a Vulkan framebuffer could not be created")
+    defer vkDestroyFramebuffer(device.device, framebuffer, none)
+    let upload = try vulkan_upload(device, canvas)
+    defer vulkan_upload_destroy(device, upload)
+    try vulkan_transfer_begin(device)
+    # The pass begins from an undefined layout and clears; only the bookkeeping moves.
+    state.layout = VK_IMAGE_LAYOUT_UNDEFINED
+    try vulkan_encode(device, device.command, formats, formats.pass_texture, framebuffer, canvas, upload, color, state.width, state.height)
+    state.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+    try vulkan_transfer_end(device)

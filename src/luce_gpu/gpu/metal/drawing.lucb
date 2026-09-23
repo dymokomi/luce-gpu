@@ -1,0 +1,265 @@
+#==============================================================================================
+#
+#   drawing - The Metal drawing pipelines
+#
+#   DESCRIPTION:
+#       Backend implementation of the portable drawing contract, shared by every surface and
+#       texture of a device: one shader library, one pipeline per color format, the depth
+#       states, the two samplers, a placeholder texture for draws that sample nothing, and a
+#       cached depth attachment. The vertex input uses eight scalar floats, avoiding native
+#       vector alignment in the ABI. Applications never supply Metal source or native pipeline
+#       objects.
+#
+#==============================================================================================
+
+## Pipeline slots: 0 is the BGRA8 sRGB presentation format, 1.. follow `Format`.
+let metal_slot_count: usize = 5
+
+struct MetalDrawing:
+    # The vertex library and the built-in fill fragment library.
+    var library: void*?
+    var fill: void*?
+    var pipelines: void*?[5]
+    var depth_on: void*?
+    var depth_off: void*?
+    var nearest: void*?
+    var linear: void*?
+    var placeholder: void*?
+    var depth_texture: void*?
+    var width: u64
+    var height: u64
+
+func metal_text(value: c.str) -> void*!:
+    return metal_string(try metal_class("NSString"), metal_sel("stringWithUTF8String:"), value) else error(failed, "could not create Metal shader text")
+
+## The MTLPixelFormat of a pipeline slot.
+func metal_slot_format(slot: usize) -> u64:
+    if slot == 1: return 71  # RGBA8Unorm_sRGB
+    if slot == 2: return 70  # RGBA8Unorm
+    if slot == 3: return 115  # RGBA16Float
+    if slot == 4: return 10  # R8Unorm
+    return 81  # BGRA8Unorm_sRGB
+
+func metal_format_slot(pixel_format: Format) -> usize:
+    return (usize)pixel_format + 1
+
+## The one vertex stage: eight scalar floats per vertex from buffer 0, passed
+## through with the color at user location 0 for every fragment program.
+let metal_vertex_source: c.str = "#include <metal_stdlib>\nusing namespace metal;\nstruct V { float4 position [[position]]; float4 color [[user(locn0)]]; };\nvertex V luce_vertex(const device float* data [[buffer(0)]], uint id [[vertex_id]]) {\n uint i=id*8; V v; v.position=float4(data[i],data[i+1],data[i+2],data[i+3]); v.color=float4(data[i+4],data[i+5],data[i+6],data[i+7]); return v;\n}"
+
+func metal_drawing_open(device: MetalDevice*) -> MetalDrawing*!:
+    let state = try new MetalDrawing() in memory.heap
+    errdefer metal_drawing_destroy(state)
+    let native = metal_required(device.device)
+    state.library = try metal_compile(native, metal_vertex_source)
+    state.fill = try metal_compile(native, fill_frag_msl)
+    let depth = metal_ptr(try metal_class("MTLDepthStencilDescriptor"), metal_sel("new")) else error(failed, "could not create a GPU depth descriptor")
+    defer metal_void(depth, metal_sel("release"))
+    metal_uint_arg(depth, metal_sel("setDepthCompareFunction:"), 1)
+    metal_bool_arg(depth, metal_sel("setDepthWriteEnabled:"), true)
+    state.depth_on = metal_with_object(native, metal_sel("newDepthStencilStateWithDescriptor:"), depth) else error(failed, "could not create GPU depth testing")
+    metal_uint_arg(depth, metal_sel("setDepthCompareFunction:"), 7)
+    metal_bool_arg(depth, metal_sel("setDepthWriteEnabled:"), false)
+    state.depth_off = metal_with_object(native, metal_sel("newDepthStencilStateWithDescriptor:"), depth) else error(failed, "could not create GPU overlay state")
+    state.nearest = try metal_sampler(native, 0)
+    state.linear = try metal_sampler(native, 1)
+    # Every draw binds a texture; one opaque texel stands in for draws that sample none.
+    let placeholder = try metal_texture_create(device, 1, 1, Format.rgba8_linear)
+    var white: u8[4] = [255, 255, 255, 255]
+    metal_texture_upload(device, placeholder, white, Region(0, 0, 1, 1)) catch problem:
+        metal_texture_destroy(placeholder)
+        error(problem.code, problem.message)
+    state.placeholder = placeholder.texture
+    free(placeholder) in memory.heap
+    return state
+
+func metal_sampler(device: void*, filter: u64) -> void*!:
+    let descriptor = metal_ptr(try metal_class("MTLSamplerDescriptor"), metal_sel("new")) else error(failed, "could not create a GPU sampler descriptor")
+    defer metal_void(descriptor, metal_sel("release"))
+    metal_uint_arg(descriptor, metal_sel("setMinFilter:"), filter)
+    metal_uint_arg(descriptor, metal_sel("setMagFilter:"), filter)
+    # MTLSamplerAddressModeClampToEdge on both axes.
+    metal_uint_arg(descriptor, metal_sel("setSAddressMode:"), 0)
+    metal_uint_arg(descriptor, metal_sel("setTAddressMode:"), 0)
+    return metal_with_object(device, metal_sel("newSamplerStateWithDescriptor:"), descriptor) else error(failed, "could not create a GPU sampler")
+
+## The device's drawing state, compiled on first use.
+func metal_drawing(device: MetalDevice*) -> MetalDrawing*!:
+    if let drawing = device.drawing:
+        return drawing
+    let drawing = try metal_drawing_open(device)
+    device.drawing = drawing
+    return drawing
+
+## Compile one Metal source into a library.
+func metal_compile(native: void*, source: c.str) -> void*!:
+    var failure: void*? = none
+    return metal_library(native, metal_sel("newLibraryWithSource:options:error:"), try metal_text(source), none, &failure) else error(invalid_shader, "could not compile the Metal shader source")
+
+## The built-in pipeline rendering into color attachments of `slot`, built on first use.
+func metal_pipeline_for(device: MetalDevice*, drawing: MetalDrawing*, slot: usize) -> void*!:
+    if let pipeline = drawing.pipelines[slot]:
+        return pipeline
+    let pipeline = try metal_build_pipeline(device, drawing, metal_required(drawing.fill), Blend.over, slot)
+    drawing.pipelines[slot] = pipeline
+    return pipeline
+
+## A pipeline of the vertex stage, `fragment_library`'s `luce_fragment`, and `blend`,
+## rendering into color attachments of `slot`.
+func metal_build_pipeline(device: MetalDevice*, drawing: MetalDrawing*, fragment_library: void*, blend: Blend, slot: usize) -> void*!:
+    let native = metal_required(device.device)
+    let vertex = metal_with_object(metal_required(drawing.library), metal_sel("newFunctionWithName:"), try metal_text("luce_vertex")) else error(failed, "the GPU vertex entry is missing")
+    defer metal_void(vertex, metal_sel("release"))
+    let fragment = metal_with_object(fragment_library, metal_sel("newFunctionWithName:"), try metal_text("luce_fragment")) else error(invalid_shader, "the fragment shader has no luce_fragment entry")
+    defer metal_void(fragment, metal_sel("release"))
+    let descriptor = metal_ptr(try metal_class("MTLRenderPipelineDescriptor"), metal_sel("new")) else error(failed, "could not create a GPU pipeline descriptor")
+    defer metal_void(descriptor, metal_sel("release"))
+    metal_object(descriptor, metal_sel("setVertexFunction:"), vertex)
+    metal_object(descriptor, metal_sel("setFragmentFunction:"), fragment)
+    metal_uint_arg(descriptor, metal_sel("setDepthAttachmentPixelFormat:"), 252)
+    let attachments = metal_required(metal_ptr(descriptor, metal_sel("colorAttachments")))
+    let color = metal_required(metal_index(attachments, metal_sel("objectAtIndexedSubscript:"), 0))
+    metal_uint_arg(color, metal_sel("setPixelFormat:"), metal_slot_format(slot))
+    # Fragments emit premultiplied color. Factors: 1 = One, 5 = OneMinusSourceAlpha.
+    metal_bool_arg(color, metal_sel("setBlendingEnabled:"), blend != Blend.replace)
+    metal_uint_arg(color, metal_sel("setSourceRGBBlendFactor:"), 1)
+    metal_uint_arg(color, metal_sel("setDestinationRGBBlendFactor:"), 1 if blend == Blend.add else 5)
+    metal_uint_arg(color, metal_sel("setSourceAlphaBlendFactor:"), 1)
+    metal_uint_arg(color, metal_sel("setDestinationAlphaBlendFactor:"), 1 if blend == Blend.add else 5)
+    var failure: void*? = none
+    return metal_pipeline(native, metal_sel("newRenderPipelineStateWithDescriptor:error:"), descriptor, &failure) else error(invalid_shader, "could not build a pipeline from the fragment shader")
+
+# mark: Client shaders and pipelines ===========================================================
+
+func metal_shader_create(device: MetalDevice*, msl: c.str) -> void*!:
+    let pool = objc_autoreleasePoolPush()
+    defer objc_autoreleasePoolPop(pool)
+    return try metal_compile(metal_required(device.device), msl)
+
+func metal_shader_destroy(library: void*):
+    metal_void(library, metal_sel("release"))
+
+func metal_pipeline_create(device: MetalDevice*, library: void*, blend: Blend, pixel_format: Format?) -> void*!:
+    let pool = objc_autoreleasePoolPush()
+    defer objc_autoreleasePoolPop(pool)
+    let drawing = try metal_drawing(device)
+    var slot: usize = 0
+    if let target = pixel_format:
+        slot = metal_format_slot(target)
+    return try metal_build_pipeline(device, drawing, library, blend, slot)
+
+func metal_pipeline_destroy(pipeline: void*):
+    metal_void(pipeline, metal_sel("release"))
+
+func metal_depth(device: MetalDevice*, state: MetalDrawing*, width: u64, height: u64) -> void*!:
+    if state.width == width and state.height == height:
+        return metal_required(state.depth_texture)
+    let descriptor = metal_ptr(try metal_class("MTLTextureDescriptor"), metal_sel("new")) else error(failed, "could not create a GPU depth texture descriptor")
+    defer metal_void(descriptor, metal_sel("release"))
+    metal_uint_arg(descriptor, metal_sel("setTextureType:"), 2)
+    metal_uint_arg(descriptor, metal_sel("setPixelFormat:"), 252)
+    metal_uint_arg(descriptor, metal_sel("setWidth:"), width)
+    metal_uint_arg(descriptor, metal_sel("setHeight:"), height)
+    metal_uint_arg(descriptor, metal_sel("setStorageMode:"), 2)
+    metal_uint_arg(descriptor, metal_sel("setUsage:"), 4)
+    let texture = metal_with_object(metal_required(device.device), metal_sel("newTextureWithDescriptor:"), descriptor) else error(failed, "could not allocate GPU depth storage")
+    if let previous = state.depth_texture:
+        metal_void(previous, metal_sel("release"))
+    state.depth_texture = texture
+    state.width = width
+    state.height = height
+    return texture
+
+func metal_drawing_destroy(state: MetalDrawing*):
+    if let texture = state.depth_texture:
+        metal_void(texture, metal_sel("release"))
+    if let texture = state.placeholder:
+        metal_void(texture, metal_sel("release"))
+    for pipeline in state.pipelines:
+        if let value = pipeline:
+            metal_void(value, metal_sel("release"))
+    for object in [state.depth_on, state.depth_off, state.nearest, state.linear, state.library, state.fill]:
+        if let value = object:
+            metal_void(value, metal_sel("release"))
+    free(state) in memory.heap
+
+## Record `canvas` into `target` (a color texture of `slot`'s format) cleared to
+## `color`, on a new command buffer that the caller commits.
+func metal_pass(device: MetalDevice*, target: void*, slot: usize, canvas: Canvas, color: Color, width: u64, height: u64) -> void*!:
+    let descriptor = metal_ptr(try metal_class("MTLRenderPassDescriptor"), metal_sel("renderPassDescriptor")) else error(failed, "could not create a Metal render pass")
+    let attachments = metal_required(metal_ptr(descriptor, metal_sel("colorAttachments")))
+    let attachment = metal_required(metal_index(attachments, metal_sel("objectAtIndexedSubscript:"), 0))
+    metal_object(attachment, metal_sel("setTexture:"), target)
+    metal_uint_arg(attachment, metal_sel("setLoadAction:"), 2)
+    metal_uint_arg(attachment, metal_sel("setStoreAction:"), 1)
+    metal_color_arg(attachment, metal_sel("setClearColor:"), LuceGpuMetalClearColor(red = color.red * color.alpha, green = color.green * color.alpha, blue = color.blue * color.alpha, alpha = color.alpha))
+    var masks: void*? = none
+    defer metal_release_slot(&masks)
+    var buffer: void*? = none
+    defer metal_release_slot(&buffer)
+    var drawing: MetalDrawing*? = none
+    if canvas.vertex_count > 0:
+        let state = try metal_drawing(device)
+        drawing = state
+        let depth = metal_required(metal_ptr(descriptor, metal_sel("depthAttachment")))
+        metal_object(depth, metal_sel("setTexture:"), try metal_depth(device, state, width, height))
+        metal_uint_arg(depth, metal_sel("setLoadAction:"), 2)
+        metal_uint_arg(depth, metal_sel("setStoreAction:"), 0)
+        metal_double_arg(depth, metal_sel("setClearDepth:"), 1.0)
+        buffer = metal_buffer(metal_required(device.device), metal_sel("newBufferWithBytes:length:options:"), canvas.vertices.data, (u64)(canvas.vertex_count * 32), 0) else error(failed, "could not upload GPU triangle data")
+        var empty: u32 = 0
+        let source = canvas.coverage.data if canvas.coverage_count > 0 else &empty
+        masks = metal_buffer(metal_required(device.device), metal_sel("newBufferWithBytes:length:options:"), source, (u64)(canvas_max(1, canvas.coverage_count) * 4), 0) else error(failed, "could not upload GPU coverage")
+    let command = metal_ptr(metal_required(device.queue), metal_sel("commandBuffer")) else error(failed, "could not create a Metal command buffer")
+    let encoder = metal_with_object(command, metal_sel("renderCommandEncoderWithDescriptor:"), descriptor) else error(failed, "could not create a Metal render encoder")
+    if let state = drawing:
+        let pipeline = metal_pipeline_for(device, state, slot) catch failure:
+            metal_void(encoder, metal_sel("endEncoding"))
+            error(failure.code, failure.message)
+        metal_encode(encoder, state, pipeline, metal_required(buffer), metal_required(masks), canvas, width, height)
+    metal_void(encoder, metal_sel("endEncoding"))
+    return command
+
+func metal_encode(encoder: void*, drawing: MetalDrawing*, pipeline: void*, buffer: void*, masks: void*, canvas: Canvas, width: u64, height: u64):
+    metal_bind_buffer(encoder, metal_sel("setVertexBuffer:offset:atIndex:"), buffer, 0, 0)
+    metal_bind_buffer(encoder, metal_sel("setFragmentBuffer:offset:atIndex:"), masks, 0, 5)
+    for draw in canvas.draws[..<canvas.draw_count]:
+        let x = metal_min((u64)draw.clip.x, width)
+        let y = metal_min((u64)draw.clip.y, height)
+        let w = metal_min((u64)draw.clip.width, width - x)
+        let h = metal_min((u64)draw.clip.height, height - y)
+        if w == 0 or h == 0:
+            continue
+        let region = draw.viewport else Viewport(width = (f64)width, height = (f64)height)
+        metal_viewport(encoder, metal_sel("setViewport:"), LuceGpuMetalViewport(x = region.x, y = region.y, width = region.width, height = region.height, near = 0.0, far = 1.0))
+        metal_scissor(encoder, metal_sel("setScissorRect:"), LuceGpuMetalScissor(x = x, y = y, width = w, height = h))
+        metal_object(encoder, metal_sel("setDepthStencilState:"), drawing.depth_on if draw.depth else drawing.depth_off)
+        var selected = pipeline
+        if let custom = draw.pipeline:
+            selected = custom.native
+        metal_object(encoder, metal_sel("setRenderPipelineState:"), selected)
+        if draw.uniform_count > 0:
+            var uniforms = draw.uniforms
+            # The whole zero-padded block: the shader's struct may be padded past the bytes given.
+            metal_inline_bytes(encoder, metal_sel("setFragmentBytes:length:atIndex:"), &uniforms, (u64)uniform_limit, 0)
+        else:
+            var params = draw.params
+            metal_inline_bytes(encoder, metal_sel("setFragmentBytes:length:atIndex:"), &params, 48, 0)
+        let sampler = metal_required(drawing.linear if draw.filter == Filter.linear else drawing.nearest)
+        for index in 0..<image_limit:
+            var image = metal_required(drawing.placeholder)
+            if let texture = draw.images[index]:
+                image = metal_required(((MetalTexture*)texture.native).texture)
+            metal_bind_texture(encoder, metal_sel("setFragmentTexture:atIndex:"), image, (u64)index + 1)
+            metal_bind_texture(encoder, metal_sel("setFragmentSamplerState:atIndex:"), sampler, (u64)index + 1)
+        metal_draw(encoder, metal_sel("drawPrimitives:vertexStart:vertexCount:"), 3, (u64)draw.first, (u64)draw.count)
+
+func metal_min(a: u64, b: u64) -> u64:
+    return a if a < b else b
+
+func metal_release_slot(object: void*?*):
+    if let value = *object:
+        metal_void(value, metal_sel("release"))
+
+extern func metal_inline_bytes as "objc_msgSend"(object: void*, selector: void*, bytes: const void*, length: u64, index: u64)
+extern func metal_bind_texture as "objc_msgSend"(object: void*, selector: void*, value: void*, index: u64)

@@ -1,0 +1,942 @@
+#==============================================================================================
+#
+#   bindings - Vulkan structures, handles and functions from the Khronos registry
+#
+#   DESCRIPTION:
+#       Generated from the Khronos Vulkan registry by tools/generate_vulkan.py.
+#       Handles use the 64-bit Vulkan ABI; no Vulkan headers are required.
+#
+#==============================================================================================
+
+# mark: Vulkan bindings =======================================================================
+
+let VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT: u32 = 256
+let VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT: u32 = 1024
+let VK_ATTACHMENT_LOAD_OP_CLEAR: u32 = 1
+let VK_ATTACHMENT_LOAD_OP_DONT_CARE: u32 = 2
+let VK_ATTACHMENT_STORE_OP_DONT_CARE: u32 = 1
+let VK_ATTACHMENT_STORE_OP_STORE: u32 = 0
+let VK_BLEND_FACTOR_ONE: u32 = 1
+let VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA: u32 = 7
+let VK_BLEND_FACTOR_SRC_ALPHA: u32 = 6
+let VK_BUFFER_USAGE_STORAGE_BUFFER_BIT: u32 = 32
+let VK_BUFFER_USAGE_VERTEX_BUFFER_BIT: u32 = 128
+let VK_COLOR_COMPONENT_A_BIT: u32 = 8
+let VK_COLOR_COMPONENT_B_BIT: u32 = 4
+let VK_COLOR_COMPONENT_G_BIT: u32 = 2
+let VK_COLOR_COMPONENT_R_BIT: u32 = 1
+let VK_COLOR_SPACE_SRGB_NONLINEAR_KHR: u32 = 0
+let VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT: u32 = 1
+let VK_COMPARE_OP_LESS: u32 = 1
+let VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR: u32 = 1
+let VK_DESCRIPTOR_TYPE_STORAGE_BUFFER: u32 = 7
+let VK_DYNAMIC_STATE_SCISSOR: u32 = 1
+let VK_DYNAMIC_STATE_VIEWPORT: u32 = 0
+let VK_ERROR_OUT_OF_DATE_KHR: i32 = -1000001004
+let VK_FALSE: u32 = 0
+let VK_FORMAT_B8G8R8A8_SRGB: u32 = 50
+let VK_FORMAT_D32_SFLOAT: u32 = 126
+let VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT: u32 = 512
+let VK_FORMAT_R32G32B32A32_SFLOAT: u32 = 109
+let VK_FORMAT_R8G8B8A8_SRGB: u32 = 43
+let VK_FORMAT_UNDEFINED: u32 = 0
+let VK_IMAGE_ASPECT_COLOR_BIT: u32 = 1
+let VK_IMAGE_ASPECT_DEPTH_BIT: u32 = 2
+let VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL: u32 = 2
+let VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL: u32 = 3
+let VK_IMAGE_LAYOUT_PRESENT_SRC_KHR: u32 = 1000001002
+let VK_IMAGE_TYPE_2D: u32 = 1
+let VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT: u32 = 16
+let VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT: u32 = 32
+let VK_IMAGE_VIEW_TYPE_2D: u32 = 1
+let VK_KHR_SURFACE_EXTENSION_NAME: c.str = "VK_KHR_surface"
+let VK_KHR_SWAPCHAIN_EXTENSION_NAME: c.str = "VK_KHR_swapchain"
+let VK_KHR_WIN32_SURFACE_EXTENSION_NAME: c.str = "VK_KHR_win32_surface"
+let VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT: u32 = 1
+let VK_MEMORY_PROPERTY_HOST_COHERENT_BIT: u32 = 4
+let VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT: u32 = 2
+let VK_NOT_READY: i32 = 1
+let VK_PIPELINE_BIND_POINT_GRAPHICS: u32 = 0
+let VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT: u32 = 1024
+let VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT: u32 = 256
+let VK_PRESENT_MODE_FIFO_KHR: u32 = 2
+let VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST: u32 = 3
+let VK_QUEUE_GRAPHICS_BIT: u32 = 1
+let VK_SAMPLE_COUNT_1_BIT: u32 = 1
+let VK_SHADER_STAGE_FRAGMENT_BIT: u32 = 16
+let VK_SHADER_STAGE_VERTEX_BIT: u32 = 1
+let VK_SUBOPTIMAL_KHR: i32 = 1000001003
+let VK_SUBPASS_CONTENTS_INLINE: u32 = 0
+let VK_SUBPASS_EXTERNAL: u32 = 4294967295
+let VK_SUCCESS: i32 = 0
+let VK_TIMEOUT: i32 = 2
+let VK_TRUE: u32 = 1
+
+extern struct VkApplicationInfo:
+    sType: u32
+    pNext: void*?
+    pApplicationName: c.str
+    applicationVersion: u32
+    pEngineName: c.str
+    engineVersion: u32
+    apiVersion: u32
+
+let VK_STRUCTURE_TYPE_APPLICATION_INFO: u32 = 0
+
+extern struct VkAttachmentDescription:
+    flags: u32
+    format: u32
+    samples: u32
+    loadOp: u32
+    storeOp: u32
+    stencilLoadOp: u32
+    stencilStoreOp: u32
+    initialLayout: u32
+    finalLayout: u32
+
+extern struct VkAttachmentReference:
+    attachment: u32
+    layout: u32
+
+extern struct VkBufferCreateInfo:
+    sType: u32
+    pNext: void*?
+    flags: u32
+    size: u64
+    usage: u32
+    sharingMode: u32
+    queueFamilyIndexCount: u32
+    pQueueFamilyIndices: u32*?
+
+let VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO: u32 = 12
+
+extern struct VkClearDepthStencilValue:
+    depth: f32
+    stencil: u32
+
+extern struct VkClearValue:
+    color: f32[4]
+
+extern struct VkCommandBufferAllocateInfo:
+    sType: u32
+    pNext: void*?
+    commandPool: u64
+    level: u32
+    commandBufferCount: u32
+
+let VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO: u32 = 40
+
+extern struct VkCommandBufferBeginInfo:
+    sType: u32
+    pNext: void*?
+    flags: u32
+    pInheritanceInfo: VkCommandBufferInheritanceInfo*?
+
+let VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO: u32 = 42
+
+extern struct VkCommandBufferInheritanceInfo:
+    sType: u32
+    pNext: void*?
+    renderPass: u64
+    subpass: u32
+    framebuffer: u64
+    occlusionQueryEnable: u32
+    queryFlags: u32
+    pipelineStatistics: u32
+
+let VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO: u32 = 41
+
+extern struct VkCommandPoolCreateInfo:
+    sType: u32
+    pNext: void*?
+    flags: u32
+    queueFamilyIndex: u32
+
+let VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO: u32 = 39
+
+extern struct VkComponentMapping:
+    r: u32
+    g: u32
+    b: u32
+    a: u32
+
+extern struct VkCopyDescriptorSet:
+    sType: u32
+    pNext: void*?
+    srcSet: u64
+    srcBinding: u32
+    srcArrayElement: u32
+    dstSet: u64
+    dstBinding: u32
+    dstArrayElement: u32
+    descriptorCount: u32
+
+let VK_STRUCTURE_TYPE_COPY_DESCRIPTOR_SET: u32 = 36
+
+extern struct VkDescriptorBufferInfo:
+    buffer: u64
+    offset: u64
+    range: u64
+
+extern struct VkDescriptorImageInfo:
+    sampler: u64
+    imageView: u64
+    imageLayout: u32
+
+extern struct VkDescriptorPoolCreateInfo:
+    sType: u32
+    pNext: void*?
+    flags: u32
+    maxSets: u32
+    poolSizeCount: u32
+    pPoolSizes: VkDescriptorPoolSize*?
+
+let VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO: u32 = 33
+
+extern struct VkDescriptorPoolSize:
+    descriptorType: u32
+    descriptorCount: u32
+
+extern struct VkDescriptorSetAllocateInfo:
+    sType: u32
+    pNext: void*?
+    descriptorPool: u64
+    descriptorSetCount: u32
+    pSetLayouts: u64*?
+
+let VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO: u32 = 34
+
+extern struct VkDescriptorSetLayoutBinding:
+    binding: u32
+    descriptorType: u32
+    descriptorCount: u32
+    stageFlags: u32
+    pImmutableSamplers: u64*?
+
+extern struct VkDescriptorSetLayoutCreateInfo:
+    sType: u32
+    pNext: void*?
+    flags: u32
+    bindingCount: u32
+    pBindings: VkDescriptorSetLayoutBinding*?
+
+let VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO: u32 = 32
+
+extern struct VkDeviceCreateInfo:
+    sType: u32
+    pNext: void*?
+    flags: u32
+    queueCreateInfoCount: u32
+    pQueueCreateInfos: VkDeviceQueueCreateInfo*?
+    enabledLayerCount: u32
+    ppEnabledLayerNames: c.str*?
+    enabledExtensionCount: u32
+    ppEnabledExtensionNames: c.str*?
+    pEnabledFeatures: VkPhysicalDeviceFeatures*?
+
+let VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO: u32 = 3
+
+extern struct VkDeviceQueueCreateInfo:
+    sType: u32
+    pNext: void*?
+    flags: u32
+    queueFamilyIndex: u32
+    queueCount: u32
+    pQueuePriorities: f32*?
+
+let VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO: u32 = 2
+
+extern struct VkExtent2D:
+    width: u32
+    height: u32
+
+extern struct VkExtent3D:
+    width: u32
+    height: u32
+    depth: u32
+
+extern struct VkFenceCreateInfo:
+    sType: u32
+    pNext: void*?
+    flags: u32
+
+let VK_STRUCTURE_TYPE_FENCE_CREATE_INFO: u32 = 8
+
+extern struct VkFormatProperties:
+    linearTilingFeatures: u32
+    optimalTilingFeatures: u32
+    bufferFeatures: u32
+
+extern struct VkFramebufferCreateInfo:
+    sType: u32
+    pNext: void*?
+    flags: u32
+    renderPass: u64
+    attachmentCount: u32
+    pAttachments: u64*?
+    width: u32
+    height: u32
+    layers: u32
+
+let VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO: u32 = 37
+
+extern struct VkGraphicsPipelineCreateInfo:
+    sType: u32
+    pNext: void*?
+    flags: u32
+    stageCount: u32
+    pStages: VkPipelineShaderStageCreateInfo*?
+    pVertexInputState: VkPipelineVertexInputStateCreateInfo*?
+    pInputAssemblyState: VkPipelineInputAssemblyStateCreateInfo*?
+    pTessellationState: VkPipelineTessellationStateCreateInfo*?
+    pViewportState: VkPipelineViewportStateCreateInfo*?
+    pRasterizationState: VkPipelineRasterizationStateCreateInfo*?
+    pMultisampleState: VkPipelineMultisampleStateCreateInfo*?
+    pDepthStencilState: VkPipelineDepthStencilStateCreateInfo*?
+    pColorBlendState: VkPipelineColorBlendStateCreateInfo*?
+    pDynamicState: VkPipelineDynamicStateCreateInfo*?
+    layout: u64
+    renderPass: u64
+    subpass: u32
+    basePipelineHandle: u64
+    basePipelineIndex: i32
+
+let VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO: u32 = 28
+
+extern struct VkImageCreateInfo:
+    sType: u32
+    pNext: void*?
+    flags: u32
+    imageType: u32
+    format: u32
+    extent: VkExtent3D
+    mipLevels: u32
+    arrayLayers: u32
+    samples: u32
+    tiling: u32
+    usage: u32
+    sharingMode: u32
+    queueFamilyIndexCount: u32
+    pQueueFamilyIndices: u32*?
+    initialLayout: u32
+
+let VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO: u32 = 14
+
+extern struct VkImageSubresourceRange:
+    aspectMask: u32
+    baseMipLevel: u32
+    levelCount: u32
+    baseArrayLayer: u32
+    layerCount: u32
+
+extern struct VkImageViewCreateInfo:
+    sType: u32
+    pNext: void*?
+    flags: u32
+    image: u64
+    viewType: u32
+    format: u32
+    components: VkComponentMapping
+    subresourceRange: VkImageSubresourceRange
+
+let VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO: u32 = 15
+
+extern struct VkInstanceCreateInfo:
+    sType: u32
+    pNext: void*?
+    flags: u32
+    pApplicationInfo: VkApplicationInfo*?
+    enabledLayerCount: u32
+    ppEnabledLayerNames: c.str*?
+    enabledExtensionCount: u32
+    ppEnabledExtensionNames: c.str*?
+
+let VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO: u32 = 1
+
+extern struct VkMemoryAllocateInfo:
+    sType: u32
+    pNext: void*?
+    allocationSize: u64
+    memoryTypeIndex: u32
+
+let VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO: u32 = 5
+
+extern struct VkMemoryHeap:
+    size: u64
+    flags: u32
+
+extern struct VkMemoryRequirements:
+    size: u64
+    alignment: u64
+    memoryTypeBits: u32
+
+extern struct VkMemoryType:
+    propertyFlags: u32
+    heapIndex: u32
+
+extern struct VkOffset2D:
+    x: i32
+    y: i32
+
+extern struct VkPhysicalDeviceFeatures:
+    robustBufferAccess: u32
+    fullDrawIndexUint32: u32
+    imageCubeArray: u32
+    independentBlend: u32
+    geometryShader: u32
+    tessellationShader: u32
+    sampleRateShading: u32
+    dualSrcBlend: u32
+    logicOp: u32
+    multiDrawIndirect: u32
+    drawIndirectFirstInstance: u32
+    depthClamp: u32
+    depthBiasClamp: u32
+    fillModeNonSolid: u32
+    depthBounds: u32
+    wideLines: u32
+    largePoints: u32
+    alphaToOne: u32
+    multiViewport: u32
+    samplerAnisotropy: u32
+    textureCompressionETC2: u32
+    textureCompressionASTC_LDR: u32
+    textureCompressionBC: u32
+    occlusionQueryPrecise: u32
+    pipelineStatisticsQuery: u32
+    vertexPipelineStoresAndAtomics: u32
+    fragmentStoresAndAtomics: u32
+    shaderTessellationAndGeometryPointSize: u32
+    shaderImageGatherExtended: u32
+    shaderStorageImageExtendedFormats: u32
+    shaderStorageImageMultisample: u32
+    shaderStorageImageReadWithoutFormat: u32
+    shaderStorageImageWriteWithoutFormat: u32
+    shaderUniformBufferArrayDynamicIndexing: u32
+    shaderSampledImageArrayDynamicIndexing: u32
+    shaderStorageBufferArrayDynamicIndexing: u32
+    shaderStorageImageArrayDynamicIndexing: u32
+    shaderClipDistance: u32
+    shaderCullDistance: u32
+    shaderFloat64: u32
+    shaderInt64: u32
+    shaderInt16: u32
+    shaderResourceResidency: u32
+    shaderResourceMinLod: u32
+    sparseBinding: u32
+    sparseResidencyBuffer: u32
+    sparseResidencyImage2D: u32
+    sparseResidencyImage3D: u32
+    sparseResidency2Samples: u32
+    sparseResidency4Samples: u32
+    sparseResidency8Samples: u32
+    sparseResidency16Samples: u32
+    sparseResidencyAliased: u32
+    variableMultisampleRate: u32
+    inheritedQueries: u32
+
+extern struct VkPhysicalDeviceMemoryProperties:
+    memoryTypeCount: u32
+    memoryTypes: VkMemoryType[32]
+    memoryHeapCount: u32
+    memoryHeaps: VkMemoryHeap[16]
+
+extern struct VkPipelineColorBlendAttachmentState:
+    blendEnable: u32
+    srcColorBlendFactor: u32
+    dstColorBlendFactor: u32
+    colorBlendOp: u32
+    srcAlphaBlendFactor: u32
+    dstAlphaBlendFactor: u32
+    alphaBlendOp: u32
+    colorWriteMask: u32
+
+extern struct VkPipelineColorBlendStateCreateInfo:
+    sType: u32
+    pNext: void*?
+    flags: u32
+    logicOpEnable: u32
+    logicOp: u32
+    attachmentCount: u32
+    pAttachments: VkPipelineColorBlendAttachmentState*?
+    blendConstants: f32[4]
+
+let VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO: u32 = 26
+
+extern struct VkPipelineDepthStencilStateCreateInfo:
+    sType: u32
+    pNext: void*?
+    flags: u32
+    depthTestEnable: u32
+    depthWriteEnable: u32
+    depthCompareOp: u32
+    depthBoundsTestEnable: u32
+    stencilTestEnable: u32
+    front: VkStencilOpState
+    back: VkStencilOpState
+    minDepthBounds: f32
+    maxDepthBounds: f32
+
+let VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO: u32 = 25
+
+extern struct VkPipelineDynamicStateCreateInfo:
+    sType: u32
+    pNext: void*?
+    flags: u32
+    dynamicStateCount: u32
+    pDynamicStates: u32*?
+
+let VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO: u32 = 27
+
+extern struct VkPipelineInputAssemblyStateCreateInfo:
+    sType: u32
+    pNext: void*?
+    flags: u32
+    topology: u32
+    primitiveRestartEnable: u32
+
+let VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO: u32 = 20
+
+extern struct VkPipelineLayoutCreateInfo:
+    sType: u32
+    pNext: void*?
+    flags: u32
+    setLayoutCount: u32
+    pSetLayouts: u64*?
+    pushConstantRangeCount: u32
+    pPushConstantRanges: VkPushConstantRange*?
+
+let VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO: u32 = 30
+
+extern struct VkPipelineMultisampleStateCreateInfo:
+    sType: u32
+    pNext: void*?
+    flags: u32
+    rasterizationSamples: u32
+    sampleShadingEnable: u32
+    minSampleShading: f32
+    pSampleMask: u32*?
+    alphaToCoverageEnable: u32
+    alphaToOneEnable: u32
+
+let VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO: u32 = 24
+
+extern struct VkPipelineRasterizationStateCreateInfo:
+    sType: u32
+    pNext: void*?
+    flags: u32
+    depthClampEnable: u32
+    rasterizerDiscardEnable: u32
+    polygonMode: u32
+    cullMode: u32
+    frontFace: u32
+    depthBiasEnable: u32
+    depthBiasConstantFactor: f32
+    depthBiasClamp: f32
+    depthBiasSlopeFactor: f32
+    lineWidth: f32
+
+let VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO: u32 = 23
+
+extern struct VkPipelineShaderStageCreateInfo:
+    sType: u32
+    pNext: void*?
+    flags: u32
+    stage: u32
+    module: u64
+    pName: c.str
+    pSpecializationInfo: VkSpecializationInfo*?
+
+let VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO: u32 = 18
+
+extern struct VkPipelineTessellationStateCreateInfo:
+    sType: u32
+    pNext: void*?
+    flags: u32
+    patchControlPoints: u32
+
+let VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO: u32 = 21
+
+extern struct VkPipelineVertexInputStateCreateInfo:
+    sType: u32
+    pNext: void*?
+    flags: u32
+    vertexBindingDescriptionCount: u32
+    pVertexBindingDescriptions: VkVertexInputBindingDescription*?
+    vertexAttributeDescriptionCount: u32
+    pVertexAttributeDescriptions: VkVertexInputAttributeDescription*?
+
+let VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO: u32 = 19
+
+extern struct VkPipelineViewportStateCreateInfo:
+    sType: u32
+    pNext: void*?
+    flags: u32
+    viewportCount: u32
+    pViewports: VkViewport*?
+    scissorCount: u32
+    pScissors: VkRect2D*?
+
+let VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO: u32 = 22
+
+extern struct VkPresentInfoKHR:
+    sType: u32
+    pNext: void*?
+    waitSemaphoreCount: u32
+    pWaitSemaphores: u64*?
+    swapchainCount: u32
+    pSwapchains: u64*?
+    pImageIndices: u32*?
+    pResults: i32*?
+
+let VK_STRUCTURE_TYPE_PRESENT_INFO_KHR: u32 = 1000001001
+
+extern struct VkPushConstantRange:
+    stageFlags: u32
+    offset: u32
+    size: u32
+
+extern struct VkQueueFamilyProperties:
+    queueFlags: u32
+    queueCount: u32
+    timestampValidBits: u32
+    minImageTransferGranularity: VkExtent3D
+
+extern struct VkRect2D:
+    offset: VkOffset2D
+    extent: VkExtent2D
+
+extern struct VkRenderPassBeginInfo:
+    sType: u32
+    pNext: void*?
+    renderPass: u64
+    framebuffer: u64
+    renderArea: VkRect2D
+    clearValueCount: u32
+    pClearValues: VkClearValue*?
+
+let VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO: u32 = 43
+
+extern struct VkRenderPassCreateInfo:
+    sType: u32
+    pNext: void*?
+    flags: u32
+    attachmentCount: u32
+    pAttachments: VkAttachmentDescription*?
+    subpassCount: u32
+    pSubpasses: VkSubpassDescription*?
+    dependencyCount: u32
+    pDependencies: VkSubpassDependency*?
+
+let VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO: u32 = 38
+
+extern struct VkSemaphoreCreateInfo:
+    sType: u32
+    pNext: void*?
+    flags: u32
+
+let VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO: u32 = 9
+
+extern struct VkShaderModuleCreateInfo:
+    sType: u32
+    pNext: void*?
+    flags: u32
+    codeSize: usize
+    pCode: u32*?
+
+let VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO: u32 = 16
+
+extern struct VkSpecializationInfo:
+    mapEntryCount: u32
+    pMapEntries: VkSpecializationMapEntry*?
+    dataSize: usize
+    pData: void*?
+
+extern struct VkSpecializationMapEntry:
+    constantID: u32
+    offset: u32
+    size: usize
+
+extern struct VkStencilOpState:
+    failOp: u32
+    passOp: u32
+    depthFailOp: u32
+    compareOp: u32
+    compareMask: u32
+    writeMask: u32
+    reference: u32
+
+extern struct VkSubmitInfo:
+    sType: u32
+    pNext: void*?
+    waitSemaphoreCount: u32
+    pWaitSemaphores: u64*?
+    pWaitDstStageMask: u32*?
+    commandBufferCount: u32
+    pCommandBuffers: u64*?
+    signalSemaphoreCount: u32
+    pSignalSemaphores: u64*?
+
+let VK_STRUCTURE_TYPE_SUBMIT_INFO: u32 = 4
+
+extern struct VkSubpassDependency:
+    srcSubpass: u32
+    dstSubpass: u32
+    srcStageMask: u32
+    dstStageMask: u32
+    srcAccessMask: u32
+    dstAccessMask: u32
+    dependencyFlags: u32
+
+extern struct VkSubpassDescription:
+    flags: u32
+    pipelineBindPoint: u32
+    inputAttachmentCount: u32
+    pInputAttachments: VkAttachmentReference*?
+    colorAttachmentCount: u32
+    pColorAttachments: VkAttachmentReference*?
+    pResolveAttachments: VkAttachmentReference*?
+    pDepthStencilAttachment: VkAttachmentReference*?
+    preserveAttachmentCount: u32
+    pPreserveAttachments: u32*?
+
+extern struct VkSurfaceCapabilitiesKHR:
+    minImageCount: u32
+    maxImageCount: u32
+    currentExtent: VkExtent2D
+    minImageExtent: VkExtent2D
+    maxImageExtent: VkExtent2D
+    maxImageArrayLayers: u32
+    supportedTransforms: u32
+    currentTransform: u32
+    supportedCompositeAlpha: u32
+    supportedUsageFlags: u32
+
+extern struct VkSurfaceFormatKHR:
+    format: u32
+    colorSpace: u32
+
+extern struct VkSwapchainCreateInfoKHR:
+    sType: u32
+    pNext: void*?
+    flags: u32
+    surface: u64
+    minImageCount: u32
+    imageFormat: u32
+    imageColorSpace: u32
+    imageExtent: VkExtent2D
+    imageArrayLayers: u32
+    imageUsage: u32
+    imageSharingMode: u32
+    queueFamilyIndexCount: u32
+    pQueueFamilyIndices: u32*?
+    preTransform: u32
+    compositeAlpha: u32
+    presentMode: u32
+    clipped: u32
+    oldSwapchain: u64
+
+let VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR: u32 = 1000001000
+
+extern struct VkVertexInputAttributeDescription:
+    location: u32
+    binding: u32
+    format: u32
+    offset: u32
+
+extern struct VkVertexInputBindingDescription:
+    binding: u32
+    stride: u32
+    inputRate: u32
+
+extern struct VkViewport:
+    x: f32
+    y: f32
+    width: f32
+    height: f32
+    minDepth: f32
+    maxDepth: f32
+
+extern struct VkWin32SurfaceCreateInfoKHR:
+    sType: u32
+    pNext: void*?
+    flags: u32
+    hinstance: void*?
+    hwnd: void*?
+
+let VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR: u32 = 1000009000
+
+extern struct VkWriteDescriptorSet:
+    sType: u32
+    pNext: void*?
+    dstSet: u64
+    dstBinding: u32
+    dstArrayElement: u32
+    descriptorCount: u32
+    descriptorType: u32
+    pImageInfo: VkDescriptorImageInfo*?
+    pBufferInfo: VkDescriptorBufferInfo*?
+    pTexelBufferView: u64*?
+
+let VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET: u32 = 35
+extern func vkCreateInstance(pCreateInfo: VkInstanceCreateInfo*?, pAllocator: void*?, pInstance: u64*?) -> i32
+extern func vkDestroyInstance(instance: u64, pAllocator: void*?)
+extern func vkEnumeratePhysicalDevices(instance: u64, pPhysicalDeviceCount: u32*?, pPhysicalDevices: u64*?) -> i32
+extern func vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice: u64, pQueueFamilyPropertyCount: u32*?, pQueueFamilyProperties: VkQueueFamilyProperties*?)
+extern func vkGetPhysicalDeviceMemoryProperties(physicalDevice: u64, pMemoryProperties: VkPhysicalDeviceMemoryProperties*?)
+extern func vkGetPhysicalDeviceFormatProperties(physicalDevice: u64, format: u32, pFormatProperties: VkFormatProperties*?)
+extern func vkCreateDevice(physicalDevice: u64, pCreateInfo: VkDeviceCreateInfo*?, pAllocator: void*?, pDevice: u64*?) -> i32
+extern func vkDestroyDevice(device: u64, pAllocator: void*?)
+extern func vkGetDeviceQueue(device: u64, queueFamilyIndex: u32, queueIndex: u32, pQueue: u64*?)
+extern func vkCreateWin32SurfaceKHR(instance: u64, pCreateInfo: VkWin32SurfaceCreateInfoKHR*?, pAllocator: void*?, pSurface: u64*?) -> i32
+extern func vkGetPhysicalDeviceWin32PresentationSupportKHR(physicalDevice: u64, queueFamilyIndex: u32) -> u32
+extern func vkDestroySurfaceKHR(instance: u64, surface: u64, pAllocator: void*?)
+extern func vkGetPhysicalDeviceSurfaceSupportKHR(physicalDevice: u64, queueFamilyIndex: u32, surface: u64, pSupported: u32*?) -> i32
+extern func vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice: u64, surface: u64, pSurfaceCapabilities: VkSurfaceCapabilitiesKHR*?) -> i32
+extern func vkGetPhysicalDeviceSurfaceFormatsKHR(physicalDevice: u64, surface: u64, pSurfaceFormatCount: u32*?, pSurfaceFormats: VkSurfaceFormatKHR*?) -> i32
+extern func vkCreateSwapchainKHR(device: u64, pCreateInfo: VkSwapchainCreateInfoKHR*?, pAllocator: void*?, pSwapchain: u64*?) -> i32
+extern func vkDestroySwapchainKHR(device: u64, swapchain: u64, pAllocator: void*?)
+extern func vkGetSwapchainImagesKHR(device: u64, swapchain: u64, pSwapchainImageCount: u32*?, pSwapchainImages: u64*?) -> i32
+extern func vkAcquireNextImageKHR(device: u64, swapchain: u64, timeout: u64, semaphore: u64, fence: u64, pImageIndex: u32*?) -> i32
+extern func vkQueuePresentKHR(queue: u64, pPresentInfo: VkPresentInfoKHR*?) -> i32
+extern func vkQueueSubmit(queue: u64, submitCount: u32, pSubmits: VkSubmitInfo*?, fence: u64) -> i32
+extern func vkQueueWaitIdle(queue: u64) -> i32
+extern func vkDeviceWaitIdle(device: u64) -> i32
+extern func vkCreateImageView(device: u64, pCreateInfo: VkImageViewCreateInfo*?, pAllocator: void*?, pView: u64*?) -> i32
+extern func vkDestroyImageView(device: u64, imageView: u64, pAllocator: void*?)
+extern func vkCreateImage(device: u64, pCreateInfo: VkImageCreateInfo*?, pAllocator: void*?, pImage: u64*?) -> i32
+extern func vkDestroyImage(device: u64, image: u64, pAllocator: void*?)
+extern func vkGetImageMemoryRequirements(device: u64, image: u64, pMemoryRequirements: VkMemoryRequirements*?)
+extern func vkAllocateMemory(device: u64, pAllocateInfo: VkMemoryAllocateInfo*?, pAllocator: void*?, pMemory: u64*?) -> i32
+extern func vkFreeMemory(device: u64, memory: u64, pAllocator: void*?)
+extern func vkBindImageMemory(device: u64, image: u64, memory: u64, memoryOffset: u64) -> i32
+extern func vkCreateBuffer(device: u64, pCreateInfo: VkBufferCreateInfo*?, pAllocator: void*?, pBuffer: u64*?) -> i32
+extern func vkDestroyBuffer(device: u64, buffer: u64, pAllocator: void*?)
+extern func vkGetBufferMemoryRequirements(device: u64, buffer: u64, pMemoryRequirements: VkMemoryRequirements*?)
+extern func vkBindBufferMemory(device: u64, buffer: u64, memory: u64, memoryOffset: u64) -> i32
+extern func vkMapMemory(device: u64, memory: u64, offset: u64, size: u64, flags: u32, ppData: void*?*?) -> i32
+extern func vkUnmapMemory(device: u64, memory: u64)
+extern func vkCreateRenderPass(device: u64, pCreateInfo: VkRenderPassCreateInfo*?, pAllocator: void*?, pRenderPass: u64*?) -> i32
+extern func vkDestroyRenderPass(device: u64, renderPass: u64, pAllocator: void*?)
+extern func vkCreateFramebuffer(device: u64, pCreateInfo: VkFramebufferCreateInfo*?, pAllocator: void*?, pFramebuffer: u64*?) -> i32
+extern func vkDestroyFramebuffer(device: u64, framebuffer: u64, pAllocator: void*?)
+extern func vkCreateShaderModule(device: u64, pCreateInfo: VkShaderModuleCreateInfo*?, pAllocator: void*?, pShaderModule: u64*?) -> i32
+extern func vkDestroyShaderModule(device: u64, shaderModule: u64, pAllocator: void*?)
+extern func vkCreatePipelineLayout(device: u64, pCreateInfo: VkPipelineLayoutCreateInfo*?, pAllocator: void*?, pPipelineLayout: u64*?) -> i32
+extern func vkDestroyPipelineLayout(device: u64, pipelineLayout: u64, pAllocator: void*?)
+extern func vkCreateGraphicsPipelines(device: u64, pipelineCache: u64, createInfoCount: u32, pCreateInfos: VkGraphicsPipelineCreateInfo*?, pAllocator: void*?, pPipelines: u64*?) -> i32
+extern func vkDestroyPipeline(device: u64, pipeline: u64, pAllocator: void*?)
+extern func vkCreateCommandPool(device: u64, pCreateInfo: VkCommandPoolCreateInfo*?, pAllocator: void*?, pCommandPool: u64*?) -> i32
+extern func vkDestroyCommandPool(device: u64, commandPool: u64, pAllocator: void*?)
+extern func vkAllocateCommandBuffers(device: u64, pAllocateInfo: VkCommandBufferAllocateInfo*?, pCommandBuffers: u64*?) -> i32
+extern func vkResetCommandPool(device: u64, commandPool: u64, flags: u32) -> i32
+extern func vkBeginCommandBuffer(commandBuffer: u64, pBeginInfo: VkCommandBufferBeginInfo*?) -> i32
+extern func vkEndCommandBuffer(commandBuffer: u64) -> i32
+extern func vkCmdBeginRenderPass(commandBuffer: u64, pRenderPassBegin: VkRenderPassBeginInfo*?, contents: u32)
+extern func vkCmdEndRenderPass(commandBuffer: u64)
+extern func vkCmdBindPipeline(commandBuffer: u64, pipelineBindPoint: u32, pipeline: u64)
+extern func vkCmdSetViewport(commandBuffer: u64, firstViewport: u32, viewportCount: u32, pViewports: VkViewport*?)
+extern func vkCmdSetScissor(commandBuffer: u64, firstScissor: u32, scissorCount: u32, pScissors: VkRect2D*?)
+extern func vkCmdBindVertexBuffers(commandBuffer: u64, firstBinding: u32, bindingCount: u32, pBuffers: u64*?, pOffsets: u64*?)
+extern func vkCmdDraw(commandBuffer: u64, vertexCount: u32, instanceCount: u32, firstVertex: u32, firstInstance: u32)
+extern func vkCreateSemaphore(device: u64, pCreateInfo: VkSemaphoreCreateInfo*?, pAllocator: void*?, pSemaphore: u64*?) -> i32
+extern func vkDestroySemaphore(device: u64, semaphore: u64, pAllocator: void*?)
+extern func vkCreateFence(device: u64, pCreateInfo: VkFenceCreateInfo*?, pAllocator: void*?, pFence: u64*?) -> i32
+extern func vkDestroyFence(device: u64, fence: u64, pAllocator: void*?)
+extern func vkWaitForFences(device: u64, fenceCount: u32, pFences: u64*?, waitAll: u32, timeout: u64) -> i32
+extern func vkResetFences(device: u64, fenceCount: u32, pFences: u64*?) -> i32
+extern func vkCreateDescriptorSetLayout(device: u64, pCreateInfo: VkDescriptorSetLayoutCreateInfo*?, pAllocator: void*?, pSetLayout: u64*?) -> i32
+extern func vkDestroyDescriptorSetLayout(device: u64, descriptorSetLayout: u64, pAllocator: void*?)
+extern func vkCreateDescriptorPool(device: u64, pCreateInfo: VkDescriptorPoolCreateInfo*?, pAllocator: void*?, pDescriptorPool: u64*?) -> i32
+extern func vkDestroyDescriptorPool(device: u64, descriptorPool: u64, pAllocator: void*?)
+extern func vkAllocateDescriptorSets(device: u64, pAllocateInfo: VkDescriptorSetAllocateInfo*?, pDescriptorSets: u64*?) -> i32
+extern func vkUpdateDescriptorSets(device: u64, descriptorWriteCount: u32, pDescriptorWrites: VkWriteDescriptorSet*?, descriptorCopyCount: u32, pDescriptorCopies: VkCopyDescriptorSet*?)
+extern func vkCmdBindDescriptorSets(commandBuffer: u64, pipelineBindPoint: u32, layout: u64, firstSet: u32, descriptorSetCount: u32, pDescriptorSets: u64*?, dynamicOffsetCount: u32, pDynamicOffsets: u32*?)
+extern func vkCmdPushConstants(commandBuffer: u64, layout: u64, stageFlags: u32, offset: u32, size: u32, pValues: void*?)
+
+# mark: Textures, samplers, transfers and barriers ===========================================
+
+let VK_FORMAT_R8_UNORM: u32 = 9
+let VK_FORMAT_R8G8B8A8_UNORM: u32 = 37
+let VK_FORMAT_R16G16B16A16_SFLOAT: u32 = 97
+let VK_IMAGE_LAYOUT_UNDEFINED: u32 = 0
+let VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL: u32 = 5
+let VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL: u32 = 6
+let VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL: u32 = 7
+let VK_IMAGE_USAGE_TRANSFER_SRC_BIT: u32 = 1
+let VK_IMAGE_USAGE_TRANSFER_DST_BIT: u32 = 2
+let VK_IMAGE_USAGE_SAMPLED_BIT: u32 = 4
+let VK_BUFFER_USAGE_TRANSFER_SRC_BIT: u32 = 1
+let VK_BUFFER_USAGE_TRANSFER_DST_BIT: u32 = 2
+let VK_ACCESS_SHADER_READ_BIT: u32 = 32
+let VK_ACCESS_TRANSFER_READ_BIT: u32 = 2048
+let VK_ACCESS_TRANSFER_WRITE_BIT: u32 = 4096
+let VK_ACCESS_HOST_READ_BIT: u32 = 8192
+let VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT: u32 = 1
+let VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT: u32 = 128
+let VK_PIPELINE_STAGE_TRANSFER_BIT: u32 = 4096
+let VK_PIPELINE_STAGE_HOST_BIT: u32 = 16384
+let VK_FILTER_NEAREST: u32 = 0
+let VK_FILTER_LINEAR: u32 = 1
+let VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE: u32 = 2
+let VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER: u32 = 1
+let VK_QUEUE_FAMILY_IGNORED: u32 = 4294967295
+let VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO: u32 = 31
+let VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER: u32 = 45
+
+extern struct VkOffset3D:
+    x: i32
+    y: i32
+    z: i32
+
+extern struct VkImageSubresourceLayers:
+    aspectMask: u32
+    mipLevel: u32
+    baseArrayLayer: u32
+    layerCount: u32
+
+extern struct VkBufferImageCopy:
+    bufferOffset: u64
+    bufferRowLength: u32
+    bufferImageHeight: u32
+    imageSubresource: VkImageSubresourceLayers
+    imageOffset: VkOffset3D
+    imageExtent: VkExtent3D
+
+extern struct VkImageMemoryBarrier:
+    sType: u32
+    pNext: void*?
+    srcAccessMask: u32
+    dstAccessMask: u32
+    oldLayout: u32
+    newLayout: u32
+    srcQueueFamilyIndex: u32
+    dstQueueFamilyIndex: u32
+    image: u64
+    subresourceRange: VkImageSubresourceRange
+
+extern struct VkSamplerCreateInfo:
+    sType: u32
+    pNext: void*?
+    flags: u32
+    magFilter: u32
+    minFilter: u32
+    mipmapMode: u32
+    addressModeU: u32
+    addressModeV: u32
+    addressModeW: u32
+    mipLodBias: f32
+    anisotropyEnable: u32
+    maxAnisotropy: f32
+    compareEnable: u32
+    compareOp: u32
+    minLod: f32
+    maxLod: f32
+    borderColor: u32
+    unnormalizedCoordinates: u32
+
+extern func vkCreateSampler(device: u64, pCreateInfo: VkSamplerCreateInfo*?, pAllocator: void*?, pSampler: u64*?) -> i32
+extern func vkDestroySampler(device: u64, sampler: u64, pAllocator: void*?)
+extern func vkCmdPipelineBarrier(commandBuffer: u64, srcStageMask: u32, dstStageMask: u32, dependencyFlags: u32, memoryBarrierCount: u32, pMemoryBarriers: void*?, bufferMemoryBarrierCount: u32, pBufferMemoryBarriers: void*?, imageMemoryBarrierCount: u32, pImageMemoryBarriers: VkImageMemoryBarrier*?)
+extern func vkCmdCopyBufferToImage(commandBuffer: u64, srcBuffer: u64, dstImage: u64, dstImageLayout: u32, regionCount: u32, pRegions: VkBufferImageCopy*?)
+extern func vkCmdCopyImageToBuffer(commandBuffer: u64, srcImage: u64, srcImageLayout: u32, dstBuffer: u64, regionCount: u32, pRegions: VkBufferImageCopy*?)

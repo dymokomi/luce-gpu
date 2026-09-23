@@ -1,0 +1,21 @@
+import gpu
+import window
+
+pub func main(arguments: str[]) -> i32!:
+    discard(arguments)
+    assert(not gpu.supported())
+    assert(not gpu.supported(gpu.Backend.metal))
+    assert(not gpu.supported(gpu.Backend.vulkan))
+    var rejected = false
+    var device = gpu.Device.open() catch failure:
+        assert(failure.code == gpu.unsupported)
+        rejected = true
+        recover gpu.Device()
+    assert(rejected)
+    device.destroy()
+    var surface: gpu.Surface
+    var host: window.Presentation
+    surface.destroy()
+    host.destroy()
+    print("ok unsupported GPU target")
+    return 0

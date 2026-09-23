@@ -1,0 +1,60 @@
+name: Correctness
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, ubuntu-24.04]
+    env:
+      LUCE_TEST_GPU: optional
+      LUCE_TEST_WINDOW: optional
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: luce-gpu
+      - name: Read compiler and dependency pins
+        id: pins
+        run: |
+          echo "base=$(cat luce-gpu/bootstrap/BASE)" >> "$GITHUB_OUTPUT"
+          echo "std=$(cat luce-gpu/bootstrap/STD)" >> "$GITHUB_OUTPUT"
+          echo "window=$(cat luce-gpu/bootstrap/WINDOW)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v7
+        with:
+          repository: dymokomi/luce-base
+          ref: ${{ steps.pins.outputs.base }}
+          path: luce-base
+      - uses: actions/checkout@v7
+        with:
+          repository: dymokomi/luce-std
+          ref: ${{ steps.pins.outputs.std }}
+          path: luce-std
+      - uses: actions/checkout@v7
+        with:
+          repository: dymokomi/luce-window
+          ref: ${{ steps.pins.outputs.window }}
+          path: luce-window
+      - name: Select Clang
+        run: |
+          mkdir -p "$RUNNER_TEMP/luce-bin"
+          ln -s "$(command -v clang)" "$RUNNER_TEMP/luce-bin/cc"
+          echo "$RUNNER_TEMP/luce-bin" >> "$GITHUB_PATH"
+      - name: Build the compiler
+        working-directory: luce-base
+        run: ./build.sh
+      - name: Package gate
+        working-directory: luce-gpu
+        run: ./test.sh
+      - name: Retain diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: luce-gpu-${{ matrix.runner }}-${{ github.sha }}
+          path: |
+            luce-gpu/build/*.log
+            luce-gpu/build/failures/
+          if-no-files-found: ignore

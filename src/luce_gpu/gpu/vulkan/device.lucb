@@ -1,0 +1,109 @@
+#==============================================================================================
+#
+#   device - Vulkan instance, device and queues
+#
+#   DESCRIPTION:
+#       Vulkan 1.0: VK_MAKE_API_VERSION(0, 1, 0, 0).
+#
+#==============================================================================================
+
+let vulkan_api_version_1_0: u32 = 1u32 << 22
+
+## One render pass pair and pipeline pair per color format in use.
+struct VulkanFormatState:
+    var format: u32
+    var pass_present: u64
+    var pass_texture: u64
+    var overlay: u64
+    var depth_test: u64
+
+struct VulkanDevice:
+    var instance: u64
+    var physical: u64
+    var device: u64
+    var queue: u64
+    var family: u32
+    var memory: VkPhysicalDeviceMemoryProperties
+    # Drawing state shared by surfaces and textures; see vulkan_drawing.
+    var ready: bool
+    var pool: u64
+    var command: u64
+    var descriptor_layout: u64
+    var layout: u64
+    var nearest: u64
+    var linear: u64
+    var placeholder: VulkanTexture*?
+    var fill: u64
+    var formats: VulkanFormatState[6]
+    var format_count: usize
+    var depth_image: u64
+    var depth_memory: u64
+    var depth_view: u64
+    var depth_width: u32
+    var depth_height: u32
+
+func vulkan_check(result: i32, message: str) -> !:
+    if result != VK_SUCCESS:
+        error(failed, message)
+
+func vulkan_device_open() -> VulkanDevice*!:
+    let state = try new VulkanDevice() in memory.heap
+    errdefer vulkan_device_destroy(state)
+    var application = VkApplicationInfo(sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
+                                        pApplicationName = "Luce", pEngineName = "Luce", apiVersion = vulkan_api_version_1_0)
+    let extensions = try vulkan_presentation_extensions()
+    var instance_info = VkInstanceCreateInfo(sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+                                             pApplicationInfo = &application, enabledExtensionCount = (u32)extensions.length, ppEnabledExtensionNames = (c.str*)extensions.data)
+    if vkCreateInstance(&instance_info, none, &state.instance) != 0:
+        error(unavailable, "a Vulkan instance with native presentation is unavailable")
+    var count: u32 = 0
+    try vulkan_check(vkEnumeratePhysicalDevices(state.instance, &count, none), "Vulkan devices could not be enumerated")
+    if count == 0:
+        error(unavailable, "no Vulkan device is available")
+    let devices = try alloc u64[(usize)count]
+    defer free(devices)
+    try vulkan_check(vkEnumeratePhysicalDevices(state.instance, &count, devices.data), "Vulkan devices changed during enumeration")
+    for index in 0..<(usize)count:
+        let physical = devices[index]
+        var families: u32 = 0
+        vkGetPhysicalDeviceQueueFamilyProperties(physical, &families, none)
+        let properties = try alloc VkQueueFamilyProperties[(usize)families]
+        defer free(properties)
+        vkGetPhysicalDeviceQueueFamilyProperties(physical, &families, properties.data)
+        for family in 0..<(usize)families:
+            if properties[family].queueCount == 0 or (properties[family].queueFlags & VK_QUEUE_GRAPHICS_BIT) == 0 or not vulkan_presentation_support(physical, (u32)family):
+                continue
+            var priority: f32 = 1.0
+            var queue_info = VkDeviceQueueCreateInfo(sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+                                                     queueFamilyIndex = (u32)family, queueCount = 1, pQueuePriorities = &priority)
+            var device_extension: c.str = VK_KHR_SWAPCHAIN_EXTENSION_NAME
+            var device_info = VkDeviceCreateInfo(sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+                                                 queueCreateInfoCount = 1, pQueueCreateInfos = &queue_info,
+                                                 enabledExtensionCount = 1, ppEnabledExtensionNames = &device_extension)
+            if vkCreateDevice(physical, &device_info, none, &state.device) != 0:
+                continue
+            state.physical = physical
+            state.family = (u32)family
+            vkGetDeviceQueue(state.device, state.family, 0, &state.queue)
+            vkGetPhysicalDeviceMemoryProperties(physical, &state.memory)
+            return state
+    error(unavailable, "no Vulkan graphics queue supports native presentation")
+
+func vulkan_device_destroy(state: VulkanDevice*):
+    if state.device != 0:
+        discard(vkDeviceWaitIdle(state.device))
+        vulkan_drawing_destroy(state)
+        vkDestroyDevice(state.device, none)
+    if state.instance != 0:
+        vkDestroyInstance(state.instance, none)
+    free(state) in memory.heap
+
+func vulkan_memory(device: VulkanDevice*, requirements: VkMemoryRequirements, flags: u32) -> u64!:
+    for index in 0..<(usize)device.memory.memoryTypeCount:
+        if (requirements.memoryTypeBits & (1u32 << (u32)index)) != 0 and (device.memory.memoryTypes[index].propertyFlags & flags) == flags:
+            var info = VkMemoryAllocateInfo(sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+                                            allocationSize = requirements.size, memoryTypeIndex = (u32)index)
+            var block: u64 = 0
+            try vulkan_check(vkAllocateMemory(device.device, &info, none, &block), "Vulkan device memory allocation failed")
+            return block
+    error(unavailable, "no compatible Vulkan memory type is available")

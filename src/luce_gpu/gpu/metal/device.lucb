@@ -1,0 +1,34 @@
+#==============================================================================================
+#
+#   device - The Metal device handle
+#
+#   DESCRIPTION:
+#       The Metal device handle, kept private to the backend.
+#
+#==============================================================================================
+
+struct MetalDevice:
+    var device: void*?
+    var queue: void*?
+    var drawing: MetalDrawing*?
+
+func metal_device_open() -> MetalDevice*!:
+    let pool = objc_autoreleasePoolPush()
+    defer objc_autoreleasePoolPop(pool)
+    let state = try new MetalDevice() in memory.heap
+    errdefer metal_device_destroy(state)
+    # The C creation function returns +1, as do Objective-C new methods.
+    state.device = MTLCreateSystemDefaultDevice() else error(unavailable, "no Metal device is available")
+    state.queue = metal_ptr(metal_required(state.device), metal_sel("newCommandQueue")) else error(failed, "could not create a Metal command queue")
+    return state
+
+func metal_device_destroy(state: MetalDevice*):
+    let pool = objc_autoreleasePoolPush()
+    defer objc_autoreleasePoolPop(pool)
+    if let drawing = state.drawing:
+        metal_drawing_destroy(drawing)
+    if let queue = state.queue:
+        metal_void(queue, metal_sel("release"))
+    if let device = state.device:
+        metal_void(device, metal_sel("release"))
+    free(state) in memory.heap

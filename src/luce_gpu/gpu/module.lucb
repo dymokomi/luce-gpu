@@ -1,0 +1,159 @@
+#==============================================================================================
+#
+#   gpu - Portable devices, canvases and frames
+#
+#   DESCRIPTION:
+#       The portable GPU module: an owned device, colored-triangle canvases and recorded
+#       frames, dispatched to the selected backend (§16.6).
+#
+#==============================================================================================
+
+import c
+import memory
+import math32
+import platform
+import window
+import interop
+import ownership
+import math
+import thread
+
+# mark: Errors ================================================================================
+## No GPU backend is implemented for this target.
+pub let unsupported: ErrorCode = ErrorCode.package(91)
+## A backend exists but no device could be opened on the hardware.
+pub let unavailable: ErrorCode = ErrorCode.package(92)
+## A GPU operation ran off the required (main) thread.
+pub let wrong_thread: ErrorCode = ErrorCode.package(93)
+## A device, surface or frame was used after it was closed.
+pub let closed: ErrorCode = ErrorCode.package(94)
+## A color component was not finite and within 0..1.
+pub let invalid_color: ErrorCode = ErrorCode.package(95)
+## A GPU operation failed.
+pub let failed: ErrorCode = ErrorCode.package(96)
+## The backend failed while executing submitted commands.
+pub let execution_failed: ErrorCode = ErrorCode.package(97)
+## A surface exceeded the backend's size limit.
+pub let surface_too_large: ErrorCode = ErrorCode.package(98)
+## Triangle geometry was malformed or out of range.
+pub let invalid_geometry: ErrorCode = ErrorCode.package(99)
+## A frame exceeded its command or coverage budget.
+pub let command_limit: ErrorCode = ErrorCode.package(100)
+## A frame that was already finished was recorded into again.
+pub let frame_finished: ErrorCode = ErrorCode.package(114)
+## A frame still in flight was reused.
+pub let frame_in_use: ErrorCode = ErrorCode.package(115)
+## The surface resized under a frame; record a fresh one.
+pub let frame_resized: ErrorCode = ErrorCode.package(116)
+## Pixel data did not match the texture region it was meant for.
+pub let invalid_pixels: ErrorCode = ErrorCode.package(119)
+## A texture or pipeline was recorded into a frame on a different device.
+pub let wrong_device: ErrorCode = ErrorCode.package(120)
+## A pipeline was recorded into a frame whose target format it was not made for.
+pub let wrong_target: ErrorCode = ErrorCode.package(121)
+## A shader could not be compiled or a pipeline could not be built from it.
+pub let invalid_shader: ErrorCode = ErrorCode.package(122)
+
+# mark: Backends, colors and formats =========================================================
+## automatic chooses the implemented native backend. An explicit unsupported
+## backend fails; it never falls back silently. Windows x64 uses Vulkan; macOS
+## ARM64 uses Metal. Link dependencies are selected by the compiler.
+pub enum Backend as u8:
+    automatic = 0
+    metal = 1
+    vulkan = 2
+
+## Whether this build contains a backend, not whether hardware is available.
+## Device.open probes the hardware separately and may return unavailable.
+pub func supported(backend: Backend = Backend.automatic) -> bool:
+    if platform.windows and platform.x86_64:
+        return backend == Backend.automatic or backend == Backend.vulkan
+    return (platform.macos and platform.arm64) and (backend == Backend.automatic or backend == Backend.metal)
+
+## Linear-light sRGB components and a straight alpha, each finite and in 0..1.
+## Presentation is opaque and ignores alpha; a texture frame clears to it.
+## Conversion to the sRGB display encoding occurs in the render target, not in
+## application code.
+pub struct Color:
+    ## The linear-light red component, 0..1.
+    pub var red: f64
+    ## The linear-light green component, 0..1.
+    pub var green: f64
+    ## The linear-light blue component, 0..1.
+    pub var blue: f64
+    ## The straight alpha, 0..1.
+    pub var alpha: f64 = 1.0
+
+## Texel layouts of a texture. Every format is tightly packed, top-down, with
+## straight alpha. rgba8 is sRGB-encoded and sampled as linear light; rgba8_linear
+## is sampled as stored; rgba16_float holds half floats; r8 is one channel that
+## samples as red with alpha one.
+pub enum Format as u8:
+    rgba8 = 0
+    rgba8_linear = 1
+    rgba16_float = 2
+    r8 = 3
+
+## How a draw combines with what is already in the target. Shaders emit
+## premultiplied color: `over` composites it, `replace` writes it as is, and
+## `add` sums it.
+pub enum Blend as u8:
+    over = 0
+    replace = 1
+    add = 2
+
+## The most uniform bytes one draw can carry: Vulkan's guaranteed push constants.
+pub let uniform_limit: usize = 128
+## The most textures one draw can sample.
+pub let image_limit: usize = 4
+
+## How an image draw samples between texels.
+pub enum Filter as u8:
+    nearest = 0
+    linear = 1
+
+## A texel rectangle of a texture, from its top left.
+pub struct Region:
+    ## The left edge in texels.
+    pub var x: u32
+    ## The top edge in texels.
+    pub var y: u32
+    ## The width in texels.
+    pub var width: u32
+    ## The height in texels.
+    pub var height: u32
+
+## The bytes of one texel in `format`.
+pub func texel_bytes(pixel_format: Format) -> usize:
+    if pixel_format == Format.rgba16_float:
+        return 8
+    if pixel_format == Format.r8:
+        return 1
+    return 4
+
+# mark: Presentation and thread checks ========================================================
+## Submission does not guarantee that a frame has appeared on the display.
+## skipped means hidden/minimized, zero drawable extent, or no drawable available;
+## keep pumping events and retry on a later frame. It is not an execution failure.
+pub enum PresentResult as u8:
+    submitted = 0
+    skipped = 1
+
+func check_thread() -> !:
+    if not supported():
+        error(unsupported, "no GPU backend is implemented for this target")
+    if platform.macos and platform.arm64:
+        if pthread_main_np() == 0:
+            error(wrong_thread, "GPU operations currently require the main thread")
+    if platform.windows and not thread.is_main():
+        error(wrong_thread, "GPU operations currently require the main thread")
+
+func require_thread():
+    check_thread() catch failure:
+        discard(failure)
+        trap("GPU destruction requires the main thread")
+
+func check_color(color: Color) -> !:
+    # Positive comparisons also reject NaNs, without depending on math linkage.
+    if not (color.red >= 0.0 and color.red <= 1.0 and color.green >= 0.0 and color.green <= 1.0 and color.blue >= 0.0 and color.blue <= 1.0 and color.alpha >= 0.0 and color.alpha <= 1.0):
+        error(invalid_color, "GPU colors must be finite linear sRGB values with alpha in 0..1")

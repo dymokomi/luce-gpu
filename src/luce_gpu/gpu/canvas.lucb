@@ -1,0 +1,223 @@
+#==============================================================================================
+#
+#   canvas - Portable colored-triangle input
+#
+#   DESCRIPTION:
+#       Portable triangle input. Positions are homogeneous clip coordinates: -w..w for x/y and
+#       0..w for z. Colors are straight-alpha linear sRGB in 0..1. The backend interpolates
+#       color perspectively and blends into the sRGB target.
+#
+#==============================================================================================
+
+# mark: Vertices, clips and viewports =========================================================
+## One triangle vertex: a clip-space position and a straight-alpha linear-sRGB color.
+pub struct Vertex:
+    ## The clip-space x, in -w..w.
+    pub var x: f32
+    ## The clip-space y, in -w..w.
+    pub var y: f32
+    ## The clip-space z, in 0..w.
+    pub var z: f32
+    ## The homogeneous w.
+    pub var w: f32 = 1.0
+    ## The linear-sRGB red, 0..1.
+    pub var red: f32
+    ## The linear-sRGB green, 0..1.
+    pub var green: f32
+    ## The linear-sRGB blue, 0..1.
+    pub var blue: f32
+    ## The straight alpha, 0..1.
+    pub var alpha: f32 = 1.0
+
+## Scissor rectangle in backing pixels, measured from the target's top left.
+## Rectangles are intersected with the target at submission; zero extent is empty.
+pub struct Clip:
+    ## The left edge in backing pixels.
+    pub var x: u32
+    ## The top edge in backing pixels.
+    pub var y: u32
+    ## The width in backing pixels.
+    pub var width: u32
+    ## The height in backing pixels.
+    pub var height: u32
+
+## Destination of clip coordinates, in backing pixels from the top left.
+pub struct Viewport:
+    ## The left edge in backing pixels.
+    pub var x: f64
+    ## The top edge in backing pixels.
+    pub var y: f64
+    ## The width in backing pixels.
+    pub var width: f64
+    ## The height in backing pixels.
+    pub var height: f64
+
+# mark: Draws and the canvas ==================================================================
+struct Draw:
+    var first: usize
+    var count: usize
+    var clip: Clip
+    var depth: bool
+    var viewport: Viewport?
+    var params: DrawParams
+    # Sampled images (bindings 1..4) and a client pipeline are retained until
+    # the canvas is cleared or destroyed.
+    var images: TextureState*?[4]
+    var filter: Filter
+    var pipeline: PipelineState*?
+    var uniforms: u8[128]
+    var uniform_count: u32
+
+## A reusable CPU command list, independent of any backend or window. triangles
+## copies its input, so callers may reuse it immediately. A failed append leaves
+## the visible command list unchanged. Copies alias storage; destroy one owner.
+## Recording is single-threaded but does not require a device or a main thread.
+pub struct Canvas:
+    var vertices: Vertex[]
+    var draws: Draw[]
+    var vertex_count: usize
+    var draw_count: usize
+    var coverage: u32[]
+    var coverage_count: usize
+
+    ## The number of vertices recorded so far.
+    pub func count() -> usize:
+        return self.vertex_count
+
+    ## Discard every recorded triangle, keeping the storage.
+    pub mutating func clear():
+        self.release_textures()
+        self.vertex_count = 0
+        self.draw_count = 0
+        self.coverage_count = 0
+
+    func release_textures():
+        for draw in self.draws[..<self.draw_count]:
+            for image in draw.images:
+                if let texture = image:
+                    release_texture(texture)
+            if let pipeline = draw.pipeline:
+                release_pipeline(pipeline)
+
+    ## Independent triangles, in submission order. Depth-enabled draws use less
+    ## comparison and write depth; other draws leave depth untouched. Each frame
+    ## starts with depth 1.0. No culling, multisampling, or texture sampling yet.
+    pub mutating func triangles(vertices: const Vertex[], clip: Clip, depth: bool = false, viewport: Viewport? = none) -> !:
+        if vertices.length % 3 != 0:
+            error(invalid_geometry, "triangle input must contain a multiple of three vertices")
+        for vertex in vertices:
+            if not valid_vertex(vertex):
+                error(invalid_geometry, "vertices need finite positions and linear colors in 0..1")
+        if let region = viewport:
+            if not (region.x >= -16384.0 and region.x <= 16384.0 and region.y >= -16384.0 and region.y <= 16384.0 and region.width >= 0.0 and region.width <= 16384.0 and region.height >= 0.0 and region.height <= 16384.0):
+                error(invalid_geometry, "GPU viewport origins must be finite and in -16384..16384; extents in 0..16384")
+            if region.width == 0.0 or region.height == 0.0:
+                return
+        if vertices.length == 0 or clip.width == 0 or clip.height == 0:
+            return
+        if vertices.length > 1048576 - self.vertex_count or self.draw_count == 4096:
+            error(command_limit, "a canvas supports at most 1048576 vertices and 4096 draws")
+        let needed = self.vertex_count + vertices.length
+        if needed > self.vertices.length:
+            let capacity = canvas_max(needed, canvas_min(1048576, canvas_max(256, self.vertices.length * 2)))
+            let grown = try alloc Vertex[capacity] in memory.heap
+            if self.vertex_count > 0:
+                memory.copy(grown, self.vertices, self.vertex_count)
+            if self.vertices.length > 0:
+                free(self.vertices) in memory.heap
+            self.vertices = grown
+        if self.draw_count == self.draws.length:
+            let capacity = canvas_max(16, self.draws.length * 2)
+            let grown = try alloc Draw[capacity] in memory.heap
+            if self.draw_count > 0:
+                memory.copy(grown, self.draws, self.draw_count)
+            if self.draws.length > 0:
+                free(self.draws) in memory.heap
+            self.draws = grown
+        memory.copy(self.vertices[self.vertex_count..], vertices, vertices.length)
+        self.draws[self.draw_count] = Draw(first = self.vertex_count, count = vertices.length, clip = clip, depth = depth, viewport = viewport)
+        self.vertex_count = needed
+        self.draw_count += 1
+
+    ## Draw `source` of `texture` onto `rectangle`, given in backing pixels of the
+    ## target, modulated by `opacity`. The texture stays retained until the canvas
+    ## is cleared or destroyed, so destroying the handle meanwhile is safe.
+    mutating func image(texture: TextureState*, source: Region, rectangle: Rect, opacity: f64, filter: Filter,
+                        clip: Clip, target_width: f64, target_height: f64) -> !:
+        if source.width == 0 or source.height == 0 or source.x > texture.width - source.width or source.y > texture.height - source.height:
+            error(invalid_geometry, "an image source region must lie inside its texture")
+        if not (opacity >= 0.0 and opacity <= 1.0):
+            error(invalid_color, "image opacity must be finite and in 0..1")
+        if rectangle.width == 0.0 or rectangle.height == 0.0 or clip.width == 0 or clip.height == 0:
+            return
+        try self.triangles(quad_vertices(rectangle, Color(1.0, 1.0, 1.0, opacity), target_width, target_height), clip)
+        var draw = &self.draws[self.draw_count - 1]
+        draw.params = image_params(rectangle, source, texture.width, texture.height)
+        draw.images[0] = texture
+        draw.filter = filter
+        texture.references += 1
+
+    ## Draw `rectangle` (backing pixels) with a client pipeline: `uniforms` go to
+    ## the push-constant block, `images` to bindings 1.., `color` is the vertex
+    ## color every fragment starts from. Pipeline and images stay retained
+    ## until the canvas is cleared or destroyed.
+    mutating func shade(pipeline: PipelineState*, rectangle: Rect, color: Color, uniforms: const u8[], images: TextureState*?[],
+                        filter: Filter, clip: Clip, target_width: f64, target_height: f64) -> !:
+        if uniforms.length > uniform_limit:
+            error(invalid_geometry, "a draw carries at most 128 uniform bytes")
+        if images.length > image_limit:
+            error(invalid_geometry, "a draw samples at most 4 images")
+        try check_color(color)
+        if rectangle.width == 0.0 or rectangle.height == 0.0 or clip.width == 0 or clip.height == 0:
+            return
+        try self.triangles(quad_vertices(rectangle, color, target_width, target_height), clip)
+        var draw = &self.draws[self.draw_count - 1]
+        draw.params = DrawParams((f32)rectangle.x, (f32)rectangle.y, (f32)rectangle.width, (f32)rectangle.height, 0, 0, 0, draw_solid, 0.0, 0.0, 0.0, 0.0)
+        if uniforms.length > 0:
+            memory.copy(draw.uniforms[..<uniforms.length], uniforms, uniforms.length)
+        draw.uniform_count = (u32)uniforms.length
+        draw.filter = filter
+        for index in 0..<images.length:
+            if let texture = images[index]:
+                draw.images[index] = texture
+                texture.references += 1
+        draw.pipeline = pipeline
+        pipeline.references += 1
+
+    ## Release the recorded storage.
+    pub mutating func destroy():
+        self.release_textures()
+        if self.coverage.length > 0:
+            free(self.coverage) in memory.heap
+        if self.vertices.length > 0:
+            free(self.vertices) in memory.heap
+        if self.draws.length > 0:
+            free(self.draws) in memory.heap
+        self = Canvas()
+
+# mark: Geometry helpers ======================================================================
+## Two clip-space triangles covering `rectangle`, given in backing pixels of a
+## target `target_width` by `target_height` pixels, colored `color`.
+func quad_vertices(rectangle: Rect, color: Color, target_width: f64, target_height: f64) -> Vertex[6]:
+    let left = (f32)(rectangle.x * 2.0 / target_width - 1.0)
+    let right = (f32)((rectangle.x + rectangle.width) * 2.0 / target_width - 1.0)
+    let top = (f32)(1.0 - rectangle.y * 2.0 / target_height)
+    let bottom = (f32)(1.0 - (rectangle.y + rectangle.height) * 2.0 / target_height)
+    let a = Vertex(x = left, y = top, red = (f32)color.red, green = (f32)color.green, blue = (f32)color.blue, alpha = (f32)color.alpha)
+    var b = a
+    var lower_right = a
+    var d = a
+    b.x = right
+    lower_right.x = right
+    lower_right.y = bottom
+    d.y = bottom
+    return [a, b, lower_right, a, lower_right, d]
+
+func valid_vertex(v: Vertex) -> bool:
+    return math32.is_finite(v.x) and math32.is_finite(v.y) and math32.is_finite(v.z) and math32.is_finite(v.w) and v.red >= 0.0 and v.red <= 1.0 and v.green >= 0.0 and v.green <= 1.0 and v.blue >= 0.0 and v.blue <= 1.0 and v.alpha >= 0.0 and v.alpha <= 1.0
+
+func canvas_min(a: usize, b: usize) -> usize:
+    return a if a < b else b
+
+func canvas_max(a: usize, b: usize) -> usize:
+    return a if a > b else b

@@ -1,0 +1,59 @@
+#==============================================================================================
+#
+#   device - An owned GPU device
+#
+#   DESCRIPTION:
+#       An owned device. All GPU operations currently require the main thread. The zero value is
+#       closed; copies alias ownership, so borrow and destroy one owner. Surfaces retain the
+#       underlying device and remain usable after this handle is destroyed. No window system is
+#       initialized by opening a device alone.
+#
+#==============================================================================================
+
+## An owned GPU device; the zero value is closed and copies alias ownership.
+pub struct Device:
+    var state: DeviceState*?
+
+    ## Open a device on the selected backend, probing the hardware.
+    pub static func open(backend: Backend = Backend.automatic) -> Device!:
+        try check_thread()
+        let selected = try select_backend(backend)
+        let native = try backend_device_open(selected)
+        errdefer backend_device_destroy(selected, native)
+        let state = try new DeviceState(backend = selected, native = native, references = 1, destroy_texture = backend_texture_destroyer(selected), destroy_shader = backend_shader_destroyer(selected),
+                                        destroy_pipeline = backend_pipeline_destroyer(selected), destroy_device = backend_device_destroy) in memory.heap
+        return Device(state = state)
+
+    ## The backend this device runs on.
+    pub func backend() -> Backend!:
+        return (try self.checked()).backend
+
+    ## Release the device on the main thread; open surfaces keep it alive until they close.
+    pub mutating func destroy():
+        let state = self.state else return
+        require_thread()
+        self.state = none
+        release_device(state)
+
+    func checked() -> DeviceState*!:
+        try check_thread()
+        return self.state else error(closed, "the GPU device is closed")
+
+struct DeviceState:
+    var backend: Backend
+    var native: void*
+    var references: usize
+    # Installed by the backend when the device opens. Texture release is reached
+    # from portable finalizers (a canvas retains its textures), and a direct call
+    # into a backend from there would make every program link that backend's
+    # library whether or not it ever opens a device.
+    var destroy_texture: func(void*, void*) -> unit
+    var destroy_shader: func(void*, void*) -> unit
+    var destroy_pipeline: func(void*, void*) -> unit
+    var destroy_device: func(Backend, void*) -> unit
+
+func release_device(state: DeviceState*):
+    state.references -= 1
+    if state.references == 0:
+        state.destroy_device(state.backend, state.native)
+        free(state) in memory.heap

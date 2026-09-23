@@ -1,0 +1,156 @@
+#==============================================================================================
+#
+#   texture - An owned two-dimensional texture
+#
+#   DESCRIPTION:
+#       A texture on one device: uploaded from and read back into tightly packed CPU pixels,
+#       sampled by image draws, and rendered into by its own frames. The zero value is closed;
+#       copies alias ownership, so borrow and destroy one owner. Draws recorded against a
+#       texture and its open frames keep its storage alive after the handle is destroyed.
+#
+#==============================================================================================
+
+# mark: Textures ==============================================================================
+## An owned texture; the zero value is closed and copies alias ownership.
+pub struct Texture:
+    var state: TextureState*?
+
+    ## Allocate an uninitialised `width` by `height` texture of `format`, each
+    ## dimension in 1..16384.
+    pub static func create(device: Device, width: u32, height: u32, pixel_format: Format) -> Texture!:
+        let device_state = try device.checked()
+        if width == 0 or height == 0 or width > 16384 or height > 16384:
+            error(invalid_geometry, "texture dimensions must be in 1..16384")
+        let native = try backend_texture_create(device_state, width, height, pixel_format)
+        errdefer backend_texture_destroy(device_state, native)
+        let state = try new TextureState(device = device_state, native = native, width = width, height = height, format = pixel_format) in memory.heap
+        device_state.references += 1
+        return Texture(state = state)
+
+    ## The width in texels.
+    pub func width() -> u32!:
+        return (try self.checked()).width
+
+    ## The height in texels.
+    pub func height() -> u32!:
+        return (try self.checked()).height
+
+    ## The texel format.
+    pub func pixel_format() -> Format!:
+        return (try self.checked()).format
+
+    ## Replace `region` (the whole texture by default) with tightly packed,
+    ## top-down `pixels` in the texture's format. The copy completes before this
+    ## returns, ordered after earlier submissions; `pixels` may be reused at once.
+    pub func upload(pixels: const u8[], region: Region? = none) -> !:
+        let state = try self.checked()
+        let area = try state.check_region(region, pixels.length)
+        try backend_texture_upload(state.device, state.native, pixels, area)
+
+    ## Read `region` (the whole texture by default) back into `pixels`, tightly
+    ## packed and top-down in the texture's format, after every earlier submission
+    ## that touched it has completed.
+    pub func read(pixels: u8[], region: Region? = none) -> !:
+        let state = try self.checked()
+        let area = try state.check_region(region, pixels.length)
+        try backend_texture_read(state.device, state.native, pixels, area)
+
+    ## Begin one recording frame whose target is this texture; its points equal
+    ## texels. `present` clears the texture to the given color, draws, and waits
+    ## for completion, so the result can be read or sampled immediately after.
+    pub func frame() -> interop.Reference[Frame]!:
+        let state = try self.checked()
+        if state.active_frame:
+            error(frame_in_use, "the texture already has an active frame")
+        let extent = (f64)state.width
+        let size = window.Size(width = extent, height = (f64)state.height, pixel_width = extent, pixel_height = (f64)state.height, scale = 1.0)
+        let native = try new Frame(size)
+        let owner = try interop.Reference[Frame].adopt(native, frame_type)
+        errdefer owner.release()
+        let recording = (try native.state_value()).value()
+        recording.presentation = (void*)state
+        recording.device = state.device
+        recording.validate = check_texture_frame
+        recording.submit = submit_texture_frame
+        recording.release = release_texture_frame
+        state.references += 1
+        state.active_frame = true
+        return owner
+
+    ## Release this handle on the main thread; recorded draws and open frames keep
+    ## the storage until they finish.
+    pub mutating func destroy():
+        let state = self.state else return
+        require_thread()
+        self.state = none
+        state.closed = true
+        release_texture(state)
+
+    func checked() -> TextureState*!:
+        try check_thread()
+        let state = self.state else error(closed, "the GPU texture is closed")
+        if state.closed:
+            error(closed, "the GPU texture is closed")
+        return state
+
+struct TextureState:
+    var device: DeviceState*
+    var native: void*
+    var width: u32
+    var height: u32
+    var format: Format
+    var references: usize = 1
+    var closed: bool
+    var active_frame: bool
+
+    func check_region(region: Region?, bytes: usize) -> Region!:
+        let area = region else Region(0, 0, self.width, self.height)
+        if area.width == 0 or area.height == 0 or area.x > self.width - area.width or area.y > self.height - area.height:
+            error(invalid_geometry, "a texture region must lie inside the texture and be non-empty")
+        if bytes != (usize)area.width * (usize)area.height * texel_bytes(self.format):
+            error(invalid_pixels, "pixel data must be tightly packed for the region and the texture's format")
+        return area
+
+func release_texture(state: TextureState*):
+    state.references -= 1
+    if state.references == 0:
+        backend_texture_destroy(state.device, state.native)
+        release_device(state.device)
+        free(state) in memory.heap
+
+# mark: Frames on a texture ===================================================================
+## Every image draw in `canvas` must sample a texture of `device`.
+func check_canvas_device(canvas: Canvas, device: DeviceState*) -> !:
+    for draw in canvas.draws[..<canvas.draw_count]:
+        for image in draw.images:
+            if let texture = image:
+                if texture.device != device:
+                    error(wrong_device, "a draw samples a texture from another GPU device")
+        if let pipeline = draw.pipeline:
+            if pipeline.device != device:
+                error(wrong_device, "a draw uses a pipeline from another GPU device")
+
+func check_texture_frame(context: void*, acquired: window.Size) -> !:
+    discard(acquired)
+    let state = (TextureState*)context
+    try check_thread()
+    if state.closed:
+        error(closed, "the frame's texture is closed")
+
+func submit_texture_frame(context: void*, canvas: Canvas, color: Color) -> PresentResult!:
+    let state = (TextureState*)context
+    try check_canvas_device(canvas, state.device)
+    try check_canvas_target(canvas, state.format)
+    for draw in canvas.draws[..<canvas.draw_count]:
+        for image in draw.images:
+            if let texture = image:
+                if texture == state:
+                    error(invalid_geometry, "a texture frame cannot sample the texture it renders into")
+    try backend_texture_render(state.device, state.native, canvas, color)
+    return PresentResult.submitted
+
+func release_texture_frame(context: void*):
+    require_thread()
+    let state = (TextureState*)context
+    state.active_frame = false
+    release_texture(state)

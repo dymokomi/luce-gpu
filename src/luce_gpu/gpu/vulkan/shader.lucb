@@ -1,0 +1,63 @@
+#==============================================================================================
+#
+#   shader - Client shader modules and their per-format pipelines
+#
+#   DESCRIPTION:
+#       A client fragment shader is one VkShaderModule. A client pipeline remembers its blend
+#       mode and target and builds one VkPipeline per color format it is actually drawn into,
+#       since a presentation surface's format is known only once its swapchain exists.
+#
+#==============================================================================================
+
+struct VulkanShader:
+    var module: u64
+
+struct VulkanPipelineEntry:
+    var format: u32
+    var pipeline: u64
+
+struct VulkanPipeline:
+    var shader: VulkanShader*
+    var blend: Blend
+    var format: Format?
+    var entries: VulkanPipelineEntry[6]
+    var count: usize
+
+func vulkan_shader_create(device: VulkanDevice*, spirv: const u32[]) -> VulkanShader*!:
+    try vulkan_drawing(device)
+    let state = try new VulkanShader() in memory.heap
+    errdefer free(state) in memory.heap
+    state.module = try vulkan_shader(device, spirv)
+    return state
+
+func vulkan_shader_destroy(device: VulkanDevice*, state: VulkanShader*):
+    discard(vkDeviceWaitIdle(device.device))
+    if state.module != 0: vkDestroyShaderModule(device.device, state.module, none)
+    free(state) in memory.heap
+
+func vulkan_pipeline_create(device: VulkanDevice*, shader: VulkanShader*, blend: Blend, pixel_format: Format?) -> VulkanPipeline*!:
+    let state = try new VulkanPipeline(shader = shader, blend = blend, format = pixel_format) in memory.heap
+    errdefer vulkan_pipeline_destroy(device, state)
+    # A texture target's format is known now; build eagerly so failures surface at creation.
+    if let target = pixel_format:
+        discard(try vulkan_pipeline_for(device, state, vulkan_native_format(target)))
+    return state
+
+func vulkan_pipeline_destroy(device: VulkanDevice*, state: VulkanPipeline*):
+    discard(vkDeviceWaitIdle(device.device))
+    for entry in state.entries[..<state.count]:
+        if entry.pipeline != 0: vkDestroyPipeline(device.device, entry.pipeline, none)
+    free(state) in memory.heap
+
+## The client pipeline compiled for color attachments of `format`.
+func vulkan_pipeline_for(device: VulkanDevice*, state: VulkanPipeline*, pixel_format: u32) -> u64!:
+    for entry in state.entries[..<state.count]:
+        if entry.format == pixel_format:
+            return entry.pipeline
+    if state.count == state.entries.length:
+        error(failed, "a Vulkan pipeline was drawn into too many color formats")
+    let formats = try vulkan_format_state(device, pixel_format)
+    let pipeline = try vulkan_build_pipeline(device, formats.pass_texture, state.shader.module, state.blend, false)
+    state.entries[state.count] = VulkanPipelineEntry(format = pixel_format, pipeline = pipeline)
+    state.count += 1
+    return pipeline

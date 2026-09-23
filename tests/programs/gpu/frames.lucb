@@ -1,0 +1,180 @@
+## Frame/view scopes share one contract across independent UI/3D drawing code.
+import gpu
+import interop
+import ownership
+import window
+import native
+import memory
+import allocation
+import thread
+
+func quad(color: gpu.Vertex) -> gpu.Vertex[6]:
+    var a = color
+    var b = color
+    var c = color
+    var d = color
+    a.x = -1.0
+    a.y = -1.0
+    b.x = 1.0
+    b.y = -1.0
+    c.x = 1.0
+    c.y = 1.0
+    d.x = -1.0
+    d.y = 1.0
+    return [a, b, c, a, c, d]
+
+pub func contracts() -> !:
+    var frame = try gpu.Frame(window.Size(width = 100.0, height = 80.0, pixel_width = 200.0, pixel_height = 160.0, scale = 2.0))
+    defer frame.close()
+    let target = try frame.target()
+    defer target.release()
+    let region = try target.value().region(gpu.Rect(x = -10.0, y = 5.0, width = 30.0, height = 20.0))
+    defer region.release()
+    assert((try region.value().size()).pixel_width == 60.0)
+    try region.value().triangles(quad(gpu.Vertex(red = 1.0)))
+    frame.close()
+    assert(not target.is_valid() and not region.is_valid())
+    let rejected: const gpu.RenderTarget*? = region.get() catch failure:
+        assert(failure.code == interop.expired)
+        recover none
+    assert(rejected == none)
+    var invalid = false
+    let bad: gpu.Frame? = gpu.Frame(window.Size(width = 1.0, height = 1.0, pixel_width = 1.5, pixel_height = 1.0, scale = 1.0)) catch failure:
+        assert(failure.code == gpu.invalid_geometry)
+        invalid = true
+        recover none
+    assert(invalid and bad == none)
+
+pub func pixels() -> !:
+    var device = try gpu.Device.open()
+    defer device.destroy()
+    var host = try window.Window.open(window.Options(title = "Scoped GPU frames", width = 80, height = 60))
+    defer host.destroy()
+    var surface = try gpu.Surface.open(device, host)
+    defer surface.destroy()
+    # A skipped acquisition and an invalid submission both consume their frame.
+    let hidden = try surface.frame()
+    defer hidden.release()
+    let hidden_target = try hidden.value().target()
+    defer hidden_target.release()
+    assert((try hidden.value().present()) == gpu.PresentResult.skipped)
+    assert(not hidden_target.is_valid())
+    try host.show()
+    while (try host.poll()) != none:
+        discard(0)
+    let size = try surface.size()
+    let frame = try surface.frame()
+    defer frame.release()
+    let target = try frame.value().target()
+    defer target.release()
+    let region = try target.value().region(gpu.Rect(x = size.width * 0.25, y = size.height * 0.25, width = size.width * 0.5, height = size.height * 0.5))
+    defer region.release()
+    # A nested region is larger than its parent; clipping may not expand.
+    let child = try region.value().region(gpu.Rect(x = -size.width * 0.25, y = -size.height * 0.25, width = size.width, height = size.height))
+    defer child.release()
+    try child.value().triangles(quad(gpu.Vertex(red = 1.0, z = 0.2)), true)
+    try child.value().triangles(quad(gpu.Vertex(blue = 1.0, z = 0.8)), true)
+    var refused = false
+    let duplicate: interop.Reference[gpu.Frame]? = surface.frame() catch failure:
+        assert(failure.code == gpu.frame_in_use)
+        refused = true
+        recover none
+    assert(refused and duplicate == none)
+    native.begin("Scoped GPU frames")
+    assert((try frame.value().present(gpu.Color(green = 1.0))) == gpu.PresentResult.submitted)
+    assert(not target.is_valid() and not child.is_valid())
+    try surface.wait_idle()
+    native.pixel(0, 0, 0, 255, 0)
+    native.pixel((u64)(size.pixel_width * 0.5), (u64)(size.pixel_height * 0.5), 255, 0, 0)
+    native.pixel((u64)size.pixel_width - 1, (u64)size.pixel_height - 1, 0, 255, 0)
+    native.end()
+    let invalid = try surface.frame()
+    defer invalid.release()
+    let invalid_target = try invalid.value().target()
+    defer invalid_target.release()
+    discard(invalid.value().present(gpu.Color(red = 2.0)) catch failure:
+        assert(failure.code == gpu.invalid_color)
+        recover gpu.PresentResult.skipped)
+    assert(not invalid_target.is_valid())
+    let resized = try surface.frame()
+    defer resized.release()
+    let stale = try resized.value().target()
+    defer stale.release()
+    try host.resize(96, 64)
+    refused = false
+    stale.value().triangles(quad(gpu.Vertex())) catch failure:
+        assert(failure.code == gpu.frame_resized)
+        refused = true
+    assert(refused)
+    discard(resized.value().present() catch failure:
+        assert(failure.code == gpu.frame_resized)
+        recover gpu.PresentResult.skipped)
+    assert(not stale.is_valid())
+    let closing = try surface.frame()
+    defer closing.release()
+    let expired = try closing.value().target()
+    defer expired.release()
+    surface.destroy()
+    refused = false
+    expired.value().triangles(quad(gpu.Vertex())) catch failure:
+        assert(failure.code == gpu.closed)
+        refused = true
+    assert(refused)
+    closing.value().close()
+    assert(not expired.is_valid())
+    # Releasing the final frame releases surface exclusivity without closing the window.
+    var again = try gpu.Surface.open(device, host)
+    defer again.destroy()
+    let final = try again.frame()
+    defer final.release()
+    host.destroy()
+    discard(final.value().present() catch failure:
+        assert(failure.code == window.closed)
+        recover gpu.PresentResult.skipped)
+    final.value().close()
+
+## Refuse each ownership/view/command allocation, then prove the same operation
+## can succeed with no surviving storage from an earlier failed attempt.
+pub func failures() -> !:
+    let original = memory.heap
+    var tracker = allocation.Tracker(upstream = original)
+    memory.heap = &tracker
+    defer allocation.restore(original)
+    var succeeded = false
+    for stage in 0..<16:
+        tracker.remaining = (usize)stage
+        with tracker:
+            record() catch failure:
+                assert(failure.code == memory.exhausted)
+        tracker.remaining = none
+        ownership.collect()
+        assert(tracker.live == 0)
+    with tracker:
+        try record()
+        succeeded = true
+    ownership.collect()
+    assert(succeeded and tracker.live == 0)
+
+func record() -> !:
+    var frame = try gpu.Frame(window.Size(width = 10.0, height = 10.0, pixel_width = 10.0, pixel_height = 10.0, scale = 1.0))
+    defer frame.close()
+    let target = try frame.target()
+    defer target.release()
+    let child = try target.value().clipped(gpu.Rect(width = 5.0, height = 5.0))
+    defer child.release()
+    try child.value().triangles(quad(gpu.Vertex()))
+
+## This runs in a separate process: Base cannot transfer a recording view into
+## another ownership context, even if its frame remains alive on the caller.
+pub func wrong_thread() -> !:
+    var frame = try gpu.Frame(window.Size(scale = 1.0))
+    defer frame.close()
+    var target = try frame.target()
+    defer target.release()
+    var worker = try thread.spawn(read_target, (void*)&target)
+    try worker.join()
+    trap("a render target crossed runtime threads")
+
+func read_target(context: void*?):
+    let target = (interop.View[gpu.RenderTarget]*)(context else trap("missing target"))
+    discard(target.value())

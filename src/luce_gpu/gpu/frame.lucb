@@ -1,0 +1,273 @@
+#==============================================================================================
+#
+#   frame - Render regions and recorded frames
+#
+#   DESCRIPTION:
+#       A logical rectangle in points, relative to its parent's render region.
+#
+#==============================================================================================
+
+## A logical rectangle in points, relative to its parent's render region.
+pub struct Rect:
+    ## The left edge in points.
+    pub var x: f64
+    ## The top edge in points.
+    pub var y: f64
+    ## The width in points.
+    pub var width: f64
+    ## The height in points.
+    pub var height: f64
+
+struct FrameState:
+    var canvas: Canvas
+    var size: window.Size
+    # Presentation hooks are installed only by Surface.frame. Portable recording
+    # and its ownership metadata therefore have no native backend dependency.
+    var presentation: void*?
+    # The device a surface or texture frame draws on; a standalone frame has none.
+    var device: DeviceState*?
+    var validate: (func(void*, window.Size) -> unit!)?
+    var submit: (func(void*, Canvas, Color) -> PresentResult!)?
+    var release: (func(void*) -> unit)?
+    var ended: bool
+
+    func check() -> !:
+        if self.ended:
+            error(frame_finished, "the recording frame is finished")
+        if let context = self.presentation:
+            try (self.validate else trap("frame presentation has no validator"))(context, self.size)
+
+    mutating func close():
+        self.ended = true
+        self.canvas.destroy()
+        if let context = self.presentation:
+            self.presentation = none
+            (self.release else trap("frame presentation has no release operation"))(context)
+
+let frame_state_type: interop.Type[FrameState] = interop.Type[FrameState]("GPU frame state", FrameState.close, closeable = true)
+
+# mark: Frames and render targets =============================================================
+
+## One recording scope. A standalone Frame records portable commands for a
+## supplied extent. Surface.frame attaches one to a presentation surface.
+## Base copies borrow; Luce owns the exported object through ordinary ARC.
+pub struct Frame:
+    var state: interop.Reference[FrameState]?
+    var lease: interop.Lease?
+
+    ## Begin a standalone frame recording commands for `size`.
+    pub func init(size: window.Size) -> !:
+        try check_frame_size(size)
+        let native = try new FrameState(canvas = Canvas(), size = size)
+        let state = try interop.Reference[FrameState].adopt(native, frame_state_type)
+        errdefer state.release()
+        let lease = try state.lease()
+        self.state = state
+        self.lease = lease
+
+    func state_value() -> interop.Reference[FrameState]!:
+        return self.state else error(frame_finished, "the recording frame is finished")
+
+    ## The frame's extent in logical points and backing pixels.
+    pub func size() -> window.Size!:
+        let state = try self.state_value()
+        try state.value().check()
+        return state.value().size
+
+    ## The root drawing target covering the whole frame.
+    pub func target() -> interop.View[RenderTarget]!:
+        let state = (try self.state_value()).value()
+        try state.check()
+        let lease = self.lease else error(frame_finished, "the recording frame is finished")
+        let region = Rect(width = state.size.width, height = state.size.height)
+        let clip = Clip(width = (u32)state.size.pixel_width, height = (u32)state.size.pixel_height)
+        return try interop.View[RenderTarget].make(RenderTarget(state, lease, region, clip), render_target_type, lease)
+
+    ## End the scope on success or failure. A frame records the extent acquired at
+    ## its start; resize requires a new frame instead of stretching stale commands.
+    pub mutating func present(color: Color = Color()) -> PresentResult!:
+        let state = (try self.state_value()).value()
+        defer self.close()
+        try state.check()
+        try check_color(color)
+        let context = state.presentation else error(unavailable, "a standalone frame has no presentation surface")
+        let submit = state.submit else trap("frame presentation has no submit operation")
+        (self.lease else trap("an open frame has no lease")).invalidate()
+        state.ended = true
+        return try submit(context, state.canvas, color)
+
+    ## End the recording scope, releasing its resources.
+    pub mutating func close():
+        if let lease = self.lease:
+            self.lease = none
+            lease.invalidate()
+            lease.release()
+        if let state = self.state:
+            self.state = none
+            state.close()
+            state.release()
+
+    ## Visit the frame's owned objects for the interop garbage tracer.
+    pub func trace(visit: func(ownership.Object*, void*) -> unit, context: void*):
+        if let state = self.state:
+            state.trace(visit, context)
+        if let lease = self.lease:
+            lease.trace(visit, context)
+
+## The interop type of an exported `Frame`.
+pub let frame_type: interop.Type[Frame] = interop.Type[Frame]("GPU frame", Frame.close, Frame.trace, closeable = true)
+
+## A checked drawing view. Its private canvas never escapes. Child regions
+## intersect their parent's clip, while vertices retain their own clip coordinates.
+pub struct RenderTarget:
+    var frame: FrameState*
+    var lease: interop.Lease
+    var rectangle: Rect
+    var clipping: Clip
+
+    ## The target's extent in logical points and backing pixels.
+    pub func size() -> window.Size!:
+        try self.frame.check()
+        let scale_x = frame_scale(self.frame.size.pixel_width, self.frame.size.width)
+        let scale_y = frame_scale(self.frame.size.pixel_height, self.frame.size.height)
+        return window.Size(width = self.rectangle.width, height = self.rectangle.height,
+                           pixel_width = self.rectangle.width * scale_x, pixel_height = self.rectangle.height * scale_y,
+                           scale = self.frame.size.scale)
+
+    ## Where this target lies in its frame, in points: what a client shader
+    ## reading `gl_FragCoord` needs to map frame pixels back to this target.
+    pub func placement() -> Rect!:
+        try self.frame.check()
+        return self.rectangle
+
+    ## A child target for `rectangle`, its clip intersected with this target's.
+    pub func region(rectangle: Rect) -> interop.View[RenderTarget]!:
+        try self.frame.check()
+        try check_region(rectangle)
+        let absolute = Rect(self.rectangle.x + rectangle.x, self.rectangle.y + rectangle.y, rectangle.width, rectangle.height)
+        try check_region(absolute)
+        let scale_x = frame_scale(self.frame.size.pixel_width, self.frame.size.width)
+        let scale_y = frame_scale(self.frame.size.pixel_height, self.frame.size.height)
+        let clip = intersect_clip(self.clipping, absolute, scale_x, scale_y)
+        return try interop.View[RenderTarget].make(RenderTarget(self.frame, self.lease, absolute, clip), render_target_type, self.lease)
+
+    ## Narrow drawing without changing the coordinate system. Useful when a
+    ## layout clips a child whose geometry is already in its parent's coordinates.
+    pub func clipped(rectangle: Rect) -> interop.View[RenderTarget]!:
+        try self.frame.check()
+        try check_region(rectangle)
+        let absolute = Rect(self.rectangle.x + rectangle.x, self.rectangle.y + rectangle.y, rectangle.width, rectangle.height)
+        try check_region(absolute)
+        let scale_x = frame_scale(self.frame.size.pixel_width, self.frame.size.width)
+        let scale_y = frame_scale(self.frame.size.pixel_height, self.frame.size.height)
+        let clip = intersect_clip(self.clipping, absolute, scale_x, scale_y)
+        return try interop.View[RenderTarget].make(RenderTarget(self.frame, self.lease, self.rectangle, clip), render_target_type, self.lease)
+
+    ## Record a list of clip-space triangles into this target.
+    pub func triangles(vertices: const Vertex[], depth: bool = false) -> !:
+        try self.frame.check()
+        let scale_x = frame_scale(self.frame.size.pixel_width, self.frame.size.width)
+        let scale_y = frame_scale(self.frame.size.pixel_height, self.frame.size.height)
+        let viewport = Viewport(self.rectangle.x * scale_x, self.rectangle.y * scale_y,
+                                self.rectangle.width * scale_x, self.rectangle.height * scale_y)
+        try self.frame.canvas.triangles(vertices, self.clipping, depth, viewport)
+
+    ## Draw a top-down, tightly packed 8-bit coverage image tinted with a linear
+    ## color. Pixels are copied into the frame; the caller can reuse them at once.
+    ## Sampling is bilinear and clipped to this target, on every GPU backend.
+    pub func mask(pixels: const u8[], width: u32, height: u32, rectangle: Rect, color: Color) -> !:
+        try self.frame.check()
+        try check_region(rectangle)
+        let scale_x = frame_scale(self.frame.size.pixel_width, self.frame.size.width)
+        let scale_y = frame_scale(self.frame.size.pixel_height, self.frame.size.height)
+        let destination = Rect((self.rectangle.x + rectangle.x) * scale_x,
+                               (self.rectangle.y + rectangle.y) * scale_y, rectangle.width * scale_x, rectangle.height * scale_y)
+        try canvas_mask(&self.frame.canvas, pixels, width, height, destination, color,
+                        self.clipping, self.frame.size.pixel_width, self.frame.size.pixel_height)
+
+## The interop view type of a `RenderTarget`.
+pub let render_target_type: interop.ViewType[RenderTarget] = interop.ViewType[RenderTarget]("GPU render target")
+
+# mark: Base-only drawing on a target ==========================================================
+# Textures and devices are Base resources, so these are functions rather than
+# methods: a method mentioning them would hide the whole view from Luce.
+
+## An owned handle to the device `target`'s frame draws on, for creating
+## textures to draw into it; destroy it like any device handle. A standalone
+## frame has no device and returns `unavailable`.
+pub func device_of(target: const RenderTarget*) -> Device!:
+    try target.frame.check()
+    let state = target.frame.device else error(unavailable, "a standalone frame draws on no device")
+    state.references += 1
+    return Device(state = state)
+
+## Draw `source` texels of `texture` (the whole texture by default) scaled onto
+## `rectangle` of `target` in points, multiplied by `opacity`, sampled with
+## `filter` and clipped to the target. Texels are straight alpha and composite
+## over what is already drawn.
+pub func draw_image(target: const RenderTarget*, texture: Texture, rectangle: Rect, source: Region? = none, opacity: f64 = 1.0, filter: Filter = Filter.linear) -> !:
+    try target.frame.check()
+    try check_region(rectangle)
+    let state = try texture.checked()
+    let area = source else Region(0, 0, state.width, state.height)
+    let scale_x = frame_scale(target.frame.size.pixel_width, target.frame.size.width)
+    let scale_y = frame_scale(target.frame.size.pixel_height, target.frame.size.height)
+    let destination = Rect((target.rectangle.x + rectangle.x) * scale_x,
+                           (target.rectangle.y + rectangle.y) * scale_y, rectangle.width * scale_x, rectangle.height * scale_y)
+    try target.frame.canvas.image(state, area, destination, opacity, filter, target.clipping,
+                                  target.frame.size.pixel_width, target.frame.size.pixel_height)
+
+func frame_scale(pixels: f64, points: f64) -> f64:
+    return pixels / points if points > 0.0 else 0.0
+
+func check_frame_size(size: window.Size) -> !:
+    if not (size.width >= 0.0 and size.width <= 16384.0 and size.height >= 0.0 and size.height <= 16384.0 and size.pixel_width >= 0.0 and size.pixel_width <= 16384.0 and size.pixel_height >= 0.0 and size.pixel_height <= 16384.0 and size.scale > 0.0 and size.scale <= 16.0):
+        error(invalid_geometry, "frame extents must be finite, nonnegative and at most 16384 pixels/points")
+    if math.floor(size.pixel_width) != size.pixel_width or math.floor(size.pixel_height) != size.pixel_height:
+        error(invalid_geometry, "frame backing extents must be whole pixels")
+    if (size.width == 0.0) != (size.pixel_width == 0.0) or (size.height == 0.0) != (size.pixel_height == 0.0):
+        error(invalid_geometry, "empty logical and backing dimensions must agree")
+
+func check_region(region: Rect) -> !:
+    if not (region.x >= -16384.0 and region.x <= 16384.0 and region.y >= -16384.0 and region.y <= 16384.0 and region.width >= 0.0 and region.width <= 16384.0 and region.height >= 0.0 and region.height <= 16384.0):
+        error(invalid_geometry, "render regions need finite origins and nonnegative extents")
+
+func intersect_clip(parent: Clip, region: Rect, scale_x: f64, scale_y: f64) -> Clip:
+    let left = math.floor(math.max((f64)parent.x, region.x * scale_x))
+    let top = math.floor(math.max((f64)parent.y, region.y * scale_y))
+    let right = math.ceil(math.min((f64)parent.x + (f64)parent.width, (region.x + region.width) * scale_x))
+    let bottom = math.ceil(math.min((f64)parent.y + (f64)parent.height, (region.y + region.height) * scale_y))
+    if right <= left or bottom <= top:
+        return Clip()
+    return Clip((u32)left, (u32)top, (u32)(right - left), (u32)(bottom - top))
+
+## Draw `rectangle` of `target` (in points) with a client `pipeline`: `uniforms`
+## fill its push-constant block, `images` its sampled bindings 1.., all with
+## `filter`; `color` is the vertex color each fragment starts from. Clipped
+## like every other draw.
+pub func shade(target: const RenderTarget*, pipeline: Pipeline, rectangle: Rect, uniforms: const u8[]? = none, images: const Texture[]? = none,
+               filter: Filter = Filter.linear, color: Color = Color(1.0, 1.0, 1.0, 1.0)) -> !:
+    try target.frame.check()
+    try check_region(rectangle)
+    let state = try pipeline.checked()
+    var sampled: TextureState*?[4]
+    var count: usize = 0
+    if let list = images:
+        for image in list:
+            if count == image_limit:
+                error(invalid_geometry, "a draw samples at most 4 images")
+            sampled[count] = try image.checked()
+            count += 1
+    var bytes: u8[128]
+    var byte_count: usize = 0
+    if let data = uniforms:
+        if data.length > uniform_limit:
+            error(invalid_geometry, "a draw carries at most 128 uniform bytes")
+        memory.copy(bytes[..<data.length], data, data.length)
+        byte_count = data.length
+    let scale_x = frame_scale(target.frame.size.pixel_width, target.frame.size.width)
+    let scale_y = frame_scale(target.frame.size.pixel_height, target.frame.size.height)
+    let destination = Rect((target.rectangle.x + rectangle.x) * scale_x,
+                           (target.rectangle.y + rectangle.y) * scale_y, rectangle.width * scale_x, rectangle.height * scale_y)
+    try target.frame.canvas.shade(state, destination, color, bytes[..<byte_count], sampled[..<count], filter, target.clipping,
+                                  target.frame.size.pixel_width, target.frame.size.pixel_height)

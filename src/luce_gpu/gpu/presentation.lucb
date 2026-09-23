@@ -1,0 +1,53 @@
+#==============================================================================================
+#
+#   presentation - The surface dispatch boundary
+#
+#   DESCRIPTION:
+#       The dispatch boundary for surfaces: a surface's native payload, opaque here, opened on a
+#       window's presentation, rendered, waited for, and destroyed by the selected backend.
+#
+#==============================================================================================
+
+func backend_surface_open(device: DeviceState*, host: window.Presentation) -> void*!:
+    if platform.windows and device.backend == Backend.vulkan:
+        return (void*)try vulkan_surface_open((VulkanDevice*)device.native, host)
+    if platform.macos and platform.arm64:
+        if device.backend == Backend.metal:
+            return (void*)try metal_surface_open((MetalDevice*)device.native, host)
+    error(unsupported, "the GPU backend is not implemented")
+
+func backend_clear_present(device: DeviceState*, host: window.Presentation, native: void*, color: Color) -> PresentResult!:
+    if platform.windows and device.backend == Backend.vulkan:
+        return try vulkan_render((VulkanDevice*)device.native, host, (VulkanSurface*)native, Canvas(), color)
+    if platform.macos and platform.arm64:
+        if device.backend == Backend.metal:
+            return try metal_clear_present((MetalDevice*)device.native, host, (MetalSurface*)native, color)
+    error(unsupported, "the GPU backend is not implemented")
+
+func backend_surface_wait(device: DeviceState*, native: void*) -> !:
+    if platform.windows and device.backend == Backend.vulkan:
+        try vulkan_check(vkQueueWaitIdle(((VulkanDevice*)device.native).queue), "Vulkan execution failed")
+        return
+    if platform.macos and platform.arm64:
+        if device.backend == Backend.metal:
+            try metal_surface_wait((MetalSurface*)native)
+            return
+    error(unsupported, "the GPU backend is not implemented")
+
+func backend_render(device: DeviceState*, host: window.Presentation, native: void*, canvas: Canvas, color: Color) -> PresentResult!:
+    if platform.windows and device.backend == Backend.vulkan:
+        return try vulkan_render((VulkanDevice*)device.native, host, (VulkanSurface*)native, canvas, color)
+    if platform.macos and platform.arm64:
+        if device.backend == Backend.metal:
+            return try metal_render((MetalDevice*)device.native, host, (MetalSurface*)native, canvas, color)
+    error(unsupported, "the GPU backend is not implemented")
+
+func backend_surface_destroy(device: DeviceState*, host: window.Presentation, native: void*):
+    if platform.windows and device.backend == Backend.vulkan:
+        vulkan_surface_destroy((VulkanDevice*)device.native, (VulkanSurface*)native)
+        return
+    if platform.macos and platform.arm64:
+        if device.backend == Backend.metal:
+            metal_surface_destroy((MetalSurface*)native, host)
+            return
+    trap("invalid GPU backend during surface destruction")

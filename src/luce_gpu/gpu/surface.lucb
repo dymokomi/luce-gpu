@@ -1,0 +1,142 @@
+#==============================================================================================
+#
+#   surface - One sRGB presentation surface per window
+#
+#   DESCRIPTION:
+#       One opaque sRGB presentation surface per window. Copies alias ownership. The surface
+#       retains its device and exclusively leases the window's host. Window closure prevents
+#       further rendering, but either destruction order is safe. Destroy on the main thread;
+#       always destroy surfaces even after closing.
+#
+#==============================================================================================
+
+## One sRGB presentation surface for a window; copies alias ownership.
+pub struct Surface:
+    var state: SurfaceState*?
+
+    ## Open a surface presenting `device` onto `target`'s window.
+    pub static func open(device: Device, target: window.Window) -> Surface!:
+        let device_state = try device.checked()
+        var host = try target.acquire_presentation()
+        errdefer host.destroy()
+        let native = try backend_surface_open(device_state, host)
+        errdefer backend_surface_destroy(device_state, host, native)
+        let state = try new SurfaceState(device = device_state, host = host, native = native) in memory.heap
+        device_state.references += 1
+        return Surface(state = state)
+
+    ## Extent in logical points and backing pixels; refresh after resized events.
+    pub func size() -> window.Size!:
+        return try (try self.checked()).host.size()
+
+    ## Clear the entire target and queue presentation, with display synchronization.
+    ## Refreshes backing dimensions before each acquisition. At most one GPU
+    ## command is in flight per surface: a later call first waits for its predecessor
+    ## and reports execution errors. Acquisition may wait for the backend timeout
+    ## (Metal: about one second); this is not a nonblocking operation.
+    ## Backing dimensions beyond the backend's presentation limit return
+    ## surface_too_large; resize smaller and retry without recreating the surface.
+    pub func clear_present(color: Color = Color()) -> PresentResult!:
+        let state = try self.checked()
+        try check_color(color)
+        # Test window liveness even if no previous command is pending.
+        discard(try state.host.size())
+        if state.active_frame:
+            error(frame_in_use, "finish the active frame before presenting")
+        return try backend_clear_present(state.device, state.host, state.native, color)
+
+    ## Draw and present one canvas. Commands and input storage may be reused after
+    ## this returns; native resources remain alive until GPU completion. The same
+    ## resize, skipped-frame, and completion contracts as clear_present apply.
+    pub func render(canvas: Canvas, color: Color = Color()) -> PresentResult!:
+        let state = try self.checked()
+        try check_color(color)
+        discard(try state.host.size())
+        if state.active_frame:
+            error(frame_in_use, "finish the active frame before presenting")
+        try check_canvas_device(canvas, state.device)
+        try check_canvas_target(canvas, none)
+        return try backend_render(state.device, state.host, state.native, canvas, color)
+
+    ## Begin one scoped recording frame. Resize, parent closure, presentation or
+    ## cancellation invalidates drawing; retaining a target does not extend it.
+    pub func frame() -> interop.Reference[Frame]!:
+        let state = try self.checked()
+        if state.active_frame:
+            error(frame_in_use, "the surface already has an active frame")
+        let size = try state.host.size()
+        let native = try new Frame(size)
+        let owner = try interop.Reference[Frame].adopt(native, frame_type)
+        errdefer owner.release()
+        let recording = (try native.state_value()).value()
+        recording.presentation = (void*)state
+        recording.device = state.device
+        recording.validate = check_surface_frame
+        recording.submit = submit_surface_frame
+        recording.release = release_surface_frame
+        state.references += 1
+        state.active_frame = true
+        return owner
+
+    ## Wait for this surface's last submission and report its execution status.
+    ## Does not wait for the display to scan out the frame. Valid after Window
+    ## closure; use before destroy when execution errors must be observed.
+    pub func wait_idle() -> !:
+        let state = try self.checked()
+        try backend_surface_wait(state.device, state.native)
+
+    ## Idempotent on this value. Drain pending work and release all resources.
+    ## Cleanup cannot return an execution error; call wait_idle to observe it.
+    pub mutating func destroy():
+        let state = self.state else return
+        require_thread()
+        self.state = none
+        state.closed = true
+        release_surface(state)
+
+    func checked() -> SurfaceState*!:
+        try check_thread()
+        let state = self.state else error(closed, "the GPU surface is closed")
+        if state.closed:
+            error(closed, "the GPU surface is closed")
+        return state
+
+struct SurfaceState:
+    var device: DeviceState*
+    var host: window.Presentation
+    var native: void*
+    var references: usize = 1
+    var closed: bool
+    var active_frame: bool
+
+## Frames retain physical surface storage after operational closure. Backend work
+## and its presentation lease are released only when every frame has finished.
+func release_surface(state: SurfaceState*):
+    state.references -= 1
+    if state.references == 0:
+        backend_surface_destroy(state.device, state.host, state.native)
+        state.host.destroy()
+        release_device(state.device)
+        free(state) in memory.heap
+
+## Adapter from portable recording ownership to this presentation resource.
+func check_surface_frame(context: void*, acquired: window.Size) -> !:
+    let state = (SurfaceState*)context
+    try check_thread()
+    if state.closed:
+        error(closed, "the frame's surface is closed")
+    let size = try state.host.size()
+    if size.width != acquired.width or size.height != acquired.height or size.pixel_width != acquired.pixel_width or size.pixel_height != acquired.pixel_height:
+        error(frame_resized, "the surface changed size; begin a new frame")
+
+func submit_surface_frame(context: void*, canvas: Canvas, color: Color) -> PresentResult!:
+    let state = (SurfaceState*)context
+    try check_canvas_device(canvas, state.device)
+    try check_canvas_target(canvas, none)
+    return try backend_render(state.device, state.host, state.native, canvas, color)
+
+func release_surface_frame(context: void*):
+    require_thread()
+    let state = (SurfaceState*)context
+    state.active_frame = false
+    release_surface(state)

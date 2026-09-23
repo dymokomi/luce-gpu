@@ -1,0 +1,136 @@
+#==============================================================================================
+#
+#   surface - The Vulkan swapchain and its images
+#
+#   DESCRIPTION:
+#       The Vulkan swapchain presentation surface and the images it hands out.
+#
+#==============================================================================================
+
+struct VulkanImage:
+    var image: u64
+    var view: u64
+    var framebuffer: u64
+    var presented: u64
+
+# mark: The swapchain surface and its images ==================================================
+
+struct VulkanSurface:
+    var surface: u64
+    var swapchain: u64
+    var images: VulkanImage[]
+    var width: u32
+    var height: u32
+    var format: u32
+    var pool: u64
+    var command: u64
+    var acquired: u64
+    var dirty: bool = true
+    var poisoned: bool
+
+func vulkan_surface_open(device: VulkanDevice*, host: window.Presentation) -> VulkanSurface*!:
+    let state = try new VulkanSurface() in memory.heap
+    errdefer vulkan_surface_destroy(device, state)
+    state.surface = try vulkan_presentation_surface(device.instance, host)
+    var can_present: u32 = 0
+    try vulkan_check(vkGetPhysicalDeviceSurfaceSupportKHR(device.physical, device.family, state.surface, &can_present), "Vulkan presentation support could not be checked")
+    if can_present == 0:
+        error(unavailable, "the Vulkan queue cannot present to this window")
+    var pool_info = VkCommandPoolCreateInfo(sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, queueFamilyIndex = device.family)
+    try vulkan_check(vkCreateCommandPool(device.device, &pool_info, none, &state.pool), "the Vulkan command pool could not be created")
+    var command_info = VkCommandBufferAllocateInfo(sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, commandPool = state.pool, commandBufferCount = 1)
+    try vulkan_check(vkAllocateCommandBuffers(device.device, &command_info, &state.command), "the Vulkan command buffer could not be allocated")
+    var semaphore_info = VkSemaphoreCreateInfo(sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO)
+    try vulkan_check(vkCreateSemaphore(device.device, &semaphore_info, none, &state.acquired), "the Vulkan acquisition semaphore could not be created")
+    return state
+
+func vulkan_image_view(device: VulkanDevice*, image: u64, pixel_format: u32, aspect: u32) -> u64!:
+    var info = VkImageViewCreateInfo(sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, image = image,
+                                     viewType = VK_IMAGE_VIEW_TYPE_2D, format = pixel_format, subresourceRange = VkImageSubresourceRange(aspectMask = aspect, levelCount = 1, layerCount = 1))
+    var view: u64 = 0
+    try vulkan_check(vkCreateImageView(device.device, &info, none, &view), "a Vulkan image view could not be created")
+    return view
+
+func vulkan_swapchain(device: VulkanDevice*, state: VulkanSurface*, width: u32, height: u32) -> !:
+    try vulkan_check(vkDeviceWaitIdle(device.device), "Vulkan could not finish before resizing")
+    vulkan_swapchain_destroy(device, state)
+    errdefer vulkan_swapchain_destroy(device, state)
+    var capabilities: VkSurfaceCapabilitiesKHR
+    try vulkan_check(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device.physical, state.surface, &capabilities), "Vulkan surface capabilities are unavailable")
+    var extent = capabilities.currentExtent
+    if extent.width == 4294967295:
+        extent.width = (u32)canvas_max((usize)capabilities.minImageExtent.width, canvas_min((usize)width, (usize)capabilities.maxImageExtent.width))
+        extent.height = (u32)canvas_max((usize)capabilities.minImageExtent.height, canvas_min((usize)height, (usize)capabilities.maxImageExtent.height))
+    if extent.width == 0 or extent.height == 0:
+        return
+    if extent.width > 16384 or extent.height > 16384:
+        error(surface_too_large, "Vulkan presentation supports at most 16384 pixels per dimension")
+    if (capabilities.supportedUsageFlags & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) == 0 or (capabilities.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR) == 0:
+        error(unavailable, "the Vulkan surface cannot provide opaque color attachments")
+    var count: u32 = 0
+    try vulkan_check(vkGetPhysicalDeviceSurfaceFormatsKHR(device.physical, state.surface, &count, none), "Vulkan surface formats are unavailable")
+    let formats = try alloc VkSurfaceFormatKHR[(usize)count]
+    defer free(formats)
+    try vulkan_check(vkGetPhysicalDeviceSurfaceFormatsKHR(device.physical, state.surface, &count, formats.data), "Vulkan surface formats changed")
+    var pixel_format: u32 = 0
+    for index in 0..<(usize)count:
+        if formats[index].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR:
+            if formats[index].format == VK_FORMAT_B8G8R8A8_SRGB or formats[index].format == VK_FORMAT_R8G8B8A8_SRGB:
+                pixel_format = formats[index].format
+                break
+            if formats[index].format == VK_FORMAT_UNDEFINED:
+                pixel_format = VK_FORMAT_B8G8R8A8_SRGB
+    if pixel_format == 0:
+        error(unavailable, "the Vulkan surface has no sRGB render target")
+    var desired = capabilities.minImageCount + 1
+    if capabilities.maxImageCount > 0 and desired > capabilities.maxImageCount:
+        desired = capabilities.maxImageCount
+    var info = VkSwapchainCreateInfoKHR(sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
+                                        surface = state.surface, minImageCount = desired, imageFormat = pixel_format, imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
+                                        imageExtent = extent, imageArrayLayers = 1, imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+                                        preTransform = capabilities.currentTransform, compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR, presentMode = VK_PRESENT_MODE_FIFO_KHR, clipped = VK_TRUE)
+    try vulkan_check(vkCreateSwapchainKHR(device.device, &info, none, &state.swapchain), "the Vulkan swapchain could not be created")
+    state.width = extent.width
+    state.height = extent.height
+    state.format = pixel_format
+    let drawing = try vulkan_format_state(device, pixel_format)
+    let depth_view = try vulkan_depth_for(device, extent.width, extent.height)
+    count = 0
+    try vulkan_check(vkGetSwapchainImagesKHR(device.device, state.swapchain, &count, none), "Vulkan swapchain images are unavailable")
+    let images = try alloc u64[(usize)count]
+    defer free(images)
+    try vulkan_check(vkGetSwapchainImagesKHR(device.device, state.swapchain, &count, images.data), "Vulkan swapchain images changed")
+    state.images = try alloc VulkanImage[(usize)count] in memory.heap
+    for index in 0..<(usize)count:
+        state.images[index].image = images[index]
+        state.images[index].view = try vulkan_image_view(device, images[index], pixel_format, VK_IMAGE_ASPECT_COLOR_BIT)
+        var attachments: u64[2] = [state.images[index].view, depth_view]
+        var framebuffer_info = VkFramebufferCreateInfo(sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+                                                       renderPass = drawing.pass_present, attachmentCount = 2, pAttachments = &attachments[0], width = extent.width, height = extent.height, layers = 1)
+        try vulkan_check(vkCreateFramebuffer(device.device, &framebuffer_info, none, &state.images[index].framebuffer), "a Vulkan framebuffer could not be created")
+        var semaphore_info = VkSemaphoreCreateInfo(sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO)
+        try vulkan_check(vkCreateSemaphore(device.device, &semaphore_info, none, &state.images[index].presented), "a Vulkan presentation semaphore could not be created")
+    state.dirty = false
+
+func vulkan_swapchain_destroy(device: VulkanDevice*, state: VulkanSurface*):
+    for image in state.images:
+        if image.framebuffer != 0: vkDestroyFramebuffer(device.device, image.framebuffer, none)
+        if image.view != 0: vkDestroyImageView(device.device, image.view, none)
+        if image.presented != 0: vkDestroySemaphore(device.device, image.presented, none)
+    if state.images.length > 0:
+        free(state.images) in memory.heap
+    var empty: VulkanImage[]
+    state.images = empty
+    if state.swapchain != 0: vkDestroySwapchainKHR(device.device, state.swapchain, none)
+    state.swapchain = 0
+    state.width = 0
+    state.height = 0
+    state.dirty = true
+
+func vulkan_surface_destroy(device: VulkanDevice*, state: VulkanSurface*):
+    discard(vkDeviceWaitIdle(device.device))
+    vulkan_swapchain_destroy(device, state)
+    if state.acquired != 0: vkDestroySemaphore(device.device, state.acquired, none)
+    if state.pool != 0: vkDestroyCommandPool(device.device, state.pool, none)
+    if state.surface != 0: vkDestroySurfaceKHR(device.instance, state.surface, none)
+    free(state) in memory.heap

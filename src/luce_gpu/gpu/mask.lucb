@@ -1,0 +1,44 @@
+#==============================================================================================
+#
+#   mask - Backend-neutral coverage commands
+#
+#   DESCRIPTION:
+#       A backend-neutral coverage command. Storage-buffer sampling keeps this small primitive
+#       independent of texture formats and descriptor ownership in callers. Each frame owns at
+#       most 16 MiB of packed coverage; regular triangles use none. The parameters a draw
+#       carries are in params.lucb.
+#
+#==============================================================================================
+
+func canvas_mask(canvas: Canvas*, pixels: const u8[], width: u32, height: u32,
+                 rectangle: Rect, color: Color, clip: Clip, target_width: f64, target_height: f64) -> !:
+    try check_color(color)
+    if width == 0 or height == 0 or width > 16384 or height > 16384 or pixels.length != (usize)width * (usize)height:
+        error(invalid_geometry, "coverage dimensions must match tightly packed pixels, in 1..16384")
+    if rectangle.width == 0.0 or rectangle.height == 0.0 or clip.width == 0 or clip.height == 0:
+        return
+    let words = (pixels.length + 3) // 4
+    if words > 4194304 - canvas.coverage_count:
+        error(command_limit, "a frame supports at most 16 MiB of coverage images")
+    let needed = canvas.coverage_count + words
+    if needed > canvas.coverage.length:
+        let capacity = canvas_max(needed, canvas_min(4194304, canvas_max(1024, canvas.coverage.length * 2)))
+        let grown = try alloc u32[capacity] in memory.heap
+        if canvas.coverage_count > 0:
+            memory.copy(grown, canvas.coverage, canvas.coverage_count)
+        if canvas.coverage.length > 0:
+            free(canvas.coverage) in memory.heap
+        canvas.coverage = grown
+    try canvas.triangles(quad_vertices(rectangle, Color(color.red, color.green, color.blue, color.alpha), target_width, target_height), clip)
+    # Packing is explicit: Vulkan and Metal read the same uint words regardless
+    # of the host's byte ordering. Complete the append only after allocations.
+    for word in 0..<words:
+        var packed: u32 = 0
+        for byte in 0..<(usize)4:
+            let index = word * 4 + byte
+            if index < pixels.length:
+                packed |= (u32)pixels[index] << (u32)(byte * 8)
+        canvas.coverage[canvas.coverage_count + word] = packed
+    canvas.draws[canvas.draw_count - 1].params = DrawParams((f32)rectangle.x, (f32)rectangle.y, (f32)rectangle.width, (f32)rectangle.height,
+                                                            width, height, (u32)(canvas.coverage_count * 4), draw_coverage, 0.0, 0.0, 0.0, 0.0)
+    canvas.coverage_count = needed

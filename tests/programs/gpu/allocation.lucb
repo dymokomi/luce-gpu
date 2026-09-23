@@ -1,0 +1,91 @@
+## Count Base-owned allocations and refuse each construction stage in turn.
+## Native Objective-C allocations are covered by Metal validation and the native
+## ownership review; this allocator specifically proves Base storage unwinding.
+import gpu
+import interop
+import ownership
+import memory
+import window
+
+pub func restore(heap: memory.Allocator):
+    memory.heap = heap
+
+pub struct Tracker: memory.Allocator:
+    pub var upstream: memory.Allocator
+    pub var live: usize
+    pub var remaining: usize?
+
+    pub mutating func allocate(size: usize, alignment: usize) -> u8[]?:
+        if let remaining = self.remaining:
+            if remaining == 0:
+                return none
+            self.remaining = remaining - 1
+        let block = self.upstream.allocate(size, alignment) else return none
+        self.live += 1
+        return block
+
+    pub mutating func resize(block: u8[], size: usize) -> bool:
+        return self.upstream.resize(block, size)
+
+    pub mutating func release(block: u8[]):
+        assert(self.live > 0)
+        self.live -= 1
+        self.upstream.release(block)
+
+pub func failures(tracker: Tracker*) -> !:
+    let baseline = tracker.live
+    var stage: usize = 0
+    while stage < 2:
+        tracker.remaining = stage
+        var refused = false
+        var device = gpu.Device.open() catch failure:
+            assert(failure.code == memory.exhausted)
+            refused = true
+            recover gpu.Device()
+        device.destroy()
+        tracker.remaining = none
+        assert(refused and tracker.live == baseline)
+        stage += 1
+    var device = try gpu.Device.open()
+    defer device.destroy()
+    var target = try window.Window.open(window.Options(title = "GPU allocation unwind"))
+    defer target.destroy()
+    let owned = tracker.live
+    stage = 0
+    while stage < 2:
+        tracker.remaining = stage
+        var refused = false
+        var surface = gpu.Surface.open(device, target) catch failure:
+            assert(failure.code == memory.exhausted)
+            refused = true
+            recover gpu.Surface()
+        surface.destroy()
+        tracker.remaining = none
+        assert(refused and tracker.live == owned)
+        # A failed attachment must return the window lease, including when the
+        # native layer was installed before the last Base allocation failed.
+        var again = try gpu.Surface.open(device, target)
+        again.destroy()
+        assert(tracker.live == owned)
+        stage += 1
+
+    var surface = try gpu.Surface.open(device, target)
+    defer surface.destroy()
+    let recording_baseline = tracker.live
+    for frame_stage in 0..<10:
+        tracker.remaining = (usize)frame_stage
+        with tracker:
+            let acquired: interop.Reference[gpu.Frame]? = surface.frame() catch failure:
+                assert(failure.code == memory.exhausted)
+                recover none
+            if let frame = acquired:
+                frame.release()
+        tracker.remaining = none
+        ownership.collect()
+        assert(tracker.live == recording_baseline)
+        # Failed construction must not consume the surface's recording slot.
+        with tracker:
+            let retry = try surface.frame()
+            retry.release()
+        ownership.collect()
+        assert(tracker.live == recording_baseline)

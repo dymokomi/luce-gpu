@@ -1,0 +1,189 @@
+#==============================================================================================
+#
+#   render - Vulkan command recording and uploads
+#
+#   DESCRIPTION:
+#       Vulkan command recording and buffer uploads for one pass: the vertex and coverage
+#       buffer, one descriptor set per draw naming the coverage buffer and the sampled image,
+#       and the encoding shared by presentation and offscreen passes.
+#
+#==============================================================================================
+
+# mark: Vertex and coverage uploads ===========================================================
+struct VulkanUpload:
+    var buffer: u64
+    var block: u64
+    var descriptor_pool: u64
+    var descriptors: u64[]
+
+func vulkan_upload_destroy(device: VulkanDevice*, upload: VulkanUpload):
+    if upload.descriptor_pool != 0: vkDestroyDescriptorPool(device.device, upload.descriptor_pool, none)
+    if upload.buffer != 0: vkDestroyBuffer(device.device, upload.buffer, none)
+    if upload.block != 0: vkFreeMemory(device.device, upload.block, none)
+    if upload.descriptors.length > 0: free(upload.descriptors) in memory.heap
+
+func vulkan_vertex_offset(canvas: Canvas) -> usize:
+    # Vulkan requires storage-buffer offsets to honor the device alignment. A
+    # dedicated prefix at offset zero avoids imposing any guessed alignment.
+    return (canvas_max(1, canvas.coverage_count) * 4 + 31) // 32 * 32
+
+func vulkan_upload(device: VulkanDevice*, canvas: Canvas) -> VulkanUpload!:
+    var upload: VulkanUpload
+    errdefer vulkan_upload_destroy(device, upload)
+    if canvas.vertex_count == 0:
+        return upload
+    try vulkan_drawing(device)
+    let vertex_bytes = canvas.vertex_count * sizeof(Vertex)
+    let mask_bytes = canvas_max(1, canvas.coverage_count) * 4
+    let vertex_offset = vulkan_vertex_offset(canvas)
+    let bytes = vertex_offset + vertex_bytes
+    var info = VkBufferCreateInfo(sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, size = (u64)bytes, usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT)
+    try vulkan_check(vkCreateBuffer(device.device, &info, none, &upload.buffer), "the Vulkan vertex buffer could not be created")
+    var requirements: VkMemoryRequirements
+    vkGetBufferMemoryRequirements(device.device, upload.buffer, &requirements)
+    upload.block = try vulkan_memory(device, requirements, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+    try vulkan_check(vkBindBufferMemory(device.device, upload.buffer, upload.block, 0), "Vulkan vertex memory could not be bound")
+    var mapped: void*? = none
+    try vulkan_check(vkMapMemory(device.device, upload.block, 0, (u64)bytes, 0, &mapped), "Vulkan vertex memory could not be mapped")
+    let destination = mapped else error(failed, "Vulkan returned an empty memory mapping")
+    let masks = u32[]((u32*)destination, canvas_max(1, canvas.coverage_count))
+    masks[0] = 0
+    if canvas.coverage_count > 0:
+        memory.copy(masks, canvas.coverage, canvas.coverage_count)
+    memory.copy(u8[]((u8*)destination + vertex_offset, vertex_bytes), u8[]((u8*)canvas.vertices.data, vertex_bytes), vertex_bytes)
+    vkUnmapMemory(device.device, upload.block)
+    let count = (u32)canvas.draw_count
+    var pool_sizes: VkDescriptorPoolSize[2] = [
+        VkDescriptorPoolSize(descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, descriptorCount = count),
+        VkDescriptorPoolSize(descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, descriptorCount = count * (u32)image_limit)]
+    var pool_info = VkDescriptorPoolCreateInfo(sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, maxSets = count, poolSizeCount = 2, pPoolSizes = &pool_sizes[0])
+    try vulkan_check(vkCreateDescriptorPool(device.device, &pool_info, none, &upload.descriptor_pool), "Vulkan draw descriptors could not be created")
+    upload.descriptors = try alloc u64[canvas.draw_count] in memory.heap
+    let layouts = try alloc u64[canvas.draw_count] in memory.heap
+    defer free(layouts) in memory.heap
+    for index in 0..<canvas.draw_count:
+        layouts[index] = device.descriptor_layout
+    var set_info = VkDescriptorSetAllocateInfo(sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, descriptorPool = upload.descriptor_pool, descriptorSetCount = count, pSetLayouts = layouts.data)
+    try vulkan_check(vkAllocateDescriptorSets(device.device, &set_info, upload.descriptors.data), "Vulkan draw descriptors could not be allocated")
+    var buffer_info = VkDescriptorBufferInfo(buffer = upload.buffer, range = (u64)mask_bytes)
+    let placeholder = device.placeholder else trap("Vulkan drawing state has no placeholder image")
+    for index in 0..<canvas.draw_count:
+        let draw = canvas.draws[index]
+        var image_infos: VkDescriptorImageInfo[4]
+        var writes: VkWriteDescriptorSet[5]
+        for slot in 0..<image_limit:
+            var image = placeholder
+            if let texture = draw.images[slot]:
+                image = (VulkanTexture*)texture.native
+            image_infos[slot] = VkDescriptorImageInfo(sampler = device.linear if draw.filter == Filter.linear else device.nearest,
+                                                      imageView = image.view, imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+            writes[slot] = VkWriteDescriptorSet(sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, dstSet = upload.descriptors[index], dstBinding = (u32)slot + 1, descriptorCount = 1,
+                                                descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, pImageInfo = &image_infos[slot])
+        writes[4] = VkWriteDescriptorSet(sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, dstSet = upload.descriptors[index], dstBinding = 5, descriptorCount = 1,
+                                         descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, pBufferInfo = &buffer_info)
+        vkUpdateDescriptorSets(device.device, 5, &writes[0], 0, none)
+    return upload
+
+# mark: Encoding and rendering ================================================================
+## Record one render pass of `canvas` into `framebuffer` on `command`, clearing to
+## `color`. Presentation clears opaque; texture passes keep the alpha.
+func vulkan_encode(device: VulkanDevice*, command: u64, formats: VulkanFormatState*, pass: u64, framebuffer: u64,
+                   canvas: Canvas, upload: VulkanUpload, color: Color, width: u32, height: u32) -> !:
+    var clears: VkClearValue[2]
+    clears[0].color = [(f32)(color.red * color.alpha), (f32)(color.green * color.alpha), (f32)(color.blue * color.alpha), (f32)color.alpha]
+    clears[1].color[0] = 1.0
+    var begin = VkRenderPassBeginInfo(sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, renderPass = pass, framebuffer = framebuffer,
+                                      renderArea = VkRect2D(extent = VkExtent2D(width = width, height = height)), clearValueCount = 2, pClearValues = &clears[0])
+    vkCmdBeginRenderPass(command, &begin, VK_SUBPASS_CONTENTS_INLINE)
+    if canvas.vertex_count > 0:
+        var buffer = upload.buffer
+        var offset: u64 = (u64)vulkan_vertex_offset(canvas)
+        vkCmdBindVertexBuffers(command, 0, 1, &buffer, &offset)
+        for index in 0..<canvas.draw_count:
+            let draw = canvas.draws[index]
+            if draw.clip.x >= width or draw.clip.y >= height:
+                continue
+            var scissor = VkRect2D(offset = VkOffset2D(x = (i32)draw.clip.x, y = (i32)draw.clip.y),
+                                   extent = VkExtent2D(width = (u32)canvas_min((usize)draw.clip.width, (usize)(width - draw.clip.x)),
+                                                       height = (u32)canvas_min((usize)draw.clip.height, (usize)(height - draw.clip.y))))
+            if scissor.extent.width == 0 or scissor.extent.height == 0:
+                continue
+            var viewport = VkViewport(width = (f32)width, height = (f32)height, maxDepth = 1.0)
+            if let region = draw.viewport:
+                viewport.x = (f32)region.x
+                viewport.y = (f32)region.y
+                viewport.width = (f32)region.width
+                viewport.height = (f32)region.height
+            vkCmdSetViewport(command, 0, 1, &viewport)
+            vkCmdSetScissor(command, 0, 1, &scissor)
+            var selected = formats.depth_test if draw.depth else formats.overlay
+            if let custom = draw.pipeline:
+                selected = try vulkan_pipeline_for(device, (VulkanPipeline*)custom.native, formats.format)
+            vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, selected)
+            var descriptor = upload.descriptors[index]
+            vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, device.layout, 0, 1, &descriptor, 0, none)
+            if draw.uniform_count > 0:
+                var uniforms = draw.uniforms
+                vkCmdPushConstants(command, device.layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, (u32)uniform_limit, &uniforms)
+            else:
+                var params = draw.params
+                vkCmdPushConstants(command, device.layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 48, &params)
+            vkCmdDraw(command, (u32)draw.count, 1, (u32)draw.first, 0)
+    vkCmdEndRenderPass(command)
+
+func vulkan_poison(state: VulkanSurface*):
+    state.poisoned = true
+
+func vulkan_render(device: VulkanDevice*, host: window.Presentation, state: VulkanSurface*, canvas: Canvas, color: Color) -> PresentResult!:
+    if state.poisoned:
+        error(execution_failed, "a previous Vulkan submission failed; recreate the surface")
+    if not try host.visible():
+        return PresentResult.skipped
+    let size = try host.size()
+    if size.pixel_width <= 0.0 or size.pixel_height <= 0.0:
+        return PresentResult.skipped
+    if size.pixel_width > 16384.0 or size.pixel_height > 16384.0:
+        error(surface_too_large, "Vulkan presentation supports at most 16384 pixels per dimension")
+    let width = (u32)size.pixel_width
+    let height = (u32)size.pixel_height
+    if state.dirty or state.width != width or state.height != height:
+        try vulkan_swapchain(device, state, width, height)
+    if state.swapchain == 0:
+        return PresentResult.skipped
+    let formats = try vulkan_format_state(device, state.format)
+    let upload = try vulkan_upload(device, canvas)
+    defer vulkan_upload_destroy(device, upload)
+    try vulkan_check(vkResetCommandPool(device.device, state.pool, 0), "the Vulkan command pool could not be reset")
+    var index: u32 = 0
+    let acquired = vkAcquireNextImageKHR(device.device, state.swapchain, 1000000000, state.acquired, 0, &index)
+    if acquired == VK_NOT_READY or acquired == VK_TIMEOUT:
+        return PresentResult.skipped
+    if acquired == VK_ERROR_OUT_OF_DATE_KHR:
+        state.dirty = true
+        return PresentResult.skipped
+    if acquired != VK_SUCCESS and acquired != VK_SUBOPTIMAL_KHR:
+        error(execution_failed, "Vulkan could not acquire a presentation image")
+    # Never reuse synchronization after a partially failed submission.
+    errdefer vulkan_poison(state)
+    # A failure after queue submission still waits before releasing upload memory.
+    errdefer discard(vkDeviceWaitIdle(device.device))
+    var begin = VkCommandBufferBeginInfo(sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT)
+    try vulkan_check(vkBeginCommandBuffer(state.command, &begin), "Vulkan command recording could not begin")
+    try vulkan_encode(device, state.command, formats, formats.pass_present, state.images[(usize)index].framebuffer, canvas, upload,
+                      Color(color.red, color.green, color.blue, 1.0), state.width, state.height)
+    try vulkan_check(vkEndCommandBuffer(state.command), "Vulkan command recording could not finish")
+    var wait_stage: u32 = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+    var signal = state.images[(usize)index].presented
+    var submit = VkSubmitInfo(sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, waitSemaphoreCount = 1, pWaitSemaphores = &state.acquired,
+                              pWaitDstStageMask = &wait_stage, commandBufferCount = 1, pCommandBuffers = &state.command,
+                              signalSemaphoreCount = 1, pSignalSemaphores = &signal)
+    try vulkan_check(vkQueueSubmit(device.queue, 1, &submit, 0), "Vulkan command submission failed")
+    var present = VkPresentInfoKHR(sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, waitSemaphoreCount = 1, pWaitSemaphores = &signal,
+                                   swapchainCount = 1, pSwapchains = &state.swapchain, pImageIndices = &index)
+    let result = vkQueuePresentKHR(device.queue, &present)
+    try vulkan_check(vkQueueWaitIdle(device.queue), "Vulkan execution failed")
+    if result == VK_ERROR_OUT_OF_DATE_KHR or result == VK_SUBOPTIMAL_KHR or acquired == VK_SUBOPTIMAL_KHR:
+        state.dirty = true
+    if result != VK_SUCCESS and result != VK_ERROR_OUT_OF_DATE_KHR and result != VK_SUBOPTIMAL_KHR:
+        error(execution_failed, "Vulkan presentation failed")
+    return PresentResult.submitted

@@ -1,0 +1,25 @@
+#==============================================================================================
+#
+#   windows - Win32 Vulkan surface creation
+#
+#   DESCRIPTION:
+#       Win32 WSI owns the HWND and HINSTANCE boundary. No rendering operation depends on
+#       these handles after vkCreateWin32SurfaceKHR creates the surface.
+#
+#==============================================================================================
+
+from windows_abi import GetModuleHandleW
+## Win32 WSI owns the HWND and HINSTANCE boundary. No rendering operation
+## depends on these handles after vkCreateWin32SurfaceKHR creates the surface.
+
+let vulkan_windows_extensions: c.str[2] = [VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME]
+
+func vulkan_windows_support(physical: u64, family: u32) -> bool:
+    return vkGetPhysicalDeviceWin32PresentationSupportKHR(physical, family) != VK_FALSE
+
+func vulkan_windows_surface(instance: u64, host: window.Presentation) -> u64!:
+    var info = VkWin32SurfaceCreateInfoKHR(sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR,
+                                           hinstance = GetModuleHandleW(none), hwnd = try host.windows_handle())
+    var surface: u64 = 0
+    try vulkan_check(vkCreateWin32SurfaceKHR(instance, &info, none, &surface), "the Vulkan Windows surface could not be created")
+    return surface

@@ -1,0 +1,41 @@
+#==============================================================================================
+#
+#   backend - The device dispatch boundary
+#
+#   DESCRIPTION:
+#       The dispatch boundary between portable device ownership and the graphics
+#       implementations: selection, and a device's native payload, opaque here; Metal types live
+#       in metal/. Surface dispatch is in presentation.lucb, so a program that opens a device
+#       alone links no window system: each file is one member of the library (§16.6). A Vulkan
+#       backend can own its instance/device/queues in its device payload and its
+#       VkSurfaceKHR/swapchain/synchronization in its surface payload. It must satisfy the same
+#       sRGB, lease, resize, completion, and skipped-frame contracts.
+#
+#==============================================================================================
+
+func select_backend(requested: Backend) -> Backend!:
+    if platform.windows and platform.x86_64:
+        if requested == Backend.automatic or requested == Backend.vulkan:
+            return Backend.vulkan
+    if platform.macos and platform.arm64:
+        if requested == Backend.automatic or requested == Backend.metal:
+            return Backend.metal
+    error(unsupported, "the requested GPU backend is not implemented")
+
+func backend_device_open(backend: Backend) -> void*!:
+    if platform.windows and backend == Backend.vulkan:
+        return (void*)try vulkan_device_open()
+    if platform.macos and platform.arm64:
+        if backend == Backend.metal:
+            return (void*)try metal_device_open()
+    error(unsupported, "the GPU backend is not implemented")
+
+func backend_device_destroy(backend: Backend, native: void*):
+    if platform.windows and backend == Backend.vulkan:
+        vulkan_device_destroy((VulkanDevice*)native)
+        return
+    if platform.macos and platform.arm64:
+        if backend == Backend.metal:
+            metal_device_destroy((MetalDevice*)native)
+            return
+    trap("invalid GPU backend during device destruction")

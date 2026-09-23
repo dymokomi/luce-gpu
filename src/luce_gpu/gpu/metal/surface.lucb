@@ -1,0 +1,108 @@
+#==============================================================================================
+#
+#   surface - The Metal presentation surface
+#
+#   DESCRIPTION:
+#       The Metal presentation surface backing a window, kept private to the backend.
+#
+#==============================================================================================
+
+struct MetalSurface:
+    var layer: void*?
+    var pending: void*?
+    var faulted: bool
+
+## Conservative 2D texture baseline across the supported Mac GPU families.
+## Some newer devices allow larger textures; a later capability API can expose
+## that. Do not infer safety from the window's logical-point limit: Retina backing
+## pixels can exceed this limit after a perfectly valid Window.resize call.
+let metal_surface_limit: f64 = 16384.0
+
+func metal_surface_open(device: MetalDevice*, host: window.Presentation) -> MetalSurface*!:
+    let pool = objc_autoreleasePoolPush()
+    defer objc_autoreleasePoolPop(pool)
+    let view = try host.macos_view()
+    let state = try new MetalSurface() in memory.heap
+    errdefer metal_surface_destroy(state, host)
+    let layer = metal_ptr(try metal_class("CAMetalLayer"), metal_sel("new")) else error(failed, "could not create a Metal presentation layer")
+    state.layer = layer
+    metal_object(layer, metal_sel("setDevice:"), device.device)
+    # MTLPixelFormatBGRA8Unorm_sRGB, framebuffer-only, opaque, display synchronized.
+    metal_uint_arg(layer, metal_sel("setPixelFormat:"), 81)
+    metal_bool_arg(layer, metal_sel("setFramebufferOnly:"), true)
+    metal_bool_arg(layer, metal_sel("setOpaque:"), true)
+    metal_bool_arg(layer, metal_sel("setDisplaySyncEnabled:"), false)
+    metal_bool_arg(layer, metal_sel("setAllowsNextDrawableTimeout:"), true)
+    metal_bool_arg(layer, metal_sel("setPresentsWithTransaction:"), false)
+    let space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB) else error(failed, "could not create the sRGB presentation color space")
+    defer CGColorSpaceRelease(space)
+    metal_object(layer, metal_sel("setColorspace:"), space)
+    # A layer-hosting view: supply the layer before enabling wantsLayer. AppKit
+    # manages the layer's frame; we explicitly update pixel extent before drawing.
+    metal_object(view, metal_sel("setLayer:"), layer)
+    metal_bool_arg(view, metal_sel("setWantsLayer:"), true)
+    return state
+
+func metal_surface_wait(state: MetalSurface*) -> !:
+    let pool = objc_autoreleasePoolPush()
+    defer objc_autoreleasePoolPop(pool)
+    if let command = state.pending:
+        state.pending = none
+        defer metal_void(command, metal_sel("release"))
+        metal_void(command, metal_sel("waitUntilCompleted"))
+        # MTLCommandBufferStatusCompleted is 4. Errors remain sticky; continuing
+        # a failed surface requires explicit destruction and recreation.
+        if metal_uint(command, metal_sel("status")) != 4:
+            state.faulted = true
+    if state.faulted:
+        error(execution_failed, "Metal command execution failed; recreate the GPU surface")
+
+func metal_clear_present(device: MetalDevice*, host: window.Presentation, state: MetalSurface*, color: Color) -> PresentResult!:
+    return try metal_render(device, host, state, Canvas(), color)
+
+func metal_render(device: MetalDevice*, host: window.Presentation, state: MetalSurface*, canvas: Canvas, color: Color) -> PresentResult!:
+    let pool = objc_autoreleasePoolPush()
+    defer objc_autoreleasePoolPop(pool)
+    try metal_surface_wait(state)
+    if not try host.visible():
+        return PresentResult.skipped
+    let size = try host.size()
+    if size.pixel_width <= 0.0 or size.pixel_height <= 0.0:
+        return PresentResult.skipped
+    if size.pixel_width > metal_surface_limit or size.pixel_height > metal_surface_limit:
+        error(surface_too_large, "Metal presentation supports at most 16384 backing pixels per dimension")
+    let layer = metal_required(state.layer)
+    metal_double_arg(layer, metal_sel("setContentsScale:"), size.scale)
+    metal_size_arg(layer, metal_sel("setDrawableSize:"), LuceGpuMetalSize(width = size.pixel_width, height = size.pixel_height))
+    # Scope every autoreleased drawable to one call. Retaining past presentation
+    # would exhaust CAMetalLayer's small pool even if commands had completed.
+    let drawable = metal_ptr(layer, metal_sel("nextDrawable")) else return PresentResult.skipped
+    let texture = metal_ptr(drawable, metal_sel("texture")) else error(failed, "Metal returned a drawable without a texture")
+    let command = try metal_pass(device, texture, 0, canvas, Color(color.red, color.green, color.blue, 1.0), (u64)size.pixel_width, (u64)size.pixel_height)
+    metal_object(command, metal_sel("presentDrawable:"), drawable)
+    # Default command buffers retain referenced resources through completion.
+    # Our +1 keeps status queryable after this call's autorelease pool is drained.
+    state.pending = metal_ptr(command, metal_sel("retain"))
+    metal_void(command, metal_sel("commit"))
+    return PresentResult.submitted
+
+func metal_surface_destroy(state: MetalSurface*, host: window.Presentation):
+    let pool = objc_autoreleasePoolPush()
+    defer objc_autoreleasePoolPop(pool)
+    metal_surface_wait(state) catch failure:
+        discard(failure)
+    # Window closure may already have detached its callbacks. Its lease still
+    # keeps the native host alive until our pending work and layer are released.
+    metal_detach(state, host)
+    if let layer = state.layer:
+        metal_void(layer, metal_sel("release"))
+    free(state) in memory.heap
+
+func metal_detach(state: MetalSurface*, host: window.Presentation):
+    let view = host.macos_view() catch failure:
+        discard(failure)
+        return
+    if let layer = state.layer:
+        if metal_ptr(view, metal_sel("layer")) == layer:
+            metal_object(view, metal_sel("setLayer:"), none)
+            metal_bool_arg(view, metal_sel("setWantsLayer:"), false)

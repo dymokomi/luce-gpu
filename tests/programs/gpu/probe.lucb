@@ -1,0 +1,214 @@
+import gpu
+import frames
+import ownership
+import drawing
+import textures
+import allocation
+import memory
+import native
+import thread
+import window
+
+func worker(context: void*?):
+    let rejected = (bool*)(context else trap("missing test context"))
+    var device = gpu.Device.open() catch failure:
+        assert(failure.code == gpu.wrong_thread)
+        *rejected = true
+        recover gpu.Device()
+    device.destroy()
+    var surface: gpu.Surface
+    surface.wait_idle() catch failure:
+        assert(failure.code == gpu.wrong_thread)
+        return
+    trap("a worker accessed GPU state")
+
+func contracts() -> !:
+    assert(gpu.supported())
+    assert(gpu.supported(gpu.Backend.metal))
+    assert(not gpu.supported(gpu.Backend.vulkan))
+    var rejected = false
+    var device = gpu.Device.open(gpu.Backend.vulkan) catch failure:
+        assert(failure.code == gpu.unsupported)
+        rejected = true
+        recover gpu.Device()
+    assert(rejected)
+    device.destroy()
+    rejected = false
+    discard(device.backend() catch failure:
+        assert(failure.code == gpu.closed)
+        rejected = true
+        recover gpu.Backend.automatic)
+    assert(rejected)
+    var surface: gpu.Surface
+    rejected = false
+    surface.wait_idle() catch failure:
+        assert(failure.code == gpu.closed)
+        rejected = true
+    assert(rejected)
+    surface.destroy()
+    surface.destroy()
+    rejected = false
+    let child = try thread.spawn(worker, (void*)&rejected)
+    try child.join()
+    assert(rejected)
+
+func pump(target: window.Window*) -> !:
+    var count: usize = 0
+    while let event = try target.poll():
+        discard(event)
+        count += 1
+        assert(count < 4096)
+
+func frame(surface: gpu.Surface*, target: window.Window*, title: str, color: gpu.Color, red: u8, green: u8, blue: u8) -> !:
+    try pump(target)
+    native.begin(title)
+    defer native.end()
+    assert((try surface.clear_present(color)) == gpu.PresentResult.submitted)
+    try surface.wait_idle()
+    try surface.wait_idle()
+    let size = try target.size()
+    assert((try surface.size()).pixel_width == size.pixel_width)
+    native.pixels((u64)size.pixel_width, (u64)size.pixel_height, red, green, blue)
+
+func gui() -> !:
+    let pool = native.pool()
+    defer native.drain(pool)
+    var device = try gpu.Device.open()
+    defer device.destroy()
+    assert((try device.backend()) == gpu.Backend.metal)
+    var first = try window.Window.open(window.Options(title = "GPU first", width = 96, height = 64))
+    defer first.destroy()
+    var surface = try gpu.Surface.open(device, first)
+    defer surface.destroy()
+    assert((try surface.clear_present()) == gpu.PresentResult.skipped)
+    var rejected = false
+    var duplicate = gpu.Surface.open(device, first) catch failure:
+        assert(failure.code == window.presentation_in_use)
+        rejected = true
+        recover gpu.Surface()
+    assert(rejected)
+    duplicate.destroy()
+    var invalid: gpu.Color[5] = [gpu.Color(red = -0.1), gpu.Color(green = 1.1), gpu.Color(blue = f64.bits(9221120237041090560)), gpu.Color(red = f64.bits(9218868437227405312)), gpu.Color(green = f64.bits(18442240474082181120))]
+    for color in invalid:
+        rejected = false
+        discard(surface.clear_present(color) catch failure:
+            assert(failure.code == gpu.invalid_color)
+            rejected = true
+            recover gpu.PresentResult.skipped)
+        assert(rejected)
+    try first.show()
+    try frame(&surface, &first, "GPU first", gpu.Color(red = 0.25, green = 0.5, blue = 0.75), 137, 188, 225)
+    try first.resize(127, 81)
+    try frame(&surface, &first, "GPU first", gpu.Color(red = 1.0), 255, 0, 0)
+    # Logical points are not a graphics limit. A legal Retina Window.resize can
+    # exceed Metal's limit; force each backing dimension past it on any display.
+    native.resize_for_test("GPU first", 20000.0, 32.0)
+    assert((try first.size()).pixel_width > 16384.0)
+    rejected = false
+    discard(surface.clear_present() catch failure:
+        assert(failure.code == gpu.surface_too_large)
+        rejected = true
+        recover gpu.PresentResult.skipped)
+    assert(rejected)
+    try first.resize(127, 81)
+    native.large_backing_height("GPU first")
+    defer native.restore_backing()
+    assert((try first.size()).pixel_height > 16384.0)
+    rejected = false
+    discard(surface.clear_present() catch failure:
+        assert(failure.code == gpu.surface_too_large)
+        rejected = true
+        recover gpu.PresentResult.skipped)
+    assert(rejected)
+    native.restore_backing()
+    try first.resize(127, 81)
+    try frame(&surface, &first, "GPU first", gpu.Color(red = 1.0), 255, 0, 0)
+    native.begin("GPU first", unavailable = true)
+    assert((try surface.clear_present()) == gpu.PresentResult.skipped)
+    native.end()
+    try frame(&surface, &first, "GPU first", gpu.Color(green = 1.0), 0, 255, 0)
+    var second = try window.Window.open(window.Options(title = "GPU second", width = 48, height = 32))
+    defer second.destroy()
+    var other = try gpu.Surface.open(device, second)
+    defer other.destroy()
+    try second.show()
+    # Each surface owns a device reference; closing the public device is safe.
+    device.destroy()
+    device.destroy()
+    try frame(&other, &second, "GPU second", gpu.Color(blue = 1.0), 0, 0, 255)
+    try frame(&surface, &first, "GPU first", gpu.Color(red = 1.0, green = 1.0), 255, 255, 0)
+    # Destroy a window with work pending. Queries fail but completion/cleanup work.
+    assert((try surface.clear_present()) == gpu.PresentResult.submitted)
+    first.destroy()
+    rejected = false
+    discard(surface.clear_present() catch failure:
+        assert(failure.code == window.closed)
+        rejected = true
+        recover gpu.PresentResult.skipped)
+    assert(rejected)
+    try surface.wait_idle()
+    surface.destroy()
+    surface.destroy()
+    try frame(&other, &second, "GPU second", gpu.Color(), 0, 0, 0)
+    other.destroy()
+    # Surface-first teardown releases exclusivity and preserves window input.
+    var fresh = try gpu.Device.open(gpu.Backend.metal)
+    defer fresh.destroy()
+    var i: usize = 0
+    while i < 12:
+        var again = try gpu.Surface.open(fresh, second)
+        assert((try again.clear_present(gpu.Color(red = 1.0))) == gpu.PresentResult.submitted)
+        again.destroy()
+        i += 1
+    try second.request_close()
+    try pump(&second)
+    # Direct leases also survive window closure and release their retained host.
+    var lease = try second.acquire_presentation()
+    assert(try lease.visible())
+    second.destroy()
+    rejected = false
+    discard(lease.size() catch failure:
+        assert(failure.code == window.closed)
+        rejected = true
+        recover window.Size())
+    assert(rejected)
+    lease.destroy()
+    lease.destroy()
+
+pub func main(arguments: str[]) -> i32!:
+    if arguments.length > 1 and arguments[1] == "wrong-thread":
+        try frames.wrong_thread()
+    try contracts()
+    try drawing.contracts()
+    try frames.contracts()
+    ownership.collect()
+    try frames.failures()
+    ownership.collect()
+    if arguments.length > 1 and arguments[1] == "device":
+        var device = gpu.Device.open() catch failure:
+            if failure.code == gpu.unavailable:
+                print("skip no Metal device")
+                return ownership.finish_run(0)
+            error(failure.code, failure.message)
+        try textures.pixels(device)
+        try textures.programs(device)
+        device.destroy()
+        print("ok GPU device")
+    elif arguments.length > 1 and arguments[1] == "gui":
+        let heap = memory.heap
+        var tracker = allocation.Tracker(upstream = heap)
+        memory.heap = &tracker
+        defer allocation.restore(heap)
+        try allocation.failures(&tracker)
+        assert(tracker.live == 0)
+        try gui()
+        assert(tracker.live == 0)
+        try drawing.pixels()
+        assert(tracker.live == 0)
+        try frames.pixels()
+        ownership.collect()
+        assert(tracker.live == 0)
+        print("ok GPU pixels, sRGB, resize, acquisition, ownership, and isolation")
+    else:
+        print("ok GPU contracts without hardware")
+    return ownership.finish_run(0)

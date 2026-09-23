@@ -1,0 +1,118 @@
+import gpu
+import window
+import native
+import allocation
+import memory
+
+func full(color: gpu.Vertex) -> gpu.Vertex[6]:
+    var a = color
+    var b = color
+    var c = color
+    var d = color
+    a.x = -1.0
+    a.y = -1.0
+    b.x = 1.0
+    b.y = -1.0
+    c.x = 1.0
+    c.y = 1.0
+    d.x = -1.0
+    d.y = 1.0
+    return [a, b, c, a, c, d]
+
+pub func contracts() -> !:
+    var tracker = allocation.Tracker(upstream = memory.heap)
+    let previous = memory.heap
+    memory.heap = &tracker
+    defer allocation.restore(previous)
+    var canvas: gpu.Canvas
+    defer canvas.destroy()
+    let clip = gpu.Clip(width = 32, height = 32)
+    # Refusal at either growth stage leaves zero recorded vertices and cleanup
+    # releases all storage, including a successfully grown vertex allocation.
+    var stage: usize = 0
+    while stage < 2:
+        tracker.remaining = stage
+        var refused = false
+        canvas.triangles(full(gpu.Vertex(red = 1.0)), clip) catch failure:
+            assert(failure.code == memory.exhausted)
+            refused = true
+        tracker.remaining = none
+        assert(refused and canvas.count() == 0)
+        canvas.destroy()
+        assert(tracker.live == 0)
+        stage += 1
+    try canvas.triangles(full(gpu.Vertex(red = 1.0)), clip)
+    var invalid = full(gpu.Vertex(red = 1.0))
+    invalid[0].alpha = -0.1
+    var rejected = false
+    canvas.triangles(invalid, clip) catch failure:
+        assert(failure.code == gpu.invalid_geometry)
+        rejected = true
+    assert(rejected and canvas.count() == 6)
+    rejected = false
+    canvas.triangles(invalid[..<2], clip) catch failure:
+        assert(failure.code == gpu.invalid_geometry)
+        rejected = true
+    assert(rejected and canvas.count() == 6)
+    canvas.clear()
+    assert(canvas.count() == 0)
+    canvas.destroy()
+    assert(tracker.live == 0)
+
+pub func pixels() -> !:
+    var device = try gpu.Device.open()
+    defer device.destroy()
+    var target = try window.Window.open(window.Options(title = "GPU triangles", width = 96, height = 64))
+    defer target.destroy()
+    var surface = try gpu.Surface.open(device, target)
+    defer surface.destroy()
+    try target.show()
+    while (try target.poll()) != none:
+        discard(0)
+    let size = try surface.size()
+    let width = (u32)size.pixel_width
+    let height = (u32)size.pixel_height
+    let clip = gpu.Clip(width = width, height = height)
+    var canvas: gpu.Canvas
+    defer canvas.destroy()
+    try canvas.triangles(full(gpu.Vertex(red = 1.0, z = 0.2)), clip, true)
+    # A later, farther primitive must fail depth testing.
+    try canvas.triangles(full(gpu.Vertex(blue = 1.0, z = 0.8)), clip, true)
+    native.begin("GPU triangles")
+    defer native.end()
+    assert(try surface.render(canvas) == gpu.PresentResult.submitted)
+    canvas.clear()
+    try surface.wait_idle()
+    native.pixels((u64)width, (u64)height, 255, 0, 0)
+    native.end()
+    # Scissoring restricts the draw to the left half. Straight alpha blends in
+    # linear space, producing sRGB 188 for a 50% channel, not an encoded 128.
+    try canvas.triangles(full(gpu.Vertex(red = 1.0, alpha = 0.5)), gpu.Clip(width = width // 2, height = height))
+    native.begin("GPU triangles")
+    assert(try surface.render(canvas, gpu.Color(blue = 1.0)) == gpu.PresentResult.submitted)
+    try surface.wait_idle()
+    native.pixel(0, 0, 188, 0, 188)
+    native.pixel((u64)width - 1, 0, 0, 0, 255)
+    native.end()
+    # Recreate depth storage after resize and verify commands survive CPU reuse.
+    try target.resize(80, 48)
+    while (try target.poll()) != none:
+        discard(0)
+    canvas.clear()
+    try canvas.triangles(full(gpu.Vertex(green = 1.0)), gpu.Clip(width = 10000, height = 10000))
+    native.begin("GPU triangles")
+    assert(try surface.render(canvas) == gpu.PresentResult.submitted)
+    canvas.destroy()
+    try surface.wait_idle()
+    let resized = try surface.size()
+    native.pixels((u64)resized.pixel_width, (u64)resized.pixel_height, 0, 255, 0)
+    native.end()
+    # A sub-viewport maps local clip coordinates into the widget region. A
+    # following draw without a viewport must restore full-surface mapping.
+    let half_width = resized.pixel_width * 0.5
+    try canvas.triangles(full(gpu.Vertex(red = 1.0)), gpu.Clip(width = 10000, height = 10000), false, gpu.Viewport(x = half_width, width = half_width, height = resized.pixel_height))
+    native.begin("GPU triangles")
+    assert(try surface.render(canvas) == gpu.PresentResult.submitted)
+    try surface.wait_idle()
+    native.pixel(0, 0, 0, 0, 0)
+    native.pixel((u64)resized.pixel_width - 1, 0, 255, 0, 0)

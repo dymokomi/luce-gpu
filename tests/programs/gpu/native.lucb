@@ -1,0 +1,195 @@
+## Test-only Metal observation. Capture the drawable returned to the production
+## renderer, then blit it to shared memory after wait_idle. This verifies real GPU
+## pixels (including the four-double clear ABI and sRGB encoding), without screen
+## capture permission or any hooks in the public GPU implementation. Method
+## replacement is process-local, main-thread-only, and restored after each frame.
+import c
+
+extern struct GpuProbeOrigin:
+    x: u64
+    y: u64
+    z: u64
+
+extern struct GpuProbeExtent:
+    width: u64
+    height: u64
+    depth: u64
+
+extern struct GpuProbeViewSize:
+    width: f64
+    height: f64
+
+extern struct GpuProbeRect:
+    x: f64
+    y: f64
+    width: f64
+    height: f64
+
+extern func objc_getClass(name: c.str) -> void*
+extern func object_getClass(object: void*) -> void*
+extern func sel_registerName(name: c.str) -> void*
+extern func class_getInstanceMethod(native_type: void*, selector: void*) -> void*
+extern func method_setImplementation(method: void*, implementation: void*) -> void*
+extern func objc_autoreleasePoolPush() -> void*
+extern func objc_autoreleasePoolPop(pool: void*)
+extern func msg as "objc_msgSend"(object: void*, selector: void*) -> void*
+extern func uint as "objc_msgSend"(object: void*, selector: void*) -> u64
+extern func indexed as "objc_msgSend"(object: void*, selector: void*, index: u64) -> void*
+extern func text as "objc_msgSend"(object: void*, selector: void*) -> c.str
+extern func invoke as "objc_msgSend"(object: void*, selector: void*)
+extern func boolean as "objc_msgSend"(object: void*, selector: void*, value: bool)
+extern func content_size as "objc_msgSend"(object: void*, selector: void*, size: GpuProbeViewSize)
+extern func buffer as "objc_msgSend"(object: void*, selector: void*, length: u64, options: u64) -> void*
+extern func blit as "objc_msgSend"(object: void*, selector: void*, texture: void*, slice: u64, level: u64, origin: GpuProbeOrigin, size: GpuProbeExtent, destination: void*, offset: u64, row_bytes: u64, image_bytes: u64)
+
+var replaced: void*?
+var original: void*?
+var captured: void*?
+var captured_texture: void*?
+var return_nil: bool
+var backing_method: void*?
+var backing_original: void*?
+var backing_view: void*?
+
+func sel(name: c.str) -> void*:
+    return sel_registerName(name)
+
+pub func pool() -> void*:
+    return objc_autoreleasePoolPush()
+
+pub func drain(token: void*):
+    objc_autoreleasePoolPop(token)
+
+func find(title: str) -> void*:
+    let app = msg(objc_getClass("NSApplication"), sel("sharedApplication"))
+    let windows = msg(app, sel("windows"))
+    var i: u64 = 0
+    while i < uint(windows, sel("count")):
+        let native = indexed(windows, sel("objectAtIndex:"), i)
+        if (str)text(msg(native, sel("title")), sel("UTF8String")) == title:
+            return native
+        i += 1
+    trap("GPU test window was not found")
+
+pub func begin(title: str, unavailable: bool = false):
+    assert(replaced == none and captured == none)
+    let view = msg(find(title), sel("contentView"))
+    let layer = msg(view, sel("layer"))
+    assert(uint(layer, sel("pixelFormat")) == 81)
+    # Permit a test readback; production surfaces remain framebuffer-only.
+    boolean(layer, sel("setFramebufferOnly:"), false)
+    let method = class_getInstanceMethod(object_getClass(layer), sel("nextDrawable"))
+    replaced = method
+    return_nil = unavailable
+    original = method_setImplementation(method, (void*)next_drawable)
+
+## Bypass only Window.resize's point limit so the backend extent guard can be
+## tested on both 1x and Retina displays. No oversized texture should be acquired.
+pub func resize_for_test(title: str, width: f64, height: f64):
+    content_size(find(title), sel("setContentSize:"), GpuProbeViewSize(width = width, height = height))
+
+## AppKit can constrain window height to the screen. Override just this view's
+## backing conversion for one call so the height limit is covered on every host.
+pub func large_backing_height(title: str):
+    assert(backing_method == none)
+    let view = msg(find(title), sel("contentView"))
+    let method = class_getInstanceMethod(object_getClass(view), sel("convertRectToBacking:"))
+    backing_view = view
+    backing_method = method
+    backing_original = method_setImplementation(method, (void*)backing_rect)
+
+func backing_rect(object: void*, selector: void*, rect: GpuProbeRect) -> GpuProbeRect:
+    let implementation = backing_original else trap("missing backing conversion")
+    let call = (func(void*, void*, GpuProbeRect) -> GpuProbeRect)implementation
+    var result = call(object, selector, rect)
+    if object == backing_view:
+        result.height = 20000.0
+    return result
+
+pub func restore_backing():
+    if let method = backing_method:
+        discard(method_setImplementation(method, backing_original else trap("missing backing conversion")))
+    backing_method = none
+    backing_original = none
+    backing_view = none
+
+func next_drawable(object: void*, selector: void*) -> void*?:
+    if return_nil:
+        return none
+    let implementation = original else trap("missing original nextDrawable")
+    let call = (func(void*, void*) -> void*?)implementation
+    let drawable = call(object, selector) else return none
+    assert(captured == none)
+    captured = msg(drawable, sel("retain"))
+    # CAMetalDrawable.texture must be queried before presentDrawable is called.
+    captured_texture = msg(msg(drawable, sel("texture")), sel("retain"))
+    return drawable
+
+pub func end():
+    if let method = replaced:
+        discard(method_setImplementation(method, original else trap("missing original implementation")))
+    replaced = none
+    original = none
+    if let drawable = captured:
+        invoke(drawable, sel("release"))
+    captured = none
+    if let texture = captured_texture:
+        invoke(texture, sel("release"))
+    captured_texture = none
+
+pub func pixels(width: u64, height: u64, red: u8, green: u8, blue: u8):
+    let texture = captured_texture else trap("the GPU did not acquire a texture")
+    assert(uint(texture, sel("width")) == width)
+    assert(uint(texture, sel("height")) == height)
+    let device = msg(texture, sel("device"))
+    let queue = msg(device, sel("newCommandQueue"))
+    defer invoke(queue, sel("release"))
+    let row_bytes = (width * 4 + 255) & ~(u64)255
+    let storage = buffer(device, sel("newBufferWithLength:options:"), row_bytes * height, 0)
+    defer invoke(storage, sel("release"))
+    let command = msg(queue, sel("commandBuffer"))
+    let encoder = msg(command, sel("blitCommandEncoder"))
+    blit(encoder, sel("copyFromTexture:sourceSlice:sourceLevel:sourceOrigin:sourceSize:toBuffer:destinationOffset:destinationBytesPerRow:destinationBytesPerImage:"), texture, 0, 0, GpuProbeOrigin(), GpuProbeExtent(width = width, height = height, depth = 1), storage, 0, row_bytes, row_bytes * height)
+    invoke(encoder, sel("endEncoding"))
+    invoke(command, sel("commit"))
+    invoke(command, sel("waitUntilCompleted"))
+    assert(uint(command, sel("status")) == 4)
+    let bytes = (const u8*)msg(storage, sel("contents"))
+    var y: u64 = 0
+    while y < height:
+        var x: u64 = 0
+        while x < width:
+            let i = y * row_bytes + x * 4
+            near(bytes[i], blue)
+            near(bytes[i + 1], green)
+            near(bytes[i + 2], red)
+            assert(bytes[i + 3] == 255)
+            x += 1
+        y += 1
+
+func near(actual: u8, expected: u8):
+    let difference = (i32)actual - (i32)expected
+    # Apple GPU families may differ by two code points at an sRGB encode or
+    # half-alpha rounding boundary. Larger differences still fail the pixel
+    # contract and keep color/order/channel regressions visible.
+    assert(difference >= -2 and difference <= 2)
+
+pub func pixel(x: u64, y: u64, red: u8, green: u8, blue: u8):
+    let texture = captured_texture else trap("the GPU did not acquire a texture")
+    let device = msg(texture, sel("device"))
+    let queue = msg(device, sel("newCommandQueue"))
+    defer invoke(queue, sel("release"))
+    let storage = buffer(device, sel("newBufferWithLength:options:"), 256, 0)
+    defer invoke(storage, sel("release"))
+    let command = msg(queue, sel("commandBuffer"))
+    let encoder = msg(command, sel("blitCommandEncoder"))
+    blit(encoder, sel("copyFromTexture:sourceSlice:sourceLevel:sourceOrigin:sourceSize:toBuffer:destinationOffset:destinationBytesPerRow:destinationBytesPerImage:"), texture, 0, 0, GpuProbeOrigin(x = x, y = y), GpuProbeExtent(width = 1, height = 1, depth = 1), storage, 0, 256, 256)
+    invoke(encoder, sel("endEncoding"))
+    invoke(command, sel("commit"))
+    invoke(command, sel("waitUntilCompleted"))
+    assert(uint(command, sel("status")) == 4)
+    let bytes = (const u8*)msg(storage, sel("contents"))
+    near(bytes[0], blue)
+    near(bytes[1], green)
+    near(bytes[2], red)
+    assert(bytes[3] == 255)

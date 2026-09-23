@@ -1,0 +1,34 @@
+import gpu
+import input
+import thread
+import window
+
+## Native GPU presentation with no platform-specific application code. Escape or
+## the title-bar close button exits. Later increments add portable shaders/drawing
+## on this same device/surface boundary.
+pub func main(arguments: str[]) -> i32!:
+    discard(arguments)
+    var device = try gpu.Device.open()
+    defer device.destroy()
+    var target = try window.Window.open(window.Options(title = "Luce — GPU surface"))
+    defer target.destroy()
+    var surface = try gpu.Surface.open(device, target)
+    defer surface.destroy()
+    try target.show()
+    var running = true
+    while running:
+        while let event = try target.poll():
+            match event.kind:
+                .close_requested:
+                    running = false
+                    break
+                .key_down:
+                    if event.key == input.Key.escape:
+                        try target.request_close()
+                _:
+                    discard(event)
+        if running:
+            discard(try surface.clear_present(gpu.Color(red = 0.025, green = 0.06, blue = 0.15)))
+            thread.sleep(8)
+    try surface.wait_idle()
+    return 0

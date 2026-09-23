@@ -1,0 +1,121 @@
+#==============================================================================================
+#
+#   resources - The texture dispatch boundary
+#
+#   DESCRIPTION:
+#       The dispatch boundary for textures: a texture's native payload, opaque here, created,
+#       filled, read back, rendered into and destroyed by the selected backend. Like surfaces,
+#       a program that only opens a device never reaches this file.
+#
+#==============================================================================================
+
+func backend_texture_create(device: DeviceState*, width: u32, height: u32, pixel_format: Format) -> void*!:
+    if platform.windows and device.backend == Backend.vulkan:
+        return (void*)try vulkan_texture_create((VulkanDevice*)device.native, width, height, pixel_format)
+    if platform.macos and platform.arm64:
+        if device.backend == Backend.metal:
+            return (void*)try metal_texture_create((MetalDevice*)device.native, width, height, pixel_format)
+    error(unsupported, "the GPU backend is not implemented")
+
+func backend_texture_upload(device: DeviceState*, native: void*, pixels: const u8[], region: Region) -> !:
+    if platform.windows and device.backend == Backend.vulkan:
+        try vulkan_texture_upload((VulkanDevice*)device.native, (VulkanTexture*)native, pixels, region)
+        return
+    if platform.macos and platform.arm64:
+        if device.backend == Backend.metal:
+            try metal_texture_upload((MetalDevice*)device.native, (MetalTexture*)native, pixels, region)
+            return
+    error(unsupported, "the GPU backend is not implemented")
+
+func backend_texture_read(device: DeviceState*, native: void*, pixels: u8[], region: Region) -> !:
+    if platform.windows and device.backend == Backend.vulkan:
+        try vulkan_texture_read((VulkanDevice*)device.native, (VulkanTexture*)native, pixels, region)
+        return
+    if platform.macos and platform.arm64:
+        if device.backend == Backend.metal:
+            try metal_texture_read((MetalDevice*)device.native, (MetalTexture*)native, pixels, region)
+            return
+    error(unsupported, "the GPU backend is not implemented")
+
+func backend_texture_render(device: DeviceState*, native: void*, canvas: Canvas, color: Color) -> !:
+    if platform.windows and device.backend == Backend.vulkan:
+        try vulkan_texture_render((VulkanDevice*)device.native, (VulkanTexture*)native, canvas, color)
+        return
+    if platform.macos and platform.arm64:
+        if device.backend == Backend.metal:
+            try metal_texture_render((MetalDevice*)device.native, (MetalTexture*)native, canvas, color)
+            return
+    error(unsupported, "the GPU backend is not implemented")
+
+func backend_texture_destroy(device: DeviceState*, native: void*):
+    device.destroy_texture((void*)device.native, native)
+
+## The backend's texture release, bound once per device at open.
+func backend_texture_destroyer(backend: Backend) -> func(void*, void*) -> unit:
+    if platform.windows and backend == Backend.vulkan:
+        return vulkan_texture_release
+    if platform.macos and platform.arm64:
+        if backend == Backend.metal:
+            return metal_texture_release
+    trap("invalid GPU backend when binding texture release")
+
+func vulkan_texture_release(device: void*, native: void*):
+    if platform.windows:
+        vulkan_texture_destroy((VulkanDevice*)device, (VulkanTexture*)native)
+
+func metal_texture_release(device: void*, native: void*):
+    discard(device)
+    if platform.macos and platform.arm64:
+        metal_texture_destroy((MetalTexture*)native)
+
+# mark: Shaders and pipelines =================================================================
+
+func backend_shader_create(device: DeviceState*, spirv: const u32[], msl: c.str) -> void*!:
+    if platform.windows and device.backend == Backend.vulkan:
+        return (void*)try vulkan_shader_create((VulkanDevice*)device.native, spirv)
+    if platform.macos and platform.arm64:
+        if device.backend == Backend.metal:
+            return (void*)try metal_shader_create((MetalDevice*)device.native, msl)
+    error(unsupported, "the GPU backend is not implemented")
+
+func backend_pipeline_create(device: DeviceState*, shader: void*, blend: Blend, pixel_format: Format?) -> void*!:
+    if platform.windows and device.backend == Backend.vulkan:
+        return (void*)try vulkan_pipeline_create((VulkanDevice*)device.native, (VulkanShader*)shader, blend, pixel_format)
+    if platform.macos and platform.arm64:
+        if device.backend == Backend.metal:
+            return (void*)try metal_pipeline_create((MetalDevice*)device.native, shader, blend, pixel_format)
+    error(unsupported, "the GPU backend is not implemented")
+
+func backend_shader_destroyer(backend: Backend) -> func(void*, void*) -> unit:
+    if platform.windows and backend == Backend.vulkan:
+        return vulkan_shader_release
+    if platform.macos and platform.arm64:
+        if backend == Backend.metal:
+            return metal_shader_release
+    trap("invalid GPU backend when binding shader release")
+
+func backend_pipeline_destroyer(backend: Backend) -> func(void*, void*) -> unit:
+    if platform.windows and backend == Backend.vulkan:
+        return vulkan_pipeline_release
+    if platform.macos and platform.arm64:
+        if backend == Backend.metal:
+            return metal_pipeline_release
+    trap("invalid GPU backend when binding pipeline release")
+
+func vulkan_shader_release(device: void*, native: void*):
+    if platform.windows:
+        vulkan_shader_destroy((VulkanDevice*)device, (VulkanShader*)native)
+
+func vulkan_pipeline_release(device: void*, native: void*):
+    if platform.windows:
+        vulkan_pipeline_destroy((VulkanDevice*)device, (VulkanPipeline*)native)
+
+func metal_shader_release(device: void*, native: void*):
+    discard(device)
+    if platform.macos and platform.arm64:
+        metal_shader_destroy(native)
+
+func metal_pipeline_release(device: void*, native: void*):
+    discard(device)
+    if platform.macos and platform.arm64:
+        metal_pipeline_destroy(native)

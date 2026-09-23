@@ -1,0 +1,123 @@
+#==============================================================================================
+#
+#   shader - Client fragment shaders and the pipelines built from them
+#
+#   DESCRIPTION:
+#       A Shader is one fragment program supplied for both backends at once: SPIR-V words for
+#       Vulkan and Metal Shading Language for Metal, as tools/embed_shaders.py generates them
+#       from one GLSL source. A Pipeline binds a shader to a blend mode and a target format.
+#       Both are manual Base resources: the zero value is closed, copies alias ownership, and
+#       draws recorded against them keep them alive until the canvas is cleared.
+#
+#       The fragment contract (see docs/GPU.md): the vertex color arrives at location 0, the
+#       push-constant block carries up to 128 uniform bytes, sampled images are bindings 1..4
+#       of set 0, and the output is premultiplied color at location 0.
+#
+#==============================================================================================
+
+## A fragment program on one device; the zero value is closed.
+pub struct Shader:
+    var state: ShaderState*?
+
+    ## Compile a fragment program from its SPIR-V words and its Metal source.
+    ## Each backend uses its own form and ignores the other.
+    pub static func create(device: Device, spirv: const u32[], msl: c.str) -> Shader!:
+        let device_state = try device.checked()
+        if spirv.length < 5 or spirv[0] != 0x07230203:
+            error(invalid_shader, "SPIR-V words must begin with the SPIR-V magic number")
+        let native = try backend_shader_create(device_state, spirv, msl)
+        errdefer device_state.destroy_shader(device_state.native, native)
+        let state = try new ShaderState(device = device_state, native = native) in memory.heap
+        device_state.references += 1
+        return Shader(state = state)
+
+    ## Release this handle on the main thread; pipelines and recorded draws keep
+    ## the program until they finish.
+    pub mutating func destroy():
+        let state = self.state else return
+        require_thread()
+        self.state = none
+        state.closed = true
+        release_shader(state)
+
+    func checked() -> ShaderState*!:
+        try check_thread()
+        let state = self.state else error(closed, "the GPU shader is closed")
+        if state.closed:
+            error(closed, "the GPU shader is closed")
+        return state
+
+struct ShaderState:
+    var device: DeviceState*
+    var native: void*
+    var references: usize = 1
+    var closed: bool
+
+func release_shader(state: ShaderState*):
+    state.references -= 1
+    if state.references == 0:
+        state.device.destroy_shader(state.device.native, state.native)
+        release_device(state.device)
+        free(state) in memory.heap
+
+## A shader bound to a blend mode and a target format; the zero value is closed.
+pub struct Pipeline:
+    var state: PipelineState*?
+
+    ## Build a pipeline drawing `shader` with `blend` into targets of `format`,
+    ## or into presentation surfaces when `format` is `none`.
+    pub static func create(device: Device, shader: Shader, blend: Blend, pixel_format: Format? = none) -> Pipeline!:
+        let device_state = try device.checked()
+        let shader_state = try shader.checked()
+        if shader_state.device != device_state:
+            error(wrong_device, "the shader belongs to another GPU device")
+        let native = try backend_pipeline_create(device_state, shader_state.native, blend, pixel_format)
+        errdefer device_state.destroy_pipeline(device_state.native, native)
+        let state = try new PipelineState(device = device_state, shader = shader_state, native = native, blend = blend, format = pixel_format) in memory.heap
+        shader_state.references += 1
+        device_state.references += 1
+        return Pipeline(state = state)
+
+    ## The blend mode this pipeline was built with.
+    pub func blend() -> Blend!:
+        return (try self.checked()).blend
+
+    ## Release this handle on the main thread; recorded draws keep the pipeline
+    ## until their canvas is cleared.
+    pub mutating func destroy():
+        let state = self.state else return
+        require_thread()
+        self.state = none
+        state.closed = true
+        release_pipeline(state)
+
+    func checked() -> PipelineState*!:
+        try check_thread()
+        let state = self.state else error(closed, "the GPU pipeline is closed")
+        if state.closed:
+            error(closed, "the GPU pipeline is closed")
+        return state
+
+struct PipelineState:
+    var device: DeviceState*
+    var shader: ShaderState*
+    var native: void*
+    var blend: Blend
+    var format: Format?
+    var references: usize = 1
+    var closed: bool
+
+func release_pipeline(state: PipelineState*):
+    state.references -= 1
+    if state.references == 0:
+        state.device.destroy_pipeline(state.device.native, state.native)
+        release_shader(state.shader)
+        release_device(state.device)
+        free(state) in memory.heap
+
+## Every custom draw in `canvas` must target `format` (none for a surface).
+func check_canvas_target(canvas: Canvas, pixel_format: Format?) -> !:
+    for draw in canvas.draws[..<canvas.draw_count]:
+        if let pipeline = draw.pipeline:
+            if pipeline.format != pixel_format:
+                error(wrong_target, "a pipeline was recorded into a frame whose target format it was not made for")

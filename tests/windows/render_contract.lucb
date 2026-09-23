@@ -1,0 +1,36 @@
+import gpu
+import window
+import thread
+
+pub func main(arguments: str[]) -> i32!:
+    var device = try gpu.Device.open()
+    defer device.destroy()
+    var target = try window.Window.open(window.Options(title = "Luce Vulkan — native triangles", width = 640, height = 480))
+    defer target.destroy()
+    var surface = try gpu.Surface.open(device, target)
+    defer surface.destroy()
+    assert(try surface.clear_present() == gpu.PresentResult.skipped)
+    var canvas: gpu.Canvas
+    defer canvas.destroy()
+    let vertices: gpu.Vertex[3] = [
+        gpu.Vertex(x = -0.8, y = -0.8, z = 0.5, red = 1.0),
+        gpu.Vertex(x = 0.8, y = -0.8, z = 0.5, green = 1.0),
+        gpu.Vertex(x = 0.0, y = 0.8, z = 0.5, blue = 1.0)]
+    try canvas.triangles(vertices, gpu.Clip(width = 10000, height = 10000), depth = true)
+    try target.show()
+    var submitted: usize = 0
+    let frames: usize = 600 if arguments.length > 1 else 60
+    for frame in 0..<frames:
+        while let event = try target.poll(): discard(event)
+        if frame == 30:
+            try target.resize(720, 480)
+        let result = try surface.render(canvas, gpu.Color(red = 0.03, green = 0.04, blue = 0.06))
+        if result == gpu.PresentResult.submitted:
+            submitted += 1
+        thread.sleep(16)
+    assert(submitted > 50)
+    try surface.wait_idle()
+    target.destroy()
+    surface.destroy()
+    print("ok Vulkan triangle rendering, resize, depth and window lifetime")
+    return 0

@@ -1,0 +1,71 @@
+#==============================================================================================
+#
+#   objc - The arm64 Objective-C ABI for the Metal backend
+#
+#   DESCRIPTION:
+#       Exact arm64 Objective-C ABI. Native aggregates are deliberately separate from public
+#       types, so changing a portable type cannot silently change a platform call.
+#
+#==============================================================================================
+
+extern struct LuceGpuMetalSize:
+    width: f64
+    height: f64
+
+extern struct LuceGpuMetalClearColor:
+    red: f64
+    green: f64
+    blue: f64
+    alpha: f64
+
+extern struct LuceGpuMetalScissor:
+    x: u64
+    y: u64
+    width: u64
+    height: u64
+
+extern struct LuceGpuMetalViewport:
+    x: f64
+    y: f64
+    width: f64
+    height: f64
+    near: f64
+    far: f64
+
+extern func metal_viewport as "objc_msgSend"(object: void*, selector: void*, rectangle: LuceGpuMetalViewport)
+extern func metal_string as "objc_msgSend"(object: void*, selector: void*, value: c.str) -> void*?
+extern func metal_library as "objc_msgSend"(object: void*, selector: void*, source: void*, options: void*?, failure: void*?*) -> void*?
+extern func metal_pipeline as "objc_msgSend"(object: void*, selector: void*, descriptor: void*, failure: void*?*) -> void*?
+extern func metal_buffer as "objc_msgSend"(object: void*, selector: void*, bytes: const void*, length: u64, options: u64) -> void*?
+extern func metal_bind_buffer as "objc_msgSend"(object: void*, selector: void*, buffer: void*, offset: u64, index: u64)
+extern func metal_scissor as "objc_msgSend"(object: void*, selector: void*, rectangle: LuceGpuMetalScissor)
+extern func metal_draw as "objc_msgSend"(object: void*, selector: void*, primitive: u64, start: u64, count: u64)
+extern func pthread_main_np() -> i32
+extern func MTLCreateSystemDefaultDevice() -> void*?
+extern func objc_getClass(name: c.str) -> void*?
+extern func sel_registerName(name: c.str) -> void*
+extern func objc_autoreleasePoolPush() -> void*
+extern func objc_autoreleasePoolPop(pool: void*)
+extern func CGColorSpaceCreateWithName(name: void*) -> void*?
+extern func CGColorSpaceRelease(space: void*)
+extern var kCGColorSpaceSRGB: void*
+extern func metal_ptr as "objc_msgSend"(object: void*, selector: void*) -> void*?
+extern func metal_void as "objc_msgSend"(object: void*, selector: void*)
+extern func metal_object as "objc_msgSend"(object: void*, selector: void*, value: void*?)
+extern func metal_bool_arg as "objc_msgSend"(object: void*, selector: void*, value: bool)
+extern func metal_uint_arg as "objc_msgSend"(object: void*, selector: void*, value: u64)
+extern func metal_double_arg as "objc_msgSend"(object: void*, selector: void*, value: f64)
+extern func metal_size_arg as "objc_msgSend"(object: void*, selector: void*, value: LuceGpuMetalSize)
+extern func metal_color_arg as "objc_msgSend"(object: void*, selector: void*, value: LuceGpuMetalClearColor)
+extern func metal_uint as "objc_msgSend"(object: void*, selector: void*) -> u64
+extern func metal_index as "objc_msgSend"(object: void*, selector: void*, index: u64) -> void*?
+extern func metal_with_object as "objc_msgSend"(object: void*, selector: void*, value: void*) -> void*?
+
+func metal_sel(name: c.str) -> void*:
+    return sel_registerName(name)
+
+func metal_class(name: c.str) -> void*!:
+    return objc_getClass(name) else error(failed, "a required Metal class is unavailable; check framework linkage")
+
+func metal_required(object: void*?) -> void*:
+    return object else trap("the Metal backend lost an owned object")
