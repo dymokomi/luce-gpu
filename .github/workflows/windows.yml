@@ -54,11 +54,6 @@ jobs:
         working-directory: luce-gpu
         shell: msys2 {0}
         run: python tests/run.py --base ../luce-base/build/luce-base.exe --skip-programs
-      - name: Windows contracts
-        working-directory: luce-gpu
-        shell: msys2 {0}
-        run: |
-          python tools/test_windows_native.py --compiler ../luce-base/build/luce-base.exe
       - name: Retain diagnostics
         if: always()
         uses: actions/upload-artifact@v7

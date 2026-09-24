@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Exercise actual Vulkan presentation on Windows in all native and C modes."""
+"""Exercise actual Vulkan presentation on Windows in all native and C modes; it needs a GPU,
+so it runs only with --gpu."""
 import argparse
 import json
 import os
@@ -11,8 +12,9 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--compiler', type=Path, default=ROOT.parent / 'luce-base/build/luce-base.exe')
 parser.add_argument('--match', default='')
 
+parser.add_argument('--gpu', action='store_true', help='this machine has a GPU and a desktop')
 args = parser.parse_args()
-cases = ['render_contract']
+cases = ['render_contract'] if args.gpu else []
 modes = [['--native', '--opt', str(level)] for level in range(4)] + [['--native', '--debug']] + [
     ['--backend=c'], ['--backend=c', '--release']]
 results = []
