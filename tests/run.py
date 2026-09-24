@@ -22,7 +22,10 @@ def run(command, **kwargs):
 
 source = ROOT / "src" / PACKAGE.replace("-", "_")
 targets = sorted(p for p in source.iterdir() if p.suffix == ".lucb" or (p / "ORDER").exists())
-targets += sorted((ROOT / "tests/unit").glob("*.lucb")) if (ROOT / "tests/unit").exists() else []
+# tests/unit exercise POSIX hosts (child processes through sh, rooted paths); Windows has
+# its own contracts under tests/windows
+if os.name != "nt":
+    targets += sorted((ROOT / "tests/unit").glob("*.lucb")) if (ROOT / "tests/unit").exists() else []
 for target in targets:
     text = "".join(f.read_text(encoding="utf-8") for f in ([target] if target.is_file() else target.rglob("*.lucb")))
     if 'test "' not in text:
