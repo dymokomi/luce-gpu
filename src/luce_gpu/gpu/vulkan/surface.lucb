@@ -25,6 +25,11 @@ struct VulkanSurface:
     var pool: u64
     var command: u64
     var acquired: u64
+    # The swapchain's own depth attachment: its framebuffers outlive any texture
+    # pass, so they must not share the device's size-cached one.
+    var depth_image: u64
+    var depth_memory: u64
+    var depth_view: u64
     var dirty: bool = true
     var poisoned: bool
 
@@ -94,7 +99,8 @@ func vulkan_swapchain(device: VulkanDevice*, state: VulkanSurface*, width: u32, 
     state.height = extent.height
     state.format = pixel_format
     let drawing = try vulkan_format_state(device, pixel_format)
-    let depth_view = try vulkan_depth_for(device, extent.width, extent.height)
+    try vulkan_depth_create(device, extent.width, extent.height, &state.depth_image, &state.depth_memory, &state.depth_view)
+    let depth_view = state.depth_view
     count = 0
     try vulkan_check(vkGetSwapchainImagesKHR(device.device, state.swapchain, &count, none), "Vulkan swapchain images are unavailable")
     let images = try alloc u64[(usize)count]
@@ -123,6 +129,7 @@ func vulkan_swapchain_destroy(device: VulkanDevice*, state: VulkanSurface*):
     state.images = empty
     if state.swapchain != 0: vkDestroySwapchainKHR(device.device, state.swapchain, none)
     state.swapchain = 0
+    vulkan_depth_release(device, &state.depth_image, &state.depth_memory, &state.depth_view)
     state.width = 0
     state.height = 0
     state.dirty = true

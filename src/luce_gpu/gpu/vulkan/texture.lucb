@@ -96,35 +96,50 @@ func vulkan_drawing_destroy(device: VulkanDevice*):
     device.command = 0
     device.ready = false
 
-## The device's depth attachment, reallocated when the extent changes.
-func vulkan_depth_for(device: VulkanDevice*, width: u32, height: u32) -> u64!:
-    if device.depth_view != 0 and device.depth_width == width and device.depth_height == height:
-        return device.depth_view
-    vulkan_depth_destroy(device)
-    errdefer vulkan_depth_destroy(device)
+## Allocate a 32-bit depth attachment of `width` by `height`: the image, its
+## memory and its view are written to `depth`, `block` and `target`, replacing
+## whatever they held.
+func vulkan_depth_create(device: VulkanDevice*, width: u32, height: u32, depth: u64*, block: u64*, target: u64*) -> !:
+    vulkan_depth_release(device, depth, block, target)
+    errdefer vulkan_depth_release(device, depth, block, target)
     var properties: VkFormatProperties
     vkGetPhysicalDeviceFormatProperties(device.physical, VK_FORMAT_D32_SFLOAT, &properties)
     if (properties.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) == 0:
         error(unavailable, "the Vulkan device has no 32-bit depth attachment support")
     var info = VkImageCreateInfo(sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, imageType = VK_IMAGE_TYPE_2D, format = VK_FORMAT_D32_SFLOAT,
                                  extent = VkExtent3D(width = width, height = height, depth = 1), mipLevels = 1, arrayLayers = 1, samples = VK_SAMPLE_COUNT_1_BIT, usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)
-    try vulkan_check(vkCreateImage(device.device, &info, none, &device.depth_image), "the Vulkan depth image could not be created")
+    try vulkan_check(vkCreateImage(device.device, &info, none, depth), "the Vulkan depth image could not be created")
     var requirements: VkMemoryRequirements
-    vkGetImageMemoryRequirements(device.device, device.depth_image, &requirements)
-    device.depth_memory = try vulkan_memory(device, requirements, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
-    try vulkan_check(vkBindImageMemory(device.device, device.depth_image, device.depth_memory, 0), "Vulkan depth memory could not be bound")
-    device.depth_view = try vulkan_image_view(device, device.depth_image, VK_FORMAT_D32_SFLOAT, VK_IMAGE_ASPECT_DEPTH_BIT)
+    vkGetImageMemoryRequirements(device.device, *depth, &requirements)
+    *block = try vulkan_memory(device, requirements, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+    try vulkan_check(vkBindImageMemory(device.device, *depth, *block, 0), "Vulkan depth memory could not be bound")
+    *target = try vulkan_image_view(device, *depth, VK_FORMAT_D32_SFLOAT, VK_IMAGE_ASPECT_DEPTH_BIT)
+
+## Free a depth attachment made by `vulkan_depth_create`, and zero its handles.
+func vulkan_depth_release(device: VulkanDevice*, depth: u64*, block: u64*, target: u64*):
+    if *target != 0: vkDestroyImageView(device.device, *target, none)
+    if *depth != 0: vkDestroyImage(device.device, *depth, none)
+    if *block != 0: vkFreeMemory(device.device, *block, none)
+    *target = 0
+    *depth = 0
+    *block = 0
+
+## The device's depth attachment for texture passes, reallocated when the extent
+## changes. Only a framebuffer that is created and destroyed within one call may
+## use it: replacing it invalidates every framebuffer that still names the old
+## view, which is why the swapchain keeps a depth attachment of its own.
+func vulkan_depth_for(device: VulkanDevice*, width: u32, height: u32) -> u64!:
+    if device.depth_view != 0 and device.depth_width == width and device.depth_height == height:
+        return device.depth_view
+    device.depth_width = 0
+    device.depth_height = 0
+    try vulkan_depth_create(device, width, height, &device.depth_image, &device.depth_memory, &device.depth_view)
     device.depth_width = width
     device.depth_height = height
     return device.depth_view
 
 func vulkan_depth_destroy(device: VulkanDevice*):
-    if device.depth_view != 0: vkDestroyImageView(device.device, device.depth_view, none)
-    if device.depth_image != 0: vkDestroyImage(device.device, device.depth_image, none)
-    if device.depth_memory != 0: vkFreeMemory(device.device, device.depth_memory, none)
-    device.depth_view = 0
-    device.depth_image = 0
-    device.depth_memory = 0
+    vulkan_depth_release(device, &device.depth_image, &device.depth_memory, &device.depth_view)
     device.depth_width = 0
     device.depth_height = 0
 
