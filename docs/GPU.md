@@ -243,7 +243,10 @@ work. Invalid geometry is rejected before recording. A canvas allows up to
 The built-in pipeline's fragment stage is written once in GLSL
 (`shaders/fill.frag`) and embedded for both backends by
 `tools/embed_shaders.py`: SPIR-V words for Vulkan and Metal Shading Language
-cross-compiled from them by spirv-cross. The vertex stage is per backend (they
+cross-compiled from them by spirv-cross. On macOS the tool compiles each
+Metal translation with `xcrun metal` before writing, because spirv-cross
+passes through GLSL names that Metal reserves (a helper named `level`), which
+the device would otherwise refuse only at run time. The vertex stage is per backend (they
 disagree on clip-space Y): `shaders/quad.vert` for Vulkan and a Metal source in
 `metal/drawing.lucb`. Fragments emit premultiplied color and blend with One /
 OneMinusSourceAlpha, so vertex colors, coverage masks and textures all

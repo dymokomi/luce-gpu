@@ -10,8 +10,10 @@ so glslangValidator and spirv-cross are needed only when a shader changes.
 """
 import argparse
 from pathlib import Path
+import shutil
 import struct
 import subprocess
+import sys
 import tempfile
 
 parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -36,6 +38,20 @@ def words_of(path, stage, temporary):
     words = struct.unpack(f'<{len(data) // 4}I', data)
     assert words[0] == 0x07230203
     return output, words
+
+
+def check_msl(path, msl, temporary):
+    """Compile the Metal source where Metal is (macOS): spirv-cross passes GLSL
+    names through that Metal reserves (a helper called `level`), and the device
+    would only refuse the shader at run time."""
+    if sys.platform != 'darwin' or shutil.which('xcrun') is None:
+        return
+    source = Path(temporary) / (path.stem + '.metal')
+    source.write_text(msl, encoding='utf-8')
+    compiled = subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-c', str(source), '-o', str(source.with_suffix('.air'))],
+                              capture_output=True, text=True)
+    if compiled.returncode != 0:
+        sys.exit(f'{path.name}: the Metal translation does not compile:\n{compiled.stderr}')
 
 
 def emit_mark(title):
@@ -64,6 +80,7 @@ with tempfile.TemporaryDirectory(prefix='luce-shader-') as temporary:
         msl = subprocess.run([args.spirv_cross, '--msl', '--msl-version', '20100', '--msl-decoration-binding',
                               '--rename-entry-point', 'main', 'luce_fragment', 'frag', str(spv)],
                              check=True, capture_output=True, text=True).stdout
+        check_msl(path, msl, temporary)
         escaped = msl.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
         lines.append(f'{visibility}let {path.stem}_frag_msl: c.str = "{escaped}"')
         lines.append('')
