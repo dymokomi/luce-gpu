@@ -143,7 +143,7 @@ pub struct Canvas:
     ## target, modulated by `opacity`. The texture stays retained until the canvas
     ## is cleared or destroyed, so destroying the handle meanwhile is safe.
     mutating func image(texture: TextureState*, source: Region, rectangle: Rect, opacity: f64, filter: Filter,
-                        clip: Clip, target_width: f64, target_height: f64) -> !:
+                        clip: Clip, target_width: f64, target_height: f64, mode: u32 = draw_sampled) -> !:
         if source.width == 0 or source.height == 0 or source.x > texture.width - source.width or source.y > texture.height - source.height:
             error(invalid_geometry, "an image source region must lie inside its texture")
         if not (opacity >= 0.0 and opacity <= 1.0):
@@ -152,7 +152,7 @@ pub struct Canvas:
             return
         try self.triangles(quad_vertices(rectangle, Color(1.0, 1.0, 1.0, opacity), target_width, target_height), clip)
         var draw = &self.draws[self.draw_count - 1]
-        draw.params = image_params(rectangle, source, texture.width, texture.height)
+        draw.params = image_params(rectangle, source, texture.width, texture.height, mode)
         draw.images[0] = texture
         draw.filter = filter
         texture.references += 1

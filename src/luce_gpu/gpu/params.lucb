@@ -5,7 +5,8 @@
 #   DESCRIPTION:
 #       The 48 bytes every draw hands its fragment shader on both backends: a pixel rectangle
 #       with either a coverage image (mode 1) or a texture's source rectangle (mode 2) mapped
-#       onto it. Mode 0 draws the interpolated vertex color alone. Layout is shared with the
+#       onto it. Mode 0 draws the interpolated vertex color alone. Modes 3 and 4 copy the
+#       source rectangle: as stored, or from premultiplied to straight alpha. Layout is shared with the
 #       Metal and GLSL shader sources; change all three together.
 #
 #==============================================================================================
@@ -27,9 +28,11 @@ extern struct DrawParams:
 let draw_solid: u32 = 0
 let draw_coverage: u32 = 1
 let draw_sampled: u32 = 2
+let draw_copied: u32 = 3
+let draw_straightened: u32 = 4
 
 ## The pixel-space parameters for `rectangle` mapped onto a texture's `source`.
-func image_params(rectangle: Rect, source: Region, texture_width: u32, texture_height: u32) -> DrawParams:
-    return DrawParams((f32)rectangle.x, (f32)rectangle.y, (f32)rectangle.width, (f32)rectangle.height, 0, 0, 0, draw_sampled,
+func image_params(rectangle: Rect, source: Region, texture_width: u32, texture_height: u32, mode: u32 = draw_sampled) -> DrawParams:
+    return DrawParams((f32)rectangle.x, (f32)rectangle.y, (f32)rectangle.width, (f32)rectangle.height, 0, 0, 0, mode,
                       (f32)source.x / (f32)texture_width, (f32)source.y / (f32)texture_height,
                       (f32)(source.x + source.width) / (f32)texture_width, (f32)(source.y + source.height) / (f32)texture_height)

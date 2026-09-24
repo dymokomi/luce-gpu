@@ -273,7 +273,14 @@ and a texture sampled by a frame must belong to the frame's device
 
 `draw_image(target, texture, rectangle, source?, opacity, filter)` draws a texel
 region scaled onto a rectangle of a `RenderTarget`, clipped like every other
-draw, with `nearest` or `linear` sampling. `device_of(target)` returns an owned
+draw, with `nearest` or `linear` sampling. Its texels are straight alpha and
+composite over what is drawn, premultiplied, like every draw.
+`copy_image(target, texture, rectangle, source?, filter, straighten)` instead
+writes texels as they are stored, for filling a target cleared to transparent
+with pieces that do not overlap: straight alpha stays straight and premultiplied
+stays premultiplied, so a texture in either form moves between textures without
+drift. With `straighten` the texels are premultiplied and are written straight,
+which turns a premultiplied drawing into straight-alpha storage. `device_of(target)` returns an owned
 handle to the device the target's frame draws on, so drawing code can create
 textures for it; a standalone frame has none. These two are functions rather
 than `RenderTarget` methods because textures and devices are Base resources: a

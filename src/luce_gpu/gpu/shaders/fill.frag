@@ -1,5 +1,7 @@
 // The built-in fragment: vertex color, optionally multiplied by a coverage
 // image (mode 1) or a sampled texture (mode 2). Emits premultiplied color.
+// Modes 3 and 4 copy a texture instead: mode 3 emits each sample as stored,
+// mode 4 a premultiplied sample made straight.
 // Bindings follow the client contract in docs/GPU.md: uniforms are the push
 // constant block, sampled images are bindings 1..4, and the coverage words
 // are binding 5, which client shaders never use.
@@ -29,6 +31,10 @@ void main() {
                    mix(coverage(i + ivec2(0, 1)), coverage(i + ivec2(1, 1)), f.x), f.y);
     } else if (params.mode == 2u) {
         c *= texture(image, mix(vec2(params.u0, params.v0), vec2(params.u1, params.v1), p));
+    } else if (params.mode >= 3u) {
+        vec4 t = texture(image, mix(vec2(params.u0, params.v0), vec2(params.u1, params.v1), p));
+        fragment_color = params.mode == 3u ? t : vec4(t.a > 0.0 ? t.rgb / t.a : vec3(0.0), t.a);
+        return;
     }
     fragment_color = vec4(c.rgb * c.a, c.a);
 }

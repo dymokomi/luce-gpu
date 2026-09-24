@@ -41,6 +41,31 @@ pub func pixels(device: gpu.Device) -> !:
     # Half-alpha white over a transparent clear stays premultiplied: 128, 128, 128, 128.
     assert(result[60] >= 126 and result[60] <= 129 and result[63] >= 126 and result[63] <= 129)
 
+    # A copy writes texels as stored: the half-alpha white stays straight...
+    var copied = try gpu.Texture.create(device, 4, 4, gpu.Format.rgba8_linear)
+    defer copied.destroy()
+    let copy_frame = try copied.frame()
+    defer copy_frame.release()
+    let copy_root = try copy_frame.value().target()
+    defer copy_root.release()
+    try gpu.copy_image(copy_root.value(), source, gpu.Rect(width = 4.0, height = 4.0))
+    assert((try copy_frame.value().present(gpu.Color(0.0, 0.0, 0.0, 0.0))) == gpu.PresentResult.submitted)
+    try copied.read(result)
+    assert(result[0] == 255 and result[1] == 0 and result[3] == 255)
+    assert(result[60] == 255 and result[62] == 255 and result[63] >= 126 and result[63] <= 129)
+    # ...and the premultiplied drawing above, straightened, is white at half alpha.
+    var straight = try gpu.Texture.create(device, 4, 4, gpu.Format.rgba8_linear)
+    defer straight.destroy()
+    let straight_frame = try straight.frame()
+    defer straight_frame.release()
+    let straight_root = try straight_frame.value().target()
+    defer straight_root.release()
+    try gpu.copy_image(straight_root.value(), target, gpu.Rect(width = 4.0, height = 4.0), straighten = true)
+    assert((try straight_frame.value().present(gpu.Color(0.0, 0.0, 0.0, 0.0))) == gpu.PresentResult.submitted)
+    try straight.read(result)
+    assert(result[0] == 255 and result[3] == 255)
+    assert(result[60] >= 253 and result[62] >= 253 and result[63] >= 126 and result[63] <= 129)
+
     # A solid quad, an opacity-scaled image and clipping compose on one frame.
     var canvas = try gpu.Texture.create(device, 8, 8, gpu.Format.rgba8)
     defer canvas.destroy()

@@ -217,6 +217,25 @@ pub func draw_image(target: const RenderTarget*, texture: Texture, rectangle: Re
     try target.frame.canvas.image(state, area, destination, opacity, filter, target.clipping,
                                   target.frame.size.pixel_width, target.frame.size.pixel_height)
 
+## Copy `source` texels of `texture` (the whole texture by default) scaled onto
+## `rectangle` of `target` in points, sampled with `filter`, written as they are
+## stored: straight alpha stays straight and premultiplied stays premultiplied,
+## where `draw_image` would premultiply straight texels. With `straighten`, the
+## texels are premultiplied and are written straight. Nothing composites: this
+## fills a target cleared to transparent with pieces that do not overlap, as
+## when tiles are moved, flattened or resampled.
+pub func copy_image(target: const RenderTarget*, texture: Texture, rectangle: Rect, source: Region? = none, filter: Filter = Filter.nearest, straighten: bool = false) -> !:
+    try target.frame.check()
+    try check_region(rectangle)
+    let state = try texture.checked()
+    let area = source else Region(0, 0, state.width, state.height)
+    let scale_x = frame_scale(target.frame.size.pixel_width, target.frame.size.width)
+    let scale_y = frame_scale(target.frame.size.pixel_height, target.frame.size.height)
+    let destination = Rect((target.rectangle.x + rectangle.x) * scale_x,
+                           (target.rectangle.y + rectangle.y) * scale_y, rectangle.width * scale_x, rectangle.height * scale_y)
+    try target.frame.canvas.image(state, area, destination, 1.0, filter, target.clipping,
+                                  target.frame.size.pixel_width, target.frame.size.pixel_height, draw_straightened if straighten else draw_copied)
+
 func frame_scale(pixels: f64, points: f64) -> f64:
     return pixels / points if points > 0.0 else 0.0
 
