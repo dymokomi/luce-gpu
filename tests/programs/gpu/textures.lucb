@@ -176,7 +176,8 @@ pub func programs(device: gpu.Device) -> !:
     assert((try frame.value().present(gpu.Color(0.0, 0.0, 1.0, 1.0))) == gpu.PresentResult.submitted)
     var pixel: u8[4]
     try target.read(pixel, gpu.Region(1, 1, 1, 1))
-    assert(pixel[0] == 255 and pixel[1] == 128 and pixel[2] == 128 and pixel[3] == 255)
+    # 0.5 is 127.5 in eight bits; drivers may round either way.
+    assert(pixel[0] == 255 and pixel[1] >= 127 and pixel[1] <= 128 and pixel[2] >= 127 and pixel[2] <= 128 and pixel[3] == 255)
     # replace ignores the blue clear beneath a half-alpha draw; add sums with it.
     uniforms[3] = 0.5
     let half = try target.frame()
