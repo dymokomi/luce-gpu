@@ -92,6 +92,12 @@ func vulkan_encode(device: VulkanDevice*, command: u64, formats: VulkanFormatSta
     var clears: VkClearValue[2]
     clears[0].color = [(f32)(color.red * color.alpha), (f32)(color.green * color.alpha), (f32)(color.blue * color.alpha), (f32)color.alpha]
     clears[1].color[0] = 1.0
+    # Images sampled before anything was drawn into them get a defined layout
+    # here, outside the pass.
+    for index in 0..<canvas.draw_count:
+        for slot in 0..<image_limit:
+            if let texture = canvas.draws[index].images[slot]:
+                vulkan_transition(command, (VulkanTexture*)texture.native, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
     var begin = VkRenderPassBeginInfo(sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, renderPass = pass, framebuffer = framebuffer,
                                       renderArea = VkRect2D(extent = VkExtent2D(width = width, height = height)), clearValueCount = 2, pClearValues = &clears[0])
     vkCmdBeginRenderPass(command, &begin, VK_SUBPASS_CONTENTS_INLINE)

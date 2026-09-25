@@ -158,14 +158,14 @@ func vulkan_texture_create(device: VulkanDevice*, width: u32, height: u32, pixel
     state.memory = try vulkan_memory(device, requirements, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
     try vulkan_check(vkBindImageMemory(device.device, state.image, state.memory, 0), "Vulkan image memory could not be bound")
     state.view = try vulkan_image_view(device, state.image, state.native_format, VK_IMAGE_ASPECT_COLOR_BIT)
-    # Sampling needs a defined layout even before the first upload.
-    try vulkan_transfer_begin(device)
-    vulkan_transition(device.command, state, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
-    try vulkan_transfer_end(device)
+    # The layout stays undefined until the first use: a pass rendering into it
+    # starts from undefined anyway, and one sampling it first makes it ready
+    # in its own commands (`vulkan_encode`), so creating costs no submission.
     return state
 
+## Every submission waits for the queue to finish before returning, so no
+## recorded work can still be using the image.
 func vulkan_texture_destroy(device: VulkanDevice*, state: VulkanTexture*):
-    discard(vkDeviceWaitIdle(device.device))
     if state.view != 0: vkDestroyImageView(device.device, state.view, none)
     if state.image != 0: vkDestroyImage(device.device, state.image, none)
     if state.memory != 0: vkFreeMemory(device.device, state.memory, none)
