@@ -17,6 +17,57 @@ struct VulkanFormatState:
     var overlay: u64
     var depth_test: u64
 
+## A free range of a memory page.
+struct VulkanRange:
+    var offset: u64
+    var size: u64
+
+## One large VkDeviceMemory block that images are carved from, first fit. Its
+## free ranges are sorted by offset and never adjacent.
+struct VulkanPage:
+    var memory: u64
+    var size: u64
+    var type_index: u32
+    var live: usize
+    var ranges: VulkanRange[]
+    var range_count: usize
+    var next: VulkanPage*?
+
+## Where a resource's memory lives: a range of a page, or, with no page, a
+## dedicated allocation of its own.
+struct VulkanAllocation:
+    var memory: u64
+    var offset: u64
+    var size: u64
+    var page: VulkanPage*?
+
+let vulkan_retired_buffer: u8 = 1
+let vulkan_retired_framebuffer: u8 = 2
+let vulkan_retired_descriptors: u8 = 3
+let vulkan_retired_image: u8 = 4
+
+## A handle released once the submission holding it has completed.
+struct VulkanRetired:
+    var kind: u8
+    var handle: u64
+    var view: u64
+    var allocation: VulkanAllocation
+
+## One in-flight submission: its own command pool and buffer, the fence it
+## signals, and what it frees when that fence is signalled. `serial` is zero
+## while the slot is idle or recording.
+struct VulkanSlot:
+    var pool: u64
+    var command: u64
+    var fence: u64
+    var serial: u64
+    var retired: VulkanRetired[]
+    var retired_count: usize
+
+## How many texture submissions may be in flight before recording one waits
+## for the oldest.
+let vulkan_slot_limit: usize = 32
+
 struct VulkanDevice:
     var instance: u64
     var physical: u64
@@ -26,8 +77,14 @@ struct VulkanDevice:
     var memory: VkPhysicalDeviceMemoryProperties
     # Drawing state shared by surfaces and textures; see vulkan_drawing.
     var ready: bool
-    var pool: u64
-    var command: u64
+    # The submission ring: serial n uses slots[n % vulkan_slot_limit]. Every
+    # serial up to `completed` has finished; `submitted` is the newest.
+    var slots: VulkanSlot[32]
+    var submitted: u64
+    var completed: u64
+    # Image memory pages; see vulkan_image_memory.
+    var pages: VulkanPage*?
+    var page_count: usize
     var descriptor_layout: u64
     var layout: u64
     var nearest: u64
@@ -113,21 +170,290 @@ func vulkan_device_rank(physical: u64) -> u32:
         return 1
     return 2
 
+## Retire finished submissions and count the image memory pages held.
+func vulkan_memory_pages(device: VulkanDevice*) -> usize:
+    vulkan_poll(device)
+    return device.page_count
+
 func vulkan_device_destroy(state: VulkanDevice*):
     if state.device != 0:
         discard(vkDeviceWaitIdle(state.device))
         vulkan_drawing_destroy(state)
+        # Textures still open when the device goes release their pages with it.
+        while let page = state.pages:
+            vulkan_page_destroy(state, page)
         vkDestroyDevice(state.device, none)
     if state.instance != 0:
         vkDestroyInstance(state.instance, none)
     free(state) in memory.heap
 
-func vulkan_memory(device: VulkanDevice*, requirements: VkMemoryRequirements, flags: u32) -> u64!:
+func vulkan_memory_type(device: VulkanDevice*, requirements: VkMemoryRequirements, flags: u32) -> u32!:
     for index in 0..<(usize)device.memory.memoryTypeCount:
         if (requirements.memoryTypeBits & (1u32 << (u32)index)) != 0 and (device.memory.memoryTypes[index].propertyFlags & flags) == flags:
-            var info = VkMemoryAllocateInfo(sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-                                            allocationSize = requirements.size, memoryTypeIndex = (u32)index)
-            var block: u64 = 0
-            try vulkan_check(vkAllocateMemory(device.device, &info, none, &block), "Vulkan device memory allocation failed")
-            return block
+            return (u32)index
     error(unavailable, "no compatible Vulkan memory type is available")
+
+func vulkan_allocate(device: VulkanDevice*, size: u64, type_index: u32) -> u64!:
+    var info = VkMemoryAllocateInfo(sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, allocationSize = size, memoryTypeIndex = type_index)
+    var block: u64 = 0
+    try vulkan_check(vkAllocateMemory(device.device, &info, none, &block), "Vulkan device memory allocation failed")
+    return block
+
+## A dedicated allocation: staging, vertex and depth memory.
+func vulkan_memory(device: VulkanDevice*, requirements: VkMemoryRequirements, flags: u32) -> u64!:
+    return try vulkan_allocate(device, requirements.size, try vulkan_memory_type(device, requirements, flags))
+
+# mark: Image memory pages ====================================================================
+
+## Pages are 64 MiB, or 256 MiB when their heap holds more than 8 GiB.
+func vulkan_page_size(device: VulkanDevice*, type_index: u32) -> u64:
+    let heap = device.memory.memoryHeaps[(usize)device.memory.memoryTypes[(usize)type_index].heapIndex]
+    if heap.size > (8u64 << 30):
+        return 256u64 << 20
+    return 64u64 << 20
+
+## Device-local memory for an image. Images up to a quarter of a page share
+## pages, so a large document makes a few allocations rather than one per tile
+## (Windows drivers allow about 4096); bigger ones get memory of their own.
+func vulkan_image_memory(device: VulkanDevice*, requirements: VkMemoryRequirements) -> VulkanAllocation!:
+    let type_index = try vulkan_memory_type(device, requirements, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+    let page_size = vulkan_page_size(device, type_index)
+    if requirements.size > page_size // 4:
+        return VulkanAllocation(memory = try vulkan_allocate(device, requirements.size, type_index), size = requirements.size)
+    var cursor = device.pages
+    while let page = cursor:
+        if page.type_index == type_index:
+            if let offset = try vulkan_page_take(page, requirements.size, requirements.alignment):
+                return VulkanAllocation(memory = page.memory, offset = offset, size = requirements.size, page = page)
+        cursor = page.next
+    let page = try vulkan_page_create(device, type_index, page_size)
+    let offset = (try vulkan_page_take(page, requirements.size, requirements.alignment)) else trap("a fresh Vulkan memory page cannot hold a quarter of itself")
+    return VulkanAllocation(memory = page.memory, offset = offset, size = requirements.size, page = page)
+
+func vulkan_page_create(device: VulkanDevice*, type_index: u32, size: u64) -> VulkanPage*!:
+    let memory_block = try vulkan_allocate(device, size, type_index)
+    errdefer vkFreeMemory(device.device, memory_block, none)
+    let page = try new VulkanPage(memory = memory_block, size = size, type_index = type_index) in memory.heap
+    errdefer free(page) in memory.heap
+    page.ranges = try alloc VulkanRange[8] in memory.heap
+    page.ranges[0] = VulkanRange(offset = 0, size = size)
+    page.range_count = 1
+    page.next = device.pages
+    device.pages = page
+    device.page_count += 1
+    return page
+
+func vulkan_page_destroy(device: VulkanDevice*, page: VulkanPage*):
+    if device.pages == page:
+        device.pages = page.next
+    else:
+        var cursor = device.pages
+        while let previous = cursor:
+            if previous.next == page:
+                previous.next = page.next
+                break
+            cursor = previous.next
+    vkFreeMemory(device.device, page.memory, none)
+    free(page.ranges) in memory.heap
+    free(page) in memory.heap
+    device.page_count -= 1
+
+## First fit: the aligned offset of `size` bytes taken from a free range, or none
+## when no range fits. Free ranges never outnumber live allocations plus one, so
+## growing the list to that before taking leaves room for every later release.
+func vulkan_page_take(page: VulkanPage*, size: u64, alignment: u64) -> u64?!:
+    if page.ranges.length < page.live + 2:
+        let grown = try alloc VulkanRange[(page.live + 2) * 2] in memory.heap
+        memory.copy(grown, page.ranges, page.range_count)
+        free(page.ranges) in memory.heap
+        page.ranges = grown
+    let align = alignment if alignment > 0 else 1u64
+    for index in 0..<page.range_count:
+        let range = page.ranges[index]
+        let start = (range.offset + align - 1) // align * align
+        let end = range.offset + range.size
+        if start + size > end:
+            continue
+        let prefix = start - range.offset
+        let suffix = end - (start + size)
+        if prefix == 0 and suffix == 0:
+            for later in index..<(page.range_count - 1):
+                page.ranges[later] = page.ranges[later + 1]
+            page.range_count -= 1
+        elif prefix == 0:
+            page.ranges[index] = VulkanRange(offset = start + size, size = suffix)
+        elif suffix == 0:
+            page.ranges[index].size = prefix
+        else:
+            var later = page.range_count
+            while later > index + 1:
+                page.ranges[later] = page.ranges[later - 1]
+                later -= 1
+            page.ranges[index].size = prefix
+            page.ranges[index + 1] = VulkanRange(offset = start + size, size = suffix)
+            page.range_count += 1
+        page.live += 1
+        return start
+    return none
+
+## Return a range to its page, merging it with the free ranges beside it.
+func vulkan_page_give(page: VulkanPage*, offset: u64, size: u64):
+    var index: usize = 0
+    while index < page.range_count and page.ranges[index].offset < offset:
+        index += 1
+    let joins_previous = index > 0 and page.ranges[index - 1].offset + page.ranges[index - 1].size == offset
+    let joins_next = index < page.range_count and offset + size == page.ranges[index].offset
+    if joins_previous and joins_next:
+        page.ranges[index - 1].size += size + page.ranges[index].size
+        for later in index..<(page.range_count - 1):
+            page.ranges[later] = page.ranges[later + 1]
+        page.range_count -= 1
+    elif joins_previous:
+        page.ranges[index - 1].size += size
+    elif joins_next:
+        page.ranges[index] = VulkanRange(offset = offset, size = size + page.ranges[index].size)
+    else:
+        var later = page.range_count
+        while later > index:
+            page.ranges[later] = page.ranges[later - 1]
+            later -= 1
+        page.ranges[index] = VulkanRange(offset = offset, size = size)
+        page.range_count += 1
+    page.live -= 1
+
+## Release memory from `vulkan_image_memory` or a dedicated allocation; a page
+## is freed as soon as nothing lives in it.
+func vulkan_allocation_free(device: VulkanDevice*, allocation: VulkanAllocation):
+    if let page = allocation.page:
+        vulkan_page_give(page, allocation.offset, allocation.size)
+        if page.live == 0:
+            vulkan_page_destroy(device, page)
+    elif allocation.memory != 0:
+        vkFreeMemory(device.device, allocation.memory, none)
+
+# mark: Submissions ===========================================================================
+
+func vulkan_slots_create(device: VulkanDevice*) -> !:
+    for index in 0..<vulkan_slot_limit:
+        let slot = &device.slots[index]
+        var pool_info = VkCommandPoolCreateInfo(sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, queueFamilyIndex = device.family)
+        try vulkan_check(vkCreateCommandPool(device.device, &pool_info, none, &slot.pool), "a Vulkan command pool could not be created")
+        var command_info = VkCommandBufferAllocateInfo(sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, commandPool = slot.pool, commandBufferCount = 1)
+        try vulkan_check(vkAllocateCommandBuffers(device.device, &command_info, &slot.command), "a Vulkan command buffer could not be allocated")
+        var fence_info = VkFenceCreateInfo(sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO)
+        try vulkan_check(vkCreateFence(device.device, &fence_info, none, &slot.fence), "a Vulkan fence could not be created")
+        slot.retired = try alloc VulkanRetired[8] in memory.heap
+
+## Wait for the device, free everything held, and destroy the ring.
+func vulkan_slots_destroy(device: VulkanDevice*):
+    discard(vkDeviceWaitIdle(device.device))
+    vulkan_retire_through(device, device.submitted)
+    for index in 0..<vulkan_slot_limit:
+        let slot = &device.slots[index]
+        vulkan_slot_free(device, slot)
+        if slot.fence != 0: vkDestroyFence(device.device, slot.fence, none)
+        if slot.pool != 0: vkDestroyCommandPool(device.device, slot.pool, none)
+        if slot.retired.length > 0: free(slot.retired) in memory.heap
+        *slot = VulkanSlot()
+
+## Queue `item` for release when `slot`'s submission completes.
+func vulkan_retire(slot: VulkanSlot*, item: VulkanRetired) -> !:
+    if slot.retired_count == slot.retired.length:
+        let grown = try alloc VulkanRetired[slot.retired.length * 2 + 8] in memory.heap
+        memory.copy(grown, slot.retired, slot.retired_count)
+        if slot.retired.length > 0: free(slot.retired) in memory.heap
+        slot.retired = grown
+    slot.retired[slot.retired_count] = item
+    slot.retired_count += 1
+
+## Queue `item` behind the newest submission, or release it now when none is in flight.
+func vulkan_retire_latest(device: VulkanDevice*, item: VulkanRetired):
+    vulkan_poll(device)
+    if device.submitted > device.completed:
+        let slot = &device.slots[(usize)(device.submitted % (u64)vulkan_slot_limit)]
+        vulkan_retire(slot, item) catch failure:
+            discard(failure)
+            # Out of host memory: fall back to waiting rather than leaking or racing.
+            discard(vkDeviceWaitIdle(device.device))
+            vulkan_retire_through(device, device.submitted)
+            vulkan_retired_free(device, item)
+        return
+    vulkan_retired_free(device, item)
+
+func vulkan_retired_free(device: VulkanDevice*, item: VulkanRetired):
+    if item.kind == vulkan_retired_buffer:
+        vkDestroyBuffer(device.device, item.handle, none)
+    elif item.kind == vulkan_retired_framebuffer:
+        vkDestroyFramebuffer(device.device, item.handle, none)
+    elif item.kind == vulkan_retired_descriptors:
+        vkDestroyDescriptorPool(device.device, item.handle, none)
+    elif item.kind == vulkan_retired_image:
+        if item.view != 0: vkDestroyImageView(device.device, item.view, none)
+        if item.handle != 0: vkDestroyImage(device.device, item.handle, none)
+    vulkan_allocation_free(device, item.allocation)
+
+func vulkan_slot_free(device: VulkanDevice*, slot: VulkanSlot*):
+    for index in 0..<slot.retired_count:
+        vulkan_retired_free(device, slot.retired[index])
+    slot.retired_count = 0
+    slot.serial = 0
+
+## Mark every serial up to `serial` complete and free what they held. Serials
+## complete in order: a fence signalled by a submission covers every earlier
+## submission on the queue.
+func vulkan_retire_through(device: VulkanDevice*, serial: u64):
+    while device.completed < serial:
+        device.completed += 1
+        vulkan_slot_free(device, &device.slots[(usize)(device.completed % (u64)vulkan_slot_limit)])
+
+## Retire the submissions that have finished, oldest first, without waiting.
+func vulkan_poll(device: VulkanDevice*):
+    while device.completed < device.submitted:
+        let slot = &device.slots[(usize)((device.completed + 1) % (u64)vulkan_slot_limit)]
+        if vkWaitForFences(device.device, 1, &slot.fence, 1, 0) != VK_SUCCESS:
+            return
+        vulkan_retire_through(device, device.completed + 1)
+
+## Wait until submission `serial` has completed, and retire it and every earlier one.
+func vulkan_wait(device: VulkanDevice*, serial: u64) -> !:
+    if serial <= device.completed:
+        return
+    let slot = &device.slots[(usize)(serial % (u64)vulkan_slot_limit)]
+    try vulkan_check(vkWaitForFences(device.device, 1, &slot.fence, 1, 0xffffffffffffffffu64), "Vulkan execution failed")
+    vulkan_retire_through(device, serial)
+
+## Everything submitted before a host wait on the whole queue has completed.
+func vulkan_idle(device: VulkanDevice*):
+    vulkan_retire_through(device, device.submitted)
+
+## Begin recording the next submission. When the ring is full this waits for the
+## oldest submission; the serial the recording will get is `device.submitted + 1`.
+func vulkan_begin(device: VulkanDevice*) -> VulkanSlot*!:
+    vulkan_poll(device)
+    let serial = device.submitted + 1
+    if serial > (u64)vulkan_slot_limit:
+        try vulkan_wait(device, serial - (u64)vulkan_slot_limit)
+    let slot = &device.slots[(usize)(serial % (u64)vulkan_slot_limit)]
+    try vulkan_check(vkResetCommandPool(device.device, slot.pool, 0), "a Vulkan command pool could not be reset")
+    var begin = VkCommandBufferBeginInfo(sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT)
+    try vulkan_check(vkBeginCommandBuffer(slot.command, &begin), "Vulkan recording could not begin")
+    return slot
+
+## After a failed submission: drain the device and free what the slot held.
+func vulkan_abandon(device: VulkanDevice*, slot: VulkanSlot*):
+    discard(vkDeviceWaitIdle(device.device))
+    vulkan_retire_through(device, device.submitted)
+    vulkan_slot_free(device, slot)
+
+## Submit the recording begun by `vulkan_begin` without waiting, and return its
+## serial. Later submissions on the queue are ordered after it. If submission
+## fails, the device is drained and what the slot held is freed.
+func vulkan_end(device: VulkanDevice*, slot: VulkanSlot*) -> u64!:
+    errdefer vulkan_abandon(device, slot)
+    try vulkan_check(vkEndCommandBuffer(slot.command), "Vulkan recording could not finish")
+    try vulkan_check(vkResetFences(device.device, 1, &slot.fence), "a Vulkan fence could not be reset")
+    var submit = VkSubmitInfo(sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, commandBufferCount = 1, pCommandBuffers = &slot.command)
+    try vulkan_check(vkQueueSubmit(device.queue, 1, &submit, slot.fence), "Vulkan submission failed")
+    device.submitted += 1
+    slot.serial = device.submitted
+    return device.submitted

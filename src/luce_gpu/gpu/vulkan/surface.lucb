@@ -58,6 +58,7 @@ func vulkan_image_view(device: VulkanDevice*, image: u64, pixel_format: u32, asp
 
 func vulkan_swapchain(device: VulkanDevice*, state: VulkanSurface*, width: u32, height: u32) -> !:
     try vulkan_check(vkDeviceWaitIdle(device.device), "Vulkan could not finish before resizing")
+    vulkan_idle(device)
     vulkan_swapchain_destroy(device, state)
     errdefer vulkan_swapchain_destroy(device, state)
     var capabilities: VkSurfaceCapabilitiesKHR

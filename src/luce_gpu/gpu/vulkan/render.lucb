@@ -22,6 +22,17 @@ func vulkan_upload_destroy(device: VulkanDevice*, upload: VulkanUpload):
     if upload.block != 0: vkFreeMemory(device.device, upload.block, none)
     if upload.descriptors.length > 0: free(upload.descriptors) in memory.heap
 
+## Hand the upload's buffer and descriptors to `slot`, to be freed when its
+## submission completes, leaving `upload` holding nothing the device uses.
+func vulkan_upload_retire(slot: VulkanSlot*, upload: VulkanUpload*) -> !:
+    if upload.descriptor_pool != 0:
+        try vulkan_retire(slot, VulkanRetired(kind = vulkan_retired_descriptors, handle = upload.descriptor_pool))
+        upload.descriptor_pool = 0
+    if upload.buffer != 0:
+        try vulkan_retire(slot, VulkanRetired(kind = vulkan_retired_buffer, handle = upload.buffer, allocation = VulkanAllocation(memory = upload.block)))
+        upload.buffer = 0
+        upload.block = 0
+
 func vulkan_vertex_offset(canvas: Canvas) -> usize:
     # Vulkan requires storage-buffer offsets to honor the device alignment. A
     # dedicated prefix at offset zero avoids imposing any guessed alignment.
@@ -86,9 +97,11 @@ func vulkan_upload(device: VulkanDevice*, canvas: Canvas) -> VulkanUpload!:
 
 # mark: Encoding and rendering ================================================================
 ## Record one render pass of `canvas` into `framebuffer` on `command`, clearing to
-## `color`. Presentation clears opaque; texture passes keep the alpha.
+## `color`. Presentation clears opaque; texture passes keep the alpha. A nonzero
+## `serial` is the submission the commands belong to: every sampled image
+## records it as its last use.
 func vulkan_encode(device: VulkanDevice*, command: u64, formats: VulkanFormatState*, pass: u64, framebuffer: u64,
-                   canvas: Canvas, upload: VulkanUpload, color: Color, width: u32, height: u32) -> !:
+                   canvas: Canvas, upload: VulkanUpload, color: Color, width: u32, height: u32, serial: u64) -> !:
     var clears: VkClearValue[2]
     clears[0].color = [(f32)(color.red * color.alpha), (f32)(color.green * color.alpha), (f32)(color.blue * color.alpha), (f32)color.alpha]
     clears[1].color[0] = 1.0
@@ -97,7 +110,10 @@ func vulkan_encode(device: VulkanDevice*, command: u64, formats: VulkanFormatSta
     for index in 0..<canvas.draw_count:
         for slot in 0..<image_limit:
             if let texture = canvas.draws[index].images[slot]:
-                vulkan_transition(command, (VulkanTexture*)texture.native, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+                let image = (VulkanTexture*)texture.native
+                vulkan_transition(command, image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+                if serial != 0:
+                    image.last_use = serial
     var begin = VkRenderPassBeginInfo(sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, renderPass = pass, framebuffer = framebuffer,
                                       renderArea = VkRect2D(extent = VkExtent2D(width = width, height = height)), clearValueCount = 2, pClearValues = &clears[0])
     vkCmdBeginRenderPass(command, &begin, VK_SUBPASS_CONTENTS_INLINE)
@@ -137,6 +153,10 @@ func vulkan_encode(device: VulkanDevice*, command: u64, formats: VulkanFormatSta
             vkCmdDraw(command, (u32)draw.count, 1, (u32)draw.first, 0)
     vkCmdEndRenderPass(command)
 
+func vulkan_drain(device: VulkanDevice*):
+    discard(vkDeviceWaitIdle(device.device))
+    vulkan_idle(device)
+
 func vulkan_poison(state: VulkanSurface*):
     state.poisoned = true
 
@@ -172,11 +192,12 @@ func vulkan_render(device: VulkanDevice*, host: window.Presentation, state: Vulk
     # Never reuse synchronization after a partially failed submission.
     errdefer vulkan_poison(state)
     # A failure after queue submission still waits before releasing upload memory.
-    errdefer discard(vkDeviceWaitIdle(device.device))
+    errdefer vulkan_drain(device)
     var begin = VkCommandBufferBeginInfo(sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT)
     try vulkan_check(vkBeginCommandBuffer(state.command, &begin), "Vulkan command recording could not begin")
+    # Presentation waits for the queue below, so the images it samples need no serial.
     try vulkan_encode(device, state.command, formats, formats.pass_present, state.images[(usize)index].framebuffer, canvas, upload,
-                      Color(color.red, color.green, color.blue, 1.0), state.width, state.height)
+                      Color(color.red, color.green, color.blue, 1.0), state.width, state.height, 0)
     try vulkan_check(vkEndCommandBuffer(state.command), "Vulkan command recording could not finish")
     var wait_stage: u32 = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
     var signal = state.images[(usize)index].presented
@@ -188,6 +209,7 @@ func vulkan_render(device: VulkanDevice*, host: window.Presentation, state: Vulk
                                    swapchainCount = 1, pSwapchains = &state.swapchain, pImageIndices = &index)
     let result = vkQueuePresentKHR(device.queue, &present)
     try vulkan_check(vkQueueWaitIdle(device.queue), "Vulkan execution failed")
+    vulkan_idle(device)
     if result == VK_ERROR_OUT_OF_DATE_KHR or result == VK_SUBOPTIMAL_KHR or acquired == VK_SUBOPTIMAL_KHR:
         state.dirty = true
     if result != VK_SUCCESS and result != VK_ERROR_OUT_OF_DATE_KHR and result != VK_SUBOPTIMAL_KHR:

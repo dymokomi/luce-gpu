@@ -30,6 +30,11 @@ func backend_device_open(backend: Backend) -> void*!:
             return (void*)try metal_device_open()
     error(unsupported, "the GPU backend is not implemented")
 
+func backend_memory_pages(device: DeviceState*) -> usize:
+    if (platform.windows or platform.linux) and device.backend == Backend.vulkan:
+        return vulkan_memory_pages((VulkanDevice*)device.native)
+    return 0
+
 func backend_device_destroy(backend: Backend, native: void*):
     if (platform.windows or platform.linux) and backend == Backend.vulkan:
         vulkan_device_destroy((VulkanDevice*)native)

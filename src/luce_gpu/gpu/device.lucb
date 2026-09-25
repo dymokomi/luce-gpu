@@ -35,6 +35,13 @@ pub struct Device:
         state.references += 1
         return Device(state = state)
 
+    ## How many pooled memory pages the device holds for textures, after
+    ## releasing what finished work no longer needs: a diagnostic for tests
+    ## and memory reports. Backends without pages report zero.
+    pub func memory_pages() -> usize!:
+        let state = try self.checked()
+        return backend_memory_pages(state)
+
     ## Whether `other` is the same device.
     pub func same(other: const Device*) -> bool:
         return self.state != none and self.state == other.state

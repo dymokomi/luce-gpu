@@ -1,0 +1,84 @@
+import gpu
+import memory
+import thread
+
+## Vulkan batching contracts: texture passes and uploads do not wait, results are
+## still ordered for later passes and reads, images destroyed while work that
+## uses them is in flight stay valid until it completes, and pooled memory pages
+## are all released again.
+pub func main(arguments: str[]) -> i32!:
+    discard(arguments)
+    var device = gpu.Device.open() catch failure:
+        if failure.code == gpu.unavailable:
+            print("skip no Vulkan device")
+            return 0
+        error(failure.code, failure.message)
+    defer device.destroy()
+    try ordering(device)
+    try stress(device, 20000, 256)
+    # 1536 live tiles are 768 MiB: several pages, filled, emptied and freed.
+    try stress(device, 6000, 1536)
+    print("ok Vulkan batching")
+    return 0
+
+func fill(texture: gpu.Texture*, color: gpu.Color) -> !:
+    let frame = try texture.frame()
+    defer frame.release()
+    assert((try frame.value().present(color)) == gpu.PresentResult.submitted)
+
+## A chain of passes without waits: each samples the previous texture, which was
+## destroyed right after being drawn from; only the final read waits.
+func ordering(device: gpu.Device) -> !:
+    var first = try gpu.Texture.create(device, 4, 4, gpu.Format.rgba8_linear)
+    var red: u8[64]
+    for index in 0..<(usize)16:
+        red[index * 4] = 200
+        red[index * 4 + 3] = 255
+    try first.upload(red)
+    var previous = first
+    for step in 0..<(usize)64:
+        var next = try gpu.Texture.create(device, 4, 4, gpu.Format.rgba8_linear)
+        let frame = try next.frame()
+        let root = try frame.value().target()
+        try gpu.copy_image(root.value(), previous, gpu.Rect(width = 4.0, height = 4.0))
+        root.release()
+        assert((try frame.value().present(gpu.Color(0.0, 0.0, 0.0, 0.0))) == gpu.PresentResult.submitted)
+        frame.release()
+        # The copy that samples `previous` may still be in flight.
+        previous.destroy()
+        previous = next
+        discard(step)
+    var result: u8[64]
+    try previous.read(result)
+    for index in 0..<(usize)16:
+        assert(result[index * 4] == 200 and result[index * 4 + 1] == 0 and result[index * 4 + 3] == 255)
+    previous.destroy()
+
+## `count` 256x256 half-float tiles, rendered in a rolling window of `window` live
+## ones and destroyed while their passes may be in flight.
+func stress(device: gpu.Device, count: usize, window: usize) -> !:
+    let baseline = try device.memory_pages()
+    let live = try alloc gpu.Texture[window] in memory.heap
+    defer free(live) in memory.heap
+    var peak: usize = 0
+    for index in 0..<count:
+        let at = index % window
+        if index >= window:
+            live[at].destroy()
+        live[at] = try gpu.Texture.create(device, 256, 256, gpu.Format.rgba16_float)
+        try fill(&live[at], gpu.Color((f64)(index % 7) / 7.0, 0.5, 0.25, 1.0))
+        let pages = try device.memory_pages()
+        if pages > peak:
+            peak = pages
+    # One read waits for everything submitted before it.
+    var texel: u8[8]
+    try live[(count - 1) % window].read(texel, gpu.Region(0, 0, 1, 1))
+    for at in 0..<window:
+        live[at].destroy()
+    let after = try device.memory_pages()
+    print(f"pages baseline {baseline} peak {peak} after {after}")
+    # Tiles of 512 KiB share pages of at least 64 MiB, not one allocation each.
+    assert(peak <= baseline + window * 512 // 65536 + 2)
+    if window * 512 > 256 * 1024:
+        assert(peak > baseline)
+    assert(after == baseline)

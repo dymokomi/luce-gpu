@@ -26,7 +26,9 @@ func backend_clear_present(device: DeviceState*, host: window.Presentation, nati
 
 func backend_surface_wait(device: DeviceState*, native: void*) -> !:
     if (platform.windows or platform.linux) and device.backend == Backend.vulkan:
-        try vulkan_check(vkQueueWaitIdle(((VulkanDevice*)device.native).queue), "Vulkan execution failed")
+        let vulkan = (VulkanDevice*)device.native
+        try vulkan_check(vkQueueWaitIdle(vulkan.queue), "Vulkan execution failed")
+        vulkan_idle(vulkan)
         return
     if platform.macos and platform.arm64:
         if device.backend == Backend.metal:

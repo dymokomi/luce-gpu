@@ -262,17 +262,21 @@ resize of depth storage, and releasing CPU commands before GPU completion.
 four tightly packed, top-down, straight-alpha formats: `rgba8` (sRGB-encoded,
 sampled as linear light), `rgba8_linear`, `rgba16_float` and `r8` (samples as
 red with alpha one). Dimensions are 1..16384. `upload(pixels, region?)` replaces
-a region from CPU bytes and `read(pixels, region?)` copies one back; both wait
-for the copy and are ordered after earlier submissions, so `read` after a frame
-sees that frame. Pixel lengths must equal the region's texels times
-`texel_bytes(format)`, or `invalid_pixels` is returned.
+a region from CPU bytes and `read(pixels, region?)` copies one back. Both are
+ordered after earlier submissions; `upload` does not wait for its copy (the bytes
+may be reused at once), and `read` waits, so `read` after a frame sees that
+frame. Pixel lengths must equal the region's texels times `texel_bytes(format)`,
+or `invalid_pixels` is returned.
 
 `texture.frame()` begins a recording frame whose target is the texture (points
-equal texels). Its `present(color)` clears to `color` — alpha included — draws,
-waits for completion and returns `submitted`; the texture can then be read or
-sampled. A frame cannot sample the texture it renders into (`invalid_geometry`),
-and a texture sampled by a frame must belong to the frame's device
-(`wrong_device`).
+equal texels). Its `present(color)` clears to `color` — alpha included — draws
+and returns `submitted` without waiting; the pass is ordered before every later
+submission, so the texture can be read or sampled at once. A texture destroyed
+while submitted work still uses it is released when that work completes.
+`device.memory_pages()` counts the pooled memory pages textures are carved from
+(Vulkan; zero on Metal), a diagnostic for tests and memory reports. A frame
+cannot sample the texture it renders into (`invalid_geometry`), and a texture
+sampled by a frame must belong to the frame's device (`wrong_device`).
 
 `draw_image(target, texture, rectangle, source?, opacity, filter)` draws a texel
 region scaled onto a rectangle of a `RenderTarget`, clipped like every other

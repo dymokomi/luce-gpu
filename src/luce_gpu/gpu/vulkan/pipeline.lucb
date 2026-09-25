@@ -54,11 +54,15 @@ func vulkan_render_pass(device: VulkanDevice*, pixel_format: u32, final_layout: 
     var subpass = VkSubpassDescription(colorAttachmentCount = 1, pColorAttachments = &color_attachment, pDepthStencilAttachment = &depth_attachment)
     # The subpass side of a dependency may name only graphics stages; transfers
     # happen outside the pass, so they belong on the external side alone.
-    let graphics = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+    # Passes no longer wait for one another, so the incoming dependency also
+    # orders the attachment writes of earlier passes on the queue: the same
+    # image drawn again, and the depth attachment texture passes share.
+    let graphics = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
     let outside = graphics | VK_PIPELINE_STAGE_TRANSFER_BIT
     var dependencies: VkSubpassDependency[2] = [
         VkSubpassDependency(srcSubpass = VK_SUBPASS_EXTERNAL, dstSubpass = 0, srcStageMask = outside, dstStageMask = graphics,
-                            srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+                            srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT |
+                                            VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
                             dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT),
         VkSubpassDependency(srcSubpass = 0, dstSubpass = VK_SUBPASS_EXTERNAL, srcStageMask = graphics, dstStageMask = outside,
                             srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,

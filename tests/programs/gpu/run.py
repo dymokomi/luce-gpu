@@ -74,7 +74,10 @@ def main():
             binary = work / name
             entry = work / ('probe.lucb' if mac else 'unsupported.lucb')
             run([str(COMPILER), 'build', str(entry), *flags, '-o', str(binary)])
-            run([str(binary)], expected='ok GPU contracts without hardware' if mac else 'ok unsupported GPU target')
+            # Linux has a Vulkan backend, so the unsupported-target program only runs
+            # where neither backend exists; tests/programs/vulkan covers Vulkan.
+            if mac or platform.system() != 'Linux':
+                run([str(binary)], expected='ok GPU contracts without hardware' if mac else 'ok unsupported GPU target')
             if mac:
                 rejected = subprocess.run([str(binary), 'wrong-thread'], capture_output=True, text=True, timeout=10)
                 assert rejected.returncode == 1 and 'an object belongs to another runtime thread' in rejected.stderr, rejected
