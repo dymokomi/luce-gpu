@@ -124,18 +124,22 @@ func vulkan_depth_release(device: VulkanDevice*, depth: u64*, block: u64*, targe
     *depth = 0
     *block = 0
 
-## The device's depth attachment for texture passes, reallocated when the extent
-## changes. Only a framebuffer that is created and destroyed within one call may
+## The device's depth attachment for texture passes. It only grows: a
+## framebuffer may be smaller than its attachments, so passes of every size
+## share it, and tiles, thumbnails and glyphs drawn in turn never make it
+## again. Only a framebuffer that is created and destroyed within one call may
 ## use it: replacing it invalidates every framebuffer that still names the old
 ## view, which is why the swapchain keeps a depth attachment of its own.
 func vulkan_depth_for(device: VulkanDevice*, width: u32, height: u32) -> u64!:
-    if device.depth_view != 0 and device.depth_width == width and device.depth_height == height:
+    if device.depth_view != 0 and width <= device.depth_width and height <= device.depth_height:
         return device.depth_view
+    let grown_width = width if width > device.depth_width else device.depth_width
+    let grown_height = height if height > device.depth_height else device.depth_height
     device.depth_width = 0
     device.depth_height = 0
-    try vulkan_depth_create(device, width, height, &device.depth_image, &device.depth_memory, &device.depth_view)
-    device.depth_width = width
-    device.depth_height = height
+    try vulkan_depth_create(device, grown_width, grown_height, &device.depth_image, &device.depth_memory, &device.depth_view)
+    device.depth_width = grown_width
+    device.depth_height = grown_height
     return device.depth_view
 
 func vulkan_depth_destroy(device: VulkanDevice*):
