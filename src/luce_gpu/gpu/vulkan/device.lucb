@@ -100,11 +100,9 @@ func vulkan_device_open() -> VulkanDevice*!:
             return state
     error(unavailable, "no Vulkan graphics queue supports native presentation")
 
-## VkPhysicalDeviceProperties, read only for its device type (bytes 16..20); the
-## generated bindings leave the struct out, and it is under 1 KiB on every platform.
-extern func vkGetPhysicalDeviceProperties(physical: u64, properties: void*)
-
-## 0 for a discrete GPU, 1 for an integrated one, 2 for any other kind.
+## 0 for a discrete GPU, 1 for an integrated one, 2 for any other kind. Only
+## VkPhysicalDeviceProperties' device type is read (bytes 16..20); the bindings
+## leave the struct out, and it is under 1 KiB on every platform.
 func vulkan_device_rank(physical: u64) -> u32:
     var properties: u8[1024] = ---
     vkGetPhysicalDeviceProperties(physical, (void*)&properties[0])

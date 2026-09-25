@@ -17,6 +17,7 @@ extern func LoadLibraryW(name: u16*) -> void*?
 extern func GetProcAddress(module: void*, name: c.str) -> void*?
 
 struct VulkanFunctions:
+    var vkGetPhysicalDeviceProperties: (func(u64, void*) -> unit)?
     var vkCreateInstance: (func(VkInstanceCreateInfo*?, void*?, u64*?) -> i32)?
     var vkDestroyInstance: (func(u64, void*?) -> unit)?
     var vkEnumeratePhysicalDevices: (func(u64, u32*?, u64*?) -> i32)?
@@ -268,6 +269,8 @@ func vulkan_load() -> !:
         table.vkCmdCopyImageToBuffer = (func(u64, u64, u32, u64, u32, VkBufferImageCopy*?) -> unit)found
     if let found = vulkan_symbol(library, "vkCreateXlibSurfaceKHR"):
         table.vkCreateXlibSurfaceKHR = (func(u64, VkXlibSurfaceCreateInfoKHR*?, void*?, u64*?) -> i32)found
+    if let found = vulkan_symbol(library, "vkGetPhysicalDeviceProperties"):
+        table.vkGetPhysicalDeviceProperties = (func(u64, void*) -> unit)found
     if table.vkCreateInstance == none:
         free(table) in memory.heap
         error(unavailable, "the Vulkan loader has no vkCreateInstance")
@@ -609,3 +612,8 @@ func vkCmdCopyImageToBuffer(commandBuffer: u64, srcImage: u64, srcImageLayout: u
 func vkCreateXlibSurfaceKHR(instance: u64, pCreateInfo: VkXlibSurfaceCreateInfoKHR*?, pAllocator: void*?, pSurface: u64*?) -> i32:
     let call = vulkan_entry().vkCreateXlibSurfaceKHR else trap("the Vulkan loader lacks vkCreateXlibSurfaceKHR")
     return call(instance, pCreateInfo, pAllocator, pSurface)
+
+## Read into a VkPhysicalDeviceProperties-sized buffer (the bindings leave the struct out).
+func vkGetPhysicalDeviceProperties(physicalDevice: u64, pProperties: void*):
+    let call = vulkan_entry().vkGetPhysicalDeviceProperties else trap("the Vulkan loader lacks vkGetPhysicalDeviceProperties")
+    call(physicalDevice, pProperties)
