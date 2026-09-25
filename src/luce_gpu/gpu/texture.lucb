@@ -40,8 +40,9 @@ pub struct Texture:
         return (try self.checked()).format
 
     ## Replace `region` (the whole texture by default) with tightly packed,
-    ## top-down `pixels` in the texture's format. The copy completes before this
-    ## returns, ordered after earlier submissions; `pixels` may be reused at once.
+    ## top-down `pixels` in the texture's format. The copy is ordered after earlier
+    ## submissions and before later ones (it need not have finished when this
+    ## returns); `pixels` may be reused at once.
     pub func upload(pixels: const u8[], region: Region? = none) -> !:
         let state = try self.checked()
         let area = try state.check_region(region, pixels.length)
@@ -56,8 +57,9 @@ pub struct Texture:
         try backend_texture_read(state.device, state.native, pixels, area)
 
     ## Begin one recording frame whose target is this texture; its points equal
-    ## texels. `present` clears the texture to the given color, draws, and waits
-    ## for completion, so the result can be read or sampled immediately after.
+    ## texels. `present` clears the texture to the given color and draws, ordered
+    ## before every later submission, so the result can be read or sampled
+    ## immediately after without waiting for the GPU: only `read` waits.
     pub func frame() -> interop.Reference[Frame]!:
         let state = try self.checked()
         if state.active_frame:
