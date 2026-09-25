@@ -31,7 +31,8 @@ macOS (Metal), Windows and Linux (Vulkan).
 Native libraries it links, by platform (declared in `package.prisma`, linked only when the program reaches code that needs them):
 
 - macos: objc, Metal, CoreGraphics, QuartzCore
-- windows: vulkan-1
+
+On Windows and Linux nothing is linked: the system's Vulkan loader (`vulkan-1.dll`, `libvulkan.so.1`) is opened when the first device is, so building needs no Vulkan SDK or development package. Linux presents to X11 windows (Xlib surfaces), which covers Wayland desktops through XWayland.
 
 ## Tests
 

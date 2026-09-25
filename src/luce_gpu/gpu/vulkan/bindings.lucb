@@ -779,80 +779,6 @@ extern struct VkWriteDescriptorSet:
     pTexelBufferView: u64*?
 
 let VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET: u32 = 35
-extern func vkCreateInstance(pCreateInfo: VkInstanceCreateInfo*?, pAllocator: void*?, pInstance: u64*?) -> i32
-extern func vkDestroyInstance(instance: u64, pAllocator: void*?)
-extern func vkEnumeratePhysicalDevices(instance: u64, pPhysicalDeviceCount: u32*?, pPhysicalDevices: u64*?) -> i32
-extern func vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice: u64, pQueueFamilyPropertyCount: u32*?, pQueueFamilyProperties: VkQueueFamilyProperties*?)
-extern func vkGetPhysicalDeviceMemoryProperties(physicalDevice: u64, pMemoryProperties: VkPhysicalDeviceMemoryProperties*?)
-extern func vkGetPhysicalDeviceFormatProperties(physicalDevice: u64, format: u32, pFormatProperties: VkFormatProperties*?)
-extern func vkCreateDevice(physicalDevice: u64, pCreateInfo: VkDeviceCreateInfo*?, pAllocator: void*?, pDevice: u64*?) -> i32
-extern func vkDestroyDevice(device: u64, pAllocator: void*?)
-extern func vkGetDeviceQueue(device: u64, queueFamilyIndex: u32, queueIndex: u32, pQueue: u64*?)
-extern func vkCreateWin32SurfaceKHR(instance: u64, pCreateInfo: VkWin32SurfaceCreateInfoKHR*?, pAllocator: void*?, pSurface: u64*?) -> i32
-extern func vkGetPhysicalDeviceWin32PresentationSupportKHR(physicalDevice: u64, queueFamilyIndex: u32) -> u32
-extern func vkDestroySurfaceKHR(instance: u64, surface: u64, pAllocator: void*?)
-extern func vkGetPhysicalDeviceSurfaceSupportKHR(physicalDevice: u64, queueFamilyIndex: u32, surface: u64, pSupported: u32*?) -> i32
-extern func vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice: u64, surface: u64, pSurfaceCapabilities: VkSurfaceCapabilitiesKHR*?) -> i32
-extern func vkGetPhysicalDeviceSurfaceFormatsKHR(physicalDevice: u64, surface: u64, pSurfaceFormatCount: u32*?, pSurfaceFormats: VkSurfaceFormatKHR*?) -> i32
-extern func vkCreateSwapchainKHR(device: u64, pCreateInfo: VkSwapchainCreateInfoKHR*?, pAllocator: void*?, pSwapchain: u64*?) -> i32
-extern func vkDestroySwapchainKHR(device: u64, swapchain: u64, pAllocator: void*?)
-extern func vkGetSwapchainImagesKHR(device: u64, swapchain: u64, pSwapchainImageCount: u32*?, pSwapchainImages: u64*?) -> i32
-extern func vkAcquireNextImageKHR(device: u64, swapchain: u64, timeout: u64, semaphore: u64, fence: u64, pImageIndex: u32*?) -> i32
-extern func vkQueuePresentKHR(queue: u64, pPresentInfo: VkPresentInfoKHR*?) -> i32
-extern func vkQueueSubmit(queue: u64, submitCount: u32, pSubmits: VkSubmitInfo*?, fence: u64) -> i32
-extern func vkQueueWaitIdle(queue: u64) -> i32
-extern func vkDeviceWaitIdle(device: u64) -> i32
-extern func vkCreateImageView(device: u64, pCreateInfo: VkImageViewCreateInfo*?, pAllocator: void*?, pView: u64*?) -> i32
-extern func vkDestroyImageView(device: u64, imageView: u64, pAllocator: void*?)
-extern func vkCreateImage(device: u64, pCreateInfo: VkImageCreateInfo*?, pAllocator: void*?, pImage: u64*?) -> i32
-extern func vkDestroyImage(device: u64, image: u64, pAllocator: void*?)
-extern func vkGetImageMemoryRequirements(device: u64, image: u64, pMemoryRequirements: VkMemoryRequirements*?)
-extern func vkAllocateMemory(device: u64, pAllocateInfo: VkMemoryAllocateInfo*?, pAllocator: void*?, pMemory: u64*?) -> i32
-extern func vkFreeMemory(device: u64, memory: u64, pAllocator: void*?)
-extern func vkBindImageMemory(device: u64, image: u64, memory: u64, memoryOffset: u64) -> i32
-extern func vkCreateBuffer(device: u64, pCreateInfo: VkBufferCreateInfo*?, pAllocator: void*?, pBuffer: u64*?) -> i32
-extern func vkDestroyBuffer(device: u64, buffer: u64, pAllocator: void*?)
-extern func vkGetBufferMemoryRequirements(device: u64, buffer: u64, pMemoryRequirements: VkMemoryRequirements*?)
-extern func vkBindBufferMemory(device: u64, buffer: u64, memory: u64, memoryOffset: u64) -> i32
-extern func vkMapMemory(device: u64, memory: u64, offset: u64, size: u64, flags: u32, ppData: void*?*?) -> i32
-extern func vkUnmapMemory(device: u64, memory: u64)
-extern func vkCreateRenderPass(device: u64, pCreateInfo: VkRenderPassCreateInfo*?, pAllocator: void*?, pRenderPass: u64*?) -> i32
-extern func vkDestroyRenderPass(device: u64, renderPass: u64, pAllocator: void*?)
-extern func vkCreateFramebuffer(device: u64, pCreateInfo: VkFramebufferCreateInfo*?, pAllocator: void*?, pFramebuffer: u64*?) -> i32
-extern func vkDestroyFramebuffer(device: u64, framebuffer: u64, pAllocator: void*?)
-extern func vkCreateShaderModule(device: u64, pCreateInfo: VkShaderModuleCreateInfo*?, pAllocator: void*?, pShaderModule: u64*?) -> i32
-extern func vkDestroyShaderModule(device: u64, shaderModule: u64, pAllocator: void*?)
-extern func vkCreatePipelineLayout(device: u64, pCreateInfo: VkPipelineLayoutCreateInfo*?, pAllocator: void*?, pPipelineLayout: u64*?) -> i32
-extern func vkDestroyPipelineLayout(device: u64, pipelineLayout: u64, pAllocator: void*?)
-extern func vkCreateGraphicsPipelines(device: u64, pipelineCache: u64, createInfoCount: u32, pCreateInfos: VkGraphicsPipelineCreateInfo*?, pAllocator: void*?, pPipelines: u64*?) -> i32
-extern func vkDestroyPipeline(device: u64, pipeline: u64, pAllocator: void*?)
-extern func vkCreateCommandPool(device: u64, pCreateInfo: VkCommandPoolCreateInfo*?, pAllocator: void*?, pCommandPool: u64*?) -> i32
-extern func vkDestroyCommandPool(device: u64, commandPool: u64, pAllocator: void*?)
-extern func vkAllocateCommandBuffers(device: u64, pAllocateInfo: VkCommandBufferAllocateInfo*?, pCommandBuffers: u64*?) -> i32
-extern func vkResetCommandPool(device: u64, commandPool: u64, flags: u32) -> i32
-extern func vkBeginCommandBuffer(commandBuffer: u64, pBeginInfo: VkCommandBufferBeginInfo*?) -> i32
-extern func vkEndCommandBuffer(commandBuffer: u64) -> i32
-extern func vkCmdBeginRenderPass(commandBuffer: u64, pRenderPassBegin: VkRenderPassBeginInfo*?, contents: u32)
-extern func vkCmdEndRenderPass(commandBuffer: u64)
-extern func vkCmdBindPipeline(commandBuffer: u64, pipelineBindPoint: u32, pipeline: u64)
-extern func vkCmdSetViewport(commandBuffer: u64, firstViewport: u32, viewportCount: u32, pViewports: VkViewport*?)
-extern func vkCmdSetScissor(commandBuffer: u64, firstScissor: u32, scissorCount: u32, pScissors: VkRect2D*?)
-extern func vkCmdBindVertexBuffers(commandBuffer: u64, firstBinding: u32, bindingCount: u32, pBuffers: u64*?, pOffsets: u64*?)
-extern func vkCmdDraw(commandBuffer: u64, vertexCount: u32, instanceCount: u32, firstVertex: u32, firstInstance: u32)
-extern func vkCreateSemaphore(device: u64, pCreateInfo: VkSemaphoreCreateInfo*?, pAllocator: void*?, pSemaphore: u64*?) -> i32
-extern func vkDestroySemaphore(device: u64, semaphore: u64, pAllocator: void*?)
-extern func vkCreateFence(device: u64, pCreateInfo: VkFenceCreateInfo*?, pAllocator: void*?, pFence: u64*?) -> i32
-extern func vkDestroyFence(device: u64, fence: u64, pAllocator: void*?)
-extern func vkWaitForFences(device: u64, fenceCount: u32, pFences: u64*?, waitAll: u32, timeout: u64) -> i32
-extern func vkResetFences(device: u64, fenceCount: u32, pFences: u64*?) -> i32
-extern func vkCreateDescriptorSetLayout(device: u64, pCreateInfo: VkDescriptorSetLayoutCreateInfo*?, pAllocator: void*?, pSetLayout: u64*?) -> i32
-extern func vkDestroyDescriptorSetLayout(device: u64, descriptorSetLayout: u64, pAllocator: void*?)
-extern func vkCreateDescriptorPool(device: u64, pCreateInfo: VkDescriptorPoolCreateInfo*?, pAllocator: void*?, pDescriptorPool: u64*?) -> i32
-extern func vkDestroyDescriptorPool(device: u64, descriptorPool: u64, pAllocator: void*?)
-extern func vkAllocateDescriptorSets(device: u64, pAllocateInfo: VkDescriptorSetAllocateInfo*?, pDescriptorSets: u64*?) -> i32
-extern func vkUpdateDescriptorSets(device: u64, descriptorWriteCount: u32, pDescriptorWrites: VkWriteDescriptorSet*?, descriptorCopyCount: u32, pDescriptorCopies: VkCopyDescriptorSet*?)
-extern func vkCmdBindDescriptorSets(commandBuffer: u64, pipelineBindPoint: u32, layout: u64, firstSet: u32, descriptorSetCount: u32, pDescriptorSets: u64*?, dynamicOffsetCount: u32, pDynamicOffsets: u32*?)
-extern func vkCmdPushConstants(commandBuffer: u64, layout: u64, stageFlags: u32, offset: u32, size: u32, pValues: void*?)
 
 # mark: Textures, samplers, transfers and barriers ===========================================
 
@@ -935,8 +861,13 @@ extern struct VkSamplerCreateInfo:
     borderColor: u32
     unnormalizedCoordinates: u32
 
-extern func vkCreateSampler(device: u64, pCreateInfo: VkSamplerCreateInfo*?, pAllocator: void*?, pSampler: u64*?) -> i32
-extern func vkDestroySampler(device: u64, sampler: u64, pAllocator: void*?)
-extern func vkCmdPipelineBarrier(commandBuffer: u64, srcStageMask: u32, dstStageMask: u32, dependencyFlags: u32, memoryBarrierCount: u32, pMemoryBarriers: void*?, bufferMemoryBarrierCount: u32, pBufferMemoryBarriers: void*?, imageMemoryBarrierCount: u32, pImageMemoryBarriers: VkImageMemoryBarrier*?)
-extern func vkCmdCopyBufferToImage(commandBuffer: u64, srcBuffer: u64, dstImage: u64, dstImageLayout: u32, regionCount: u32, pRegions: VkBufferImageCopy*?)
-extern func vkCmdCopyImageToBuffer(commandBuffer: u64, srcImage: u64, srcImageLayout: u32, dstBuffer: u64, regionCount: u32, pRegions: VkBufferImageCopy*?)
+let VK_KHR_XLIB_SURFACE_EXTENSION_NAME: c.str = "VK_KHR_xlib_surface"
+
+extern struct VkXlibSurfaceCreateInfoKHR:
+    sType: u32
+    pNext: void*?
+    flags: u32
+    dpy: void*?
+    window: u64
+
+let VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR: u32 = 1000004000

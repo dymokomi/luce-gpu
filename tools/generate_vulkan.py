@@ -146,7 +146,9 @@ def main():
         parameters = [declaration(p) for p in command.findall('param') if vulkan(p)]
         result = base_type(command.findtext('proto/type'))
         params = ', '.join(f'{n}: {t}' for n, t in parameters)
-        functions.append(f'extern func {name}({params})' + (f' -> {result}' if result != 'void' else ''))
+        # The functions themselves are called through vulkan/entry.lucb's run-time table;
+        # print their signatures for that file rather than linking them here.
+        functions.append(f'# func {name}({params})' + (f' -> {result}' if result != 'void' else ''))
     lines = [
              '#==============================================================================================',
              '#',

@@ -12,14 +12,22 @@
 func vulkan_presentation_extensions() -> const c.str[]!:
     if platform.windows:
         return vulkan_windows_extensions
+    if platform.linux:
+        return vulkan_x11_extensions
     error(unavailable, "Vulkan presentation is unavailable on this host")
 
 func vulkan_presentation_support(physical: u64, family: u32) -> bool:
     if platform.windows:
         return vulkan_windows_support(physical, family)
+    # X11 needs the display and visual to ask; the surface's own support is
+    # checked when it is made (see module comment).
+    if platform.linux:
+        return true
     return false
 
 func vulkan_presentation_surface(instance: u64, host: window.Presentation) -> u64!:
     if platform.windows:
         return try vulkan_windows_surface(instance, host)
+    if platform.linux:
+        return try vulkan_x11_surface(instance, host)
     error(unavailable, "Vulkan presentation is unavailable on this host")

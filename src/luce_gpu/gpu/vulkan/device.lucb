@@ -47,6 +47,7 @@ func vulkan_check(result: i32, message: str) -> !:
         error(failed, message)
 
 func vulkan_device_open() -> VulkanDevice*!:
+    try vulkan_load()
     let state = try new VulkanDevice() in memory.heap
     errdefer vulkan_device_destroy(state)
     var application = VkApplicationInfo(sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,

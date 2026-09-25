@@ -14,7 +14,7 @@
 #==============================================================================================
 
 func select_backend(requested: Backend) -> Backend!:
-    if platform.windows and platform.x86_64:
+    if (platform.windows and platform.x86_64) or platform.linux:
         if requested == Backend.automatic or requested == Backend.vulkan:
             return Backend.vulkan
     if platform.macos and platform.arm64:
@@ -23,7 +23,7 @@ func select_backend(requested: Backend) -> Backend!:
     error(unsupported, "the requested GPU backend is not implemented")
 
 func backend_device_open(backend: Backend) -> void*!:
-    if platform.windows and backend == Backend.vulkan:
+    if (platform.windows or platform.linux) and backend == Backend.vulkan:
         return (void*)try vulkan_device_open()
     if platform.macos and platform.arm64:
         if backend == Backend.metal:
@@ -31,7 +31,7 @@ func backend_device_open(backend: Backend) -> void*!:
     error(unsupported, "the GPU backend is not implemented")
 
 func backend_device_destroy(backend: Backend, native: void*):
-    if platform.windows and backend == Backend.vulkan:
+    if (platform.windows or platform.linux) and backend == Backend.vulkan:
         vulkan_device_destroy((VulkanDevice*)native)
         return
     if platform.macos and platform.arm64:

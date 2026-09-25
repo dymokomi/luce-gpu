@@ -1,0 +1,18 @@
+#==============================================================================================
+#
+#   x11 - Xlib Vulkan surface creation
+#
+#   DESCRIPTION:
+#       Xlib WSI owns the Display and Window boundary; luce-window keeps both open for the
+#       surface's lifetime. It also serves Wayland desktops through XWayland.
+#
+#==============================================================================================
+
+let vulkan_x11_extensions: c.str[2] = [VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_XLIB_SURFACE_EXTENSION_NAME]
+
+func vulkan_x11_surface(instance: u64, host: window.Presentation) -> u64!:
+    var info = VkXlibSurfaceCreateInfoKHR(sType = VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR,
+                                          dpy = try host.x11_display(), window = try host.x11_window())
+    var surface: u64 = 0
+    try vulkan_check(vkCreateXlibSurfaceKHR(instance, &info, none, &surface), "the Vulkan X11 surface could not be created")
+    return surface

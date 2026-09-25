@@ -56,7 +56,7 @@ pub let invalid_shader: ErrorCode = ErrorCode.package(122)
 
 # mark: Backends, colors and formats =========================================================
 ## automatic chooses the implemented native backend. An explicit unsupported
-## backend fails; it never falls back silently. Windows x64 uses Vulkan; macOS
+## backend fails; it never falls back silently. Windows x64 and Linux use Vulkan (loaded at run time); macOS
 ## ARM64 uses Metal. Link dependencies are selected by the compiler.
 pub enum Backend as u8:
     automatic = 0
@@ -66,7 +66,7 @@ pub enum Backend as u8:
 ## Whether this build contains a backend, not whether hardware is available.
 ## Device.open probes the hardware separately and may return unavailable.
 pub func supported(backend: Backend = Backend.automatic) -> bool:
-    if platform.windows and platform.x86_64:
+    if (platform.windows and platform.x86_64) or platform.linux:
         return backend == Backend.automatic or backend == Backend.vulkan
     return (platform.macos and platform.arm64) and (backend == Backend.automatic or backend == Backend.metal)
 
@@ -145,7 +145,7 @@ func check_thread() -> !:
     if platform.macos and platform.arm64:
         if pthread_main_np() == 0:
             error(wrong_thread, "GPU operations currently require the main thread")
-    if platform.windows and not thread.is_main():
+    if (platform.windows or platform.linux) and not thread.is_main():
         error(wrong_thread, "GPU operations currently require the main thread")
 
 func require_thread():

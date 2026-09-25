@@ -1,0 +1,611 @@
+#==============================================================================================
+#
+#   entry - Vulkan's entry points, found at run time
+#
+#   DESCRIPTION:
+#       The system's Vulkan loader (libvulkan.so.1 on Linux, vulkan-1.dll on Windows) is
+#       opened when the first device is, and every function below calls through the table it
+#       fills. Nothing links against Vulkan, so building needs no Vulkan SDK or development
+#       package, and a machine without Vulkan gets an error instead of a missing library.
+#       Each function keeps the name and signature of the C one it stands for.
+#
+#==============================================================================================
+
+extern func dlopen(file: c.str, mode: i32) -> void*?
+extern func dlsym(handle: void*, name: c.str) -> void*?
+extern func LoadLibraryW(name: u16*) -> void*?
+extern func GetProcAddress(module: void*, name: c.str) -> void*?
+
+struct VulkanFunctions:
+    var vkCreateInstance: (func(VkInstanceCreateInfo*?, void*?, u64*?) -> i32)?
+    var vkDestroyInstance: (func(u64, void*?) -> unit)?
+    var vkEnumeratePhysicalDevices: (func(u64, u32*?, u64*?) -> i32)?
+    var vkGetPhysicalDeviceQueueFamilyProperties: (func(u64, u32*?, VkQueueFamilyProperties*?) -> unit)?
+    var vkGetPhysicalDeviceMemoryProperties: (func(u64, VkPhysicalDeviceMemoryProperties*?) -> unit)?
+    var vkGetPhysicalDeviceFormatProperties: (func(u64, u32, VkFormatProperties*?) -> unit)?
+    var vkCreateDevice: (func(u64, VkDeviceCreateInfo*?, void*?, u64*?) -> i32)?
+    var vkDestroyDevice: (func(u64, void*?) -> unit)?
+    var vkGetDeviceQueue: (func(u64, u32, u32, u64*?) -> unit)?
+    var vkCreateWin32SurfaceKHR: (func(u64, VkWin32SurfaceCreateInfoKHR*?, void*?, u64*?) -> i32)?
+    var vkGetPhysicalDeviceWin32PresentationSupportKHR: (func(u64, u32) -> u32)?
+    var vkDestroySurfaceKHR: (func(u64, u64, void*?) -> unit)?
+    var vkGetPhysicalDeviceSurfaceSupportKHR: (func(u64, u32, u64, u32*?) -> i32)?
+    var vkGetPhysicalDeviceSurfaceCapabilitiesKHR: (func(u64, u64, VkSurfaceCapabilitiesKHR*?) -> i32)?
+    var vkGetPhysicalDeviceSurfaceFormatsKHR: (func(u64, u64, u32*?, VkSurfaceFormatKHR*?) -> i32)?
+    var vkCreateSwapchainKHR: (func(u64, VkSwapchainCreateInfoKHR*?, void*?, u64*?) -> i32)?
+    var vkDestroySwapchainKHR: (func(u64, u64, void*?) -> unit)?
+    var vkGetSwapchainImagesKHR: (func(u64, u64, u32*?, u64*?) -> i32)?
+    var vkAcquireNextImageKHR: (func(u64, u64, u64, u64, u64, u32*?) -> i32)?
+    var vkQueuePresentKHR: (func(u64, VkPresentInfoKHR*?) -> i32)?
+    var vkQueueSubmit: (func(u64, u32, VkSubmitInfo*?, u64) -> i32)?
+    var vkQueueWaitIdle: (func(u64) -> i32)?
+    var vkDeviceWaitIdle: (func(u64) -> i32)?
+    var vkCreateImageView: (func(u64, VkImageViewCreateInfo*?, void*?, u64*?) -> i32)?
+    var vkDestroyImageView: (func(u64, u64, void*?) -> unit)?
+    var vkCreateImage: (func(u64, VkImageCreateInfo*?, void*?, u64*?) -> i32)?
+    var vkDestroyImage: (func(u64, u64, void*?) -> unit)?
+    var vkGetImageMemoryRequirements: (func(u64, u64, VkMemoryRequirements*?) -> unit)?
+    var vkAllocateMemory: (func(u64, VkMemoryAllocateInfo*?, void*?, u64*?) -> i32)?
+    var vkFreeMemory: (func(u64, u64, void*?) -> unit)?
+    var vkBindImageMemory: (func(u64, u64, u64, u64) -> i32)?
+    var vkCreateBuffer: (func(u64, VkBufferCreateInfo*?, void*?, u64*?) -> i32)?
+    var vkDestroyBuffer: (func(u64, u64, void*?) -> unit)?
+    var vkGetBufferMemoryRequirements: (func(u64, u64, VkMemoryRequirements*?) -> unit)?
+    var vkBindBufferMemory: (func(u64, u64, u64, u64) -> i32)?
+    var vkMapMemory: (func(u64, u64, u64, u64, u32, void*?*?) -> i32)?
+    var vkUnmapMemory: (func(u64, u64) -> unit)?
+    var vkCreateRenderPass: (func(u64, VkRenderPassCreateInfo*?, void*?, u64*?) -> i32)?
+    var vkDestroyRenderPass: (func(u64, u64, void*?) -> unit)?
+    var vkCreateFramebuffer: (func(u64, VkFramebufferCreateInfo*?, void*?, u64*?) -> i32)?
+    var vkDestroyFramebuffer: (func(u64, u64, void*?) -> unit)?
+    var vkCreateShaderModule: (func(u64, VkShaderModuleCreateInfo*?, void*?, u64*?) -> i32)?
+    var vkDestroyShaderModule: (func(u64, u64, void*?) -> unit)?
+    var vkCreatePipelineLayout: (func(u64, VkPipelineLayoutCreateInfo*?, void*?, u64*?) -> i32)?
+    var vkDestroyPipelineLayout: (func(u64, u64, void*?) -> unit)?
+    var vkCreateGraphicsPipelines: (func(u64, u64, u32, VkGraphicsPipelineCreateInfo*?, void*?, u64*?) -> i32)?
+    var vkDestroyPipeline: (func(u64, u64, void*?) -> unit)?
+    var vkCreateCommandPool: (func(u64, VkCommandPoolCreateInfo*?, void*?, u64*?) -> i32)?
+    var vkDestroyCommandPool: (func(u64, u64, void*?) -> unit)?
+    var vkAllocateCommandBuffers: (func(u64, VkCommandBufferAllocateInfo*?, u64*?) -> i32)?
+    var vkResetCommandPool: (func(u64, u64, u32) -> i32)?
+    var vkBeginCommandBuffer: (func(u64, VkCommandBufferBeginInfo*?) -> i32)?
+    var vkEndCommandBuffer: (func(u64) -> i32)?
+    var vkCmdBeginRenderPass: (func(u64, VkRenderPassBeginInfo*?, u32) -> unit)?
+    var vkCmdEndRenderPass: (func(u64) -> unit)?
+    var vkCmdBindPipeline: (func(u64, u32, u64) -> unit)?
+    var vkCmdSetViewport: (func(u64, u32, u32, VkViewport*?) -> unit)?
+    var vkCmdSetScissor: (func(u64, u32, u32, VkRect2D*?) -> unit)?
+    var vkCmdBindVertexBuffers: (func(u64, u32, u32, u64*?, u64*?) -> unit)?
+    var vkCmdDraw: (func(u64, u32, u32, u32, u32) -> unit)?
+    var vkCreateSemaphore: (func(u64, VkSemaphoreCreateInfo*?, void*?, u64*?) -> i32)?
+    var vkDestroySemaphore: (func(u64, u64, void*?) -> unit)?
+    var vkCreateFence: (func(u64, VkFenceCreateInfo*?, void*?, u64*?) -> i32)?
+    var vkDestroyFence: (func(u64, u64, void*?) -> unit)?
+    var vkWaitForFences: (func(u64, u32, u64*?, u32, u64) -> i32)?
+    var vkResetFences: (func(u64, u32, u64*?) -> i32)?
+    var vkCreateDescriptorSetLayout: (func(u64, VkDescriptorSetLayoutCreateInfo*?, void*?, u64*?) -> i32)?
+    var vkDestroyDescriptorSetLayout: (func(u64, u64, void*?) -> unit)?
+    var vkCreateDescriptorPool: (func(u64, VkDescriptorPoolCreateInfo*?, void*?, u64*?) -> i32)?
+    var vkDestroyDescriptorPool: (func(u64, u64, void*?) -> unit)?
+    var vkAllocateDescriptorSets: (func(u64, VkDescriptorSetAllocateInfo*?, u64*?) -> i32)?
+    var vkUpdateDescriptorSets: (func(u64, u32, VkWriteDescriptorSet*?, u32, VkCopyDescriptorSet*?) -> unit)?
+    var vkCmdBindDescriptorSets: (func(u64, u32, u64, u32, u32, u64*?, u32, u32*?) -> unit)?
+    var vkCmdPushConstants: (func(u64, u64, u32, u32, u32, void*?) -> unit)?
+    var vkCreateSampler: (func(u64, VkSamplerCreateInfo*?, void*?, u64*?) -> i32)?
+    var vkDestroySampler: (func(u64, u64, void*?) -> unit)?
+    var vkCmdPipelineBarrier: (func(u64, u32, u32, u32, u32, void*?, u32, void*?, u32, VkImageMemoryBarrier*?) -> unit)?
+    var vkCmdCopyBufferToImage: (func(u64, u64, u64, u32, u32, VkBufferImageCopy*?) -> unit)?
+    var vkCmdCopyImageToBuffer: (func(u64, u64, u32, u64, u32, VkBufferImageCopy*?) -> unit)?
+    var vkCreateXlibSurfaceKHR: (func(u64, VkXlibSurfaceCreateInfoKHR*?, void*?, u64*?) -> i32)?
+
+var vulkan_functions: VulkanFunctions*? = none
+
+## Open the system's Vulkan loader and find its functions, once. A function a
+## platform's loader lacks (another platform's surface) stays unset and traps
+## only if called.
+func vulkan_load() -> !:
+    if vulkan_functions != none:
+        return
+    let library = try vulkan_library()
+    let table = try new VulkanFunctions() in memory.heap
+    if let found = vulkan_symbol(library, "vkCreateInstance"):
+        table.vkCreateInstance = (func(VkInstanceCreateInfo*?, void*?, u64*?) -> i32)found
+    if let found = vulkan_symbol(library, "vkDestroyInstance"):
+        table.vkDestroyInstance = (func(u64, void*?) -> unit)found
+    if let found = vulkan_symbol(library, "vkEnumeratePhysicalDevices"):
+        table.vkEnumeratePhysicalDevices = (func(u64, u32*?, u64*?) -> i32)found
+    if let found = vulkan_symbol(library, "vkGetPhysicalDeviceQueueFamilyProperties"):
+        table.vkGetPhysicalDeviceQueueFamilyProperties = (func(u64, u32*?, VkQueueFamilyProperties*?) -> unit)found
+    if let found = vulkan_symbol(library, "vkGetPhysicalDeviceMemoryProperties"):
+        table.vkGetPhysicalDeviceMemoryProperties = (func(u64, VkPhysicalDeviceMemoryProperties*?) -> unit)found
+    if let found = vulkan_symbol(library, "vkGetPhysicalDeviceFormatProperties"):
+        table.vkGetPhysicalDeviceFormatProperties = (func(u64, u32, VkFormatProperties*?) -> unit)found
+    if let found = vulkan_symbol(library, "vkCreateDevice"):
+        table.vkCreateDevice = (func(u64, VkDeviceCreateInfo*?, void*?, u64*?) -> i32)found
+    if let found = vulkan_symbol(library, "vkDestroyDevice"):
+        table.vkDestroyDevice = (func(u64, void*?) -> unit)found
+    if let found = vulkan_symbol(library, "vkGetDeviceQueue"):
+        table.vkGetDeviceQueue = (func(u64, u32, u32, u64*?) -> unit)found
+    if let found = vulkan_symbol(library, "vkCreateWin32SurfaceKHR"):
+        table.vkCreateWin32SurfaceKHR = (func(u64, VkWin32SurfaceCreateInfoKHR*?, void*?, u64*?) -> i32)found
+    if let found = vulkan_symbol(library, "vkGetPhysicalDeviceWin32PresentationSupportKHR"):
+        table.vkGetPhysicalDeviceWin32PresentationSupportKHR = (func(u64, u32) -> u32)found
+    if let found = vulkan_symbol(library, "vkDestroySurfaceKHR"):
+        table.vkDestroySurfaceKHR = (func(u64, u64, void*?) -> unit)found
+    if let found = vulkan_symbol(library, "vkGetPhysicalDeviceSurfaceSupportKHR"):
+        table.vkGetPhysicalDeviceSurfaceSupportKHR = (func(u64, u32, u64, u32*?) -> i32)found
+    if let found = vulkan_symbol(library, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR"):
+        table.vkGetPhysicalDeviceSurfaceCapabilitiesKHR = (func(u64, u64, VkSurfaceCapabilitiesKHR*?) -> i32)found
+    if let found = vulkan_symbol(library, "vkGetPhysicalDeviceSurfaceFormatsKHR"):
+        table.vkGetPhysicalDeviceSurfaceFormatsKHR = (func(u64, u64, u32*?, VkSurfaceFormatKHR*?) -> i32)found
+    if let found = vulkan_symbol(library, "vkCreateSwapchainKHR"):
+        table.vkCreateSwapchainKHR = (func(u64, VkSwapchainCreateInfoKHR*?, void*?, u64*?) -> i32)found
+    if let found = vulkan_symbol(library, "vkDestroySwapchainKHR"):
+        table.vkDestroySwapchainKHR = (func(u64, u64, void*?) -> unit)found
+    if let found = vulkan_symbol(library, "vkGetSwapchainImagesKHR"):
+        table.vkGetSwapchainImagesKHR = (func(u64, u64, u32*?, u64*?) -> i32)found
+    if let found = vulkan_symbol(library, "vkAcquireNextImageKHR"):
+        table.vkAcquireNextImageKHR = (func(u64, u64, u64, u64, u64, u32*?) -> i32)found
+    if let found = vulkan_symbol(library, "vkQueuePresentKHR"):
+        table.vkQueuePresentKHR = (func(u64, VkPresentInfoKHR*?) -> i32)found
+    if let found = vulkan_symbol(library, "vkQueueSubmit"):
+        table.vkQueueSubmit = (func(u64, u32, VkSubmitInfo*?, u64) -> i32)found
+    if let found = vulkan_symbol(library, "vkQueueWaitIdle"):
+        table.vkQueueWaitIdle = (func(u64) -> i32)found
+    if let found = vulkan_symbol(library, "vkDeviceWaitIdle"):
+        table.vkDeviceWaitIdle = (func(u64) -> i32)found
+    if let found = vulkan_symbol(library, "vkCreateImageView"):
+        table.vkCreateImageView = (func(u64, VkImageViewCreateInfo*?, void*?, u64*?) -> i32)found
+    if let found = vulkan_symbol(library, "vkDestroyImageView"):
+        table.vkDestroyImageView = (func(u64, u64, void*?) -> unit)found
+    if let found = vulkan_symbol(library, "vkCreateImage"):
+        table.vkCreateImage = (func(u64, VkImageCreateInfo*?, void*?, u64*?) -> i32)found
+    if let found = vulkan_symbol(library, "vkDestroyImage"):
+        table.vkDestroyImage = (func(u64, u64, void*?) -> unit)found
+    if let found = vulkan_symbol(library, "vkGetImageMemoryRequirements"):
+        table.vkGetImageMemoryRequirements = (func(u64, u64, VkMemoryRequirements*?) -> unit)found
+    if let found = vulkan_symbol(library, "vkAllocateMemory"):
+        table.vkAllocateMemory = (func(u64, VkMemoryAllocateInfo*?, void*?, u64*?) -> i32)found
+    if let found = vulkan_symbol(library, "vkFreeMemory"):
+        table.vkFreeMemory = (func(u64, u64, void*?) -> unit)found
+    if let found = vulkan_symbol(library, "vkBindImageMemory"):
+        table.vkBindImageMemory = (func(u64, u64, u64, u64) -> i32)found
+    if let found = vulkan_symbol(library, "vkCreateBuffer"):
+        table.vkCreateBuffer = (func(u64, VkBufferCreateInfo*?, void*?, u64*?) -> i32)found
+    if let found = vulkan_symbol(library, "vkDestroyBuffer"):
+        table.vkDestroyBuffer = (func(u64, u64, void*?) -> unit)found
+    if let found = vulkan_symbol(library, "vkGetBufferMemoryRequirements"):
+        table.vkGetBufferMemoryRequirements = (func(u64, u64, VkMemoryRequirements*?) -> unit)found
+    if let found = vulkan_symbol(library, "vkBindBufferMemory"):
+        table.vkBindBufferMemory = (func(u64, u64, u64, u64) -> i32)found
+    if let found = vulkan_symbol(library, "vkMapMemory"):
+        table.vkMapMemory = (func(u64, u64, u64, u64, u32, void*?*?) -> i32)found
+    if let found = vulkan_symbol(library, "vkUnmapMemory"):
+        table.vkUnmapMemory = (func(u64, u64) -> unit)found
+    if let found = vulkan_symbol(library, "vkCreateRenderPass"):
+        table.vkCreateRenderPass = (func(u64, VkRenderPassCreateInfo*?, void*?, u64*?) -> i32)found
+    if let found = vulkan_symbol(library, "vkDestroyRenderPass"):
+        table.vkDestroyRenderPass = (func(u64, u64, void*?) -> unit)found
+    if let found = vulkan_symbol(library, "vkCreateFramebuffer"):
+        table.vkCreateFramebuffer = (func(u64, VkFramebufferCreateInfo*?, void*?, u64*?) -> i32)found
+    if let found = vulkan_symbol(library, "vkDestroyFramebuffer"):
+        table.vkDestroyFramebuffer = (func(u64, u64, void*?) -> unit)found
+    if let found = vulkan_symbol(library, "vkCreateShaderModule"):
+        table.vkCreateShaderModule = (func(u64, VkShaderModuleCreateInfo*?, void*?, u64*?) -> i32)found
+    if let found = vulkan_symbol(library, "vkDestroyShaderModule"):
+        table.vkDestroyShaderModule = (func(u64, u64, void*?) -> unit)found
+    if let found = vulkan_symbol(library, "vkCreatePipelineLayout"):
+        table.vkCreatePipelineLayout = (func(u64, VkPipelineLayoutCreateInfo*?, void*?, u64*?) -> i32)found
+    if let found = vulkan_symbol(library, "vkDestroyPipelineLayout"):
+        table.vkDestroyPipelineLayout = (func(u64, u64, void*?) -> unit)found
+    if let found = vulkan_symbol(library, "vkCreateGraphicsPipelines"):
+        table.vkCreateGraphicsPipelines = (func(u64, u64, u32, VkGraphicsPipelineCreateInfo*?, void*?, u64*?) -> i32)found
+    if let found = vulkan_symbol(library, "vkDestroyPipeline"):
+        table.vkDestroyPipeline = (func(u64, u64, void*?) -> unit)found
+    if let found = vulkan_symbol(library, "vkCreateCommandPool"):
+        table.vkCreateCommandPool = (func(u64, VkCommandPoolCreateInfo*?, void*?, u64*?) -> i32)found
+    if let found = vulkan_symbol(library, "vkDestroyCommandPool"):
+        table.vkDestroyCommandPool = (func(u64, u64, void*?) -> unit)found
+    if let found = vulkan_symbol(library, "vkAllocateCommandBuffers"):
+        table.vkAllocateCommandBuffers = (func(u64, VkCommandBufferAllocateInfo*?, u64*?) -> i32)found
+    if let found = vulkan_symbol(library, "vkResetCommandPool"):
+        table.vkResetCommandPool = (func(u64, u64, u32) -> i32)found
+    if let found = vulkan_symbol(library, "vkBeginCommandBuffer"):
+        table.vkBeginCommandBuffer = (func(u64, VkCommandBufferBeginInfo*?) -> i32)found
+    if let found = vulkan_symbol(library, "vkEndCommandBuffer"):
+        table.vkEndCommandBuffer = (func(u64) -> i32)found
+    if let found = vulkan_symbol(library, "vkCmdBeginRenderPass"):
+        table.vkCmdBeginRenderPass = (func(u64, VkRenderPassBeginInfo*?, u32) -> unit)found
+    if let found = vulkan_symbol(library, "vkCmdEndRenderPass"):
+        table.vkCmdEndRenderPass = (func(u64) -> unit)found
+    if let found = vulkan_symbol(library, "vkCmdBindPipeline"):
+        table.vkCmdBindPipeline = (func(u64, u32, u64) -> unit)found
+    if let found = vulkan_symbol(library, "vkCmdSetViewport"):
+        table.vkCmdSetViewport = (func(u64, u32, u32, VkViewport*?) -> unit)found
+    if let found = vulkan_symbol(library, "vkCmdSetScissor"):
+        table.vkCmdSetScissor = (func(u64, u32, u32, VkRect2D*?) -> unit)found
+    if let found = vulkan_symbol(library, "vkCmdBindVertexBuffers"):
+        table.vkCmdBindVertexBuffers = (func(u64, u32, u32, u64*?, u64*?) -> unit)found
+    if let found = vulkan_symbol(library, "vkCmdDraw"):
+        table.vkCmdDraw = (func(u64, u32, u32, u32, u32) -> unit)found
+    if let found = vulkan_symbol(library, "vkCreateSemaphore"):
+        table.vkCreateSemaphore = (func(u64, VkSemaphoreCreateInfo*?, void*?, u64*?) -> i32)found
+    if let found = vulkan_symbol(library, "vkDestroySemaphore"):
+        table.vkDestroySemaphore = (func(u64, u64, void*?) -> unit)found
+    if let found = vulkan_symbol(library, "vkCreateFence"):
+        table.vkCreateFence = (func(u64, VkFenceCreateInfo*?, void*?, u64*?) -> i32)found
+    if let found = vulkan_symbol(library, "vkDestroyFence"):
+        table.vkDestroyFence = (func(u64, u64, void*?) -> unit)found
+    if let found = vulkan_symbol(library, "vkWaitForFences"):
+        table.vkWaitForFences = (func(u64, u32, u64*?, u32, u64) -> i32)found
+    if let found = vulkan_symbol(library, "vkResetFences"):
+        table.vkResetFences = (func(u64, u32, u64*?) -> i32)found
+    if let found = vulkan_symbol(library, "vkCreateDescriptorSetLayout"):
+        table.vkCreateDescriptorSetLayout = (func(u64, VkDescriptorSetLayoutCreateInfo*?, void*?, u64*?) -> i32)found
+    if let found = vulkan_symbol(library, "vkDestroyDescriptorSetLayout"):
+        table.vkDestroyDescriptorSetLayout = (func(u64, u64, void*?) -> unit)found
+    if let found = vulkan_symbol(library, "vkCreateDescriptorPool"):
+        table.vkCreateDescriptorPool = (func(u64, VkDescriptorPoolCreateInfo*?, void*?, u64*?) -> i32)found
+    if let found = vulkan_symbol(library, "vkDestroyDescriptorPool"):
+        table.vkDestroyDescriptorPool = (func(u64, u64, void*?) -> unit)found
+    if let found = vulkan_symbol(library, "vkAllocateDescriptorSets"):
+        table.vkAllocateDescriptorSets = (func(u64, VkDescriptorSetAllocateInfo*?, u64*?) -> i32)found
+    if let found = vulkan_symbol(library, "vkUpdateDescriptorSets"):
+        table.vkUpdateDescriptorSets = (func(u64, u32, VkWriteDescriptorSet*?, u32, VkCopyDescriptorSet*?) -> unit)found
+    if let found = vulkan_symbol(library, "vkCmdBindDescriptorSets"):
+        table.vkCmdBindDescriptorSets = (func(u64, u32, u64, u32, u32, u64*?, u32, u32*?) -> unit)found
+    if let found = vulkan_symbol(library, "vkCmdPushConstants"):
+        table.vkCmdPushConstants = (func(u64, u64, u32, u32, u32, void*?) -> unit)found
+    if let found = vulkan_symbol(library, "vkCreateSampler"):
+        table.vkCreateSampler = (func(u64, VkSamplerCreateInfo*?, void*?, u64*?) -> i32)found
+    if let found = vulkan_symbol(library, "vkDestroySampler"):
+        table.vkDestroySampler = (func(u64, u64, void*?) -> unit)found
+    if let found = vulkan_symbol(library, "vkCmdPipelineBarrier"):
+        table.vkCmdPipelineBarrier = (func(u64, u32, u32, u32, u32, void*?, u32, void*?, u32, VkImageMemoryBarrier*?) -> unit)found
+    if let found = vulkan_symbol(library, "vkCmdCopyBufferToImage"):
+        table.vkCmdCopyBufferToImage = (func(u64, u64, u64, u32, u32, VkBufferImageCopy*?) -> unit)found
+    if let found = vulkan_symbol(library, "vkCmdCopyImageToBuffer"):
+        table.vkCmdCopyImageToBuffer = (func(u64, u64, u32, u64, u32, VkBufferImageCopy*?) -> unit)found
+    if let found = vulkan_symbol(library, "vkCreateXlibSurfaceKHR"):
+        table.vkCreateXlibSurfaceKHR = (func(u64, VkXlibSurfaceCreateInfoKHR*?, void*?, u64*?) -> i32)found
+    if table.vkCreateInstance == none:
+        free(table) in memory.heap
+        error(unavailable, "the Vulkan loader has no vkCreateInstance")
+    vulkan_functions = table
+
+func vulkan_library() -> void*!:
+    if platform.windows:
+        var name: u16[13] = [118, 117, 108, 107, 97, 110, 45, 49, 46, 100, 108, 108, 0]
+        return LoadLibraryW(&name[0]) else error(unavailable, "Vulkan is not installed (vulkan-1.dll)")
+    # RTLD_NOW: every symbol is resolved at open.
+    return dlopen("libvulkan.so.1", 2) else error(unavailable, "Vulkan is not installed (libvulkan.so.1)")
+
+func vulkan_symbol(library: void*, name: c.str) -> void*?:
+    if platform.windows:
+        return GetProcAddress(library, name)
+    return dlsym(library, name)
+
+func vulkan_entry() -> VulkanFunctions*:
+    return vulkan_functions else trap("Vulkan is used before it was loaded")
+
+# mark: The functions ==========================================================================
+
+func vkCreateInstance(pCreateInfo: VkInstanceCreateInfo*?, pAllocator: void*?, pInstance: u64*?) -> i32:
+    let call = vulkan_entry().vkCreateInstance else trap("the Vulkan loader lacks vkCreateInstance")
+    return call(pCreateInfo, pAllocator, pInstance)
+
+func vkDestroyInstance(instance: u64, pAllocator: void*?):
+    let call = vulkan_entry().vkDestroyInstance else trap("the Vulkan loader lacks vkDestroyInstance")
+    call(instance, pAllocator)
+
+func vkEnumeratePhysicalDevices(instance: u64, pPhysicalDeviceCount: u32*?, pPhysicalDevices: u64*?) -> i32:
+    let call = vulkan_entry().vkEnumeratePhysicalDevices else trap("the Vulkan loader lacks vkEnumeratePhysicalDevices")
+    return call(instance, pPhysicalDeviceCount, pPhysicalDevices)
+
+func vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice: u64, pQueueFamilyPropertyCount: u32*?, pQueueFamilyProperties: VkQueueFamilyProperties*?):
+    let call = vulkan_entry().vkGetPhysicalDeviceQueueFamilyProperties else trap("the Vulkan loader lacks vkGetPhysicalDeviceQueueFamilyProperties")
+    call(physicalDevice, pQueueFamilyPropertyCount, pQueueFamilyProperties)
+
+func vkGetPhysicalDeviceMemoryProperties(physicalDevice: u64, pMemoryProperties: VkPhysicalDeviceMemoryProperties*?):
+    let call = vulkan_entry().vkGetPhysicalDeviceMemoryProperties else trap("the Vulkan loader lacks vkGetPhysicalDeviceMemoryProperties")
+    call(physicalDevice, pMemoryProperties)
+
+func vkGetPhysicalDeviceFormatProperties(physicalDevice: u64, format_value: u32, pFormatProperties: VkFormatProperties*?):
+    let call = vulkan_entry().vkGetPhysicalDeviceFormatProperties else trap("the Vulkan loader lacks vkGetPhysicalDeviceFormatProperties")
+    call(physicalDevice, format_value, pFormatProperties)
+
+func vkCreateDevice(physicalDevice: u64, pCreateInfo: VkDeviceCreateInfo*?, pAllocator: void*?, pDevice: u64*?) -> i32:
+    let call = vulkan_entry().vkCreateDevice else trap("the Vulkan loader lacks vkCreateDevice")
+    return call(physicalDevice, pCreateInfo, pAllocator, pDevice)
+
+func vkDestroyDevice(device: u64, pAllocator: void*?):
+    let call = vulkan_entry().vkDestroyDevice else trap("the Vulkan loader lacks vkDestroyDevice")
+    call(device, pAllocator)
+
+func vkGetDeviceQueue(device: u64, queueFamilyIndex: u32, queueIndex: u32, pQueue: u64*?):
+    let call = vulkan_entry().vkGetDeviceQueue else trap("the Vulkan loader lacks vkGetDeviceQueue")
+    call(device, queueFamilyIndex, queueIndex, pQueue)
+
+func vkCreateWin32SurfaceKHR(instance: u64, pCreateInfo: VkWin32SurfaceCreateInfoKHR*?, pAllocator: void*?, pSurface: u64*?) -> i32:
+    let call = vulkan_entry().vkCreateWin32SurfaceKHR else trap("the Vulkan loader lacks vkCreateWin32SurfaceKHR")
+    return call(instance, pCreateInfo, pAllocator, pSurface)
+
+func vkGetPhysicalDeviceWin32PresentationSupportKHR(physicalDevice: u64, queueFamilyIndex: u32) -> u32:
+    let call = vulkan_entry().vkGetPhysicalDeviceWin32PresentationSupportKHR else trap("the Vulkan loader lacks vkGetPhysicalDeviceWin32PresentationSupportKHR")
+    return call(physicalDevice, queueFamilyIndex)
+
+func vkDestroySurfaceKHR(instance: u64, surface: u64, pAllocator: void*?):
+    let call = vulkan_entry().vkDestroySurfaceKHR else trap("the Vulkan loader lacks vkDestroySurfaceKHR")
+    call(instance, surface, pAllocator)
+
+func vkGetPhysicalDeviceSurfaceSupportKHR(physicalDevice: u64, queueFamilyIndex: u32, surface: u64, pSupported: u32*?) -> i32:
+    let call = vulkan_entry().vkGetPhysicalDeviceSurfaceSupportKHR else trap("the Vulkan loader lacks vkGetPhysicalDeviceSurfaceSupportKHR")
+    return call(physicalDevice, queueFamilyIndex, surface, pSupported)
+
+func vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice: u64, surface: u64, pSurfaceCapabilities: VkSurfaceCapabilitiesKHR*?) -> i32:
+    let call = vulkan_entry().vkGetPhysicalDeviceSurfaceCapabilitiesKHR else trap("the Vulkan loader lacks vkGetPhysicalDeviceSurfaceCapabilitiesKHR")
+    return call(physicalDevice, surface, pSurfaceCapabilities)
+
+func vkGetPhysicalDeviceSurfaceFormatsKHR(physicalDevice: u64, surface: u64, pSurfaceFormatCount: u32*?, pSurfaceFormats: VkSurfaceFormatKHR*?) -> i32:
+    let call = vulkan_entry().vkGetPhysicalDeviceSurfaceFormatsKHR else trap("the Vulkan loader lacks vkGetPhysicalDeviceSurfaceFormatsKHR")
+    return call(physicalDevice, surface, pSurfaceFormatCount, pSurfaceFormats)
+
+func vkCreateSwapchainKHR(device: u64, pCreateInfo: VkSwapchainCreateInfoKHR*?, pAllocator: void*?, pSwapchain: u64*?) -> i32:
+    let call = vulkan_entry().vkCreateSwapchainKHR else trap("the Vulkan loader lacks vkCreateSwapchainKHR")
+    return call(device, pCreateInfo, pAllocator, pSwapchain)
+
+func vkDestroySwapchainKHR(device: u64, swapchain: u64, pAllocator: void*?):
+    let call = vulkan_entry().vkDestroySwapchainKHR else trap("the Vulkan loader lacks vkDestroySwapchainKHR")
+    call(device, swapchain, pAllocator)
+
+func vkGetSwapchainImagesKHR(device: u64, swapchain: u64, pSwapchainImageCount: u32*?, pSwapchainImages: u64*?) -> i32:
+    let call = vulkan_entry().vkGetSwapchainImagesKHR else trap("the Vulkan loader lacks vkGetSwapchainImagesKHR")
+    return call(device, swapchain, pSwapchainImageCount, pSwapchainImages)
+
+func vkAcquireNextImageKHR(device: u64, swapchain: u64, timeout: u64, semaphore: u64, fence: u64, pImageIndex: u32*?) -> i32:
+    let call = vulkan_entry().vkAcquireNextImageKHR else trap("the Vulkan loader lacks vkAcquireNextImageKHR")
+    return call(device, swapchain, timeout, semaphore, fence, pImageIndex)
+
+func vkQueuePresentKHR(queue: u64, pPresentInfo: VkPresentInfoKHR*?) -> i32:
+    let call = vulkan_entry().vkQueuePresentKHR else trap("the Vulkan loader lacks vkQueuePresentKHR")
+    return call(queue, pPresentInfo)
+
+func vkQueueSubmit(queue: u64, submitCount: u32, pSubmits: VkSubmitInfo*?, fence: u64) -> i32:
+    let call = vulkan_entry().vkQueueSubmit else trap("the Vulkan loader lacks vkQueueSubmit")
+    return call(queue, submitCount, pSubmits, fence)
+
+func vkQueueWaitIdle(queue: u64) -> i32:
+    let call = vulkan_entry().vkQueueWaitIdle else trap("the Vulkan loader lacks vkQueueWaitIdle")
+    return call(queue)
+
+func vkDeviceWaitIdle(device: u64) -> i32:
+    let call = vulkan_entry().vkDeviceWaitIdle else trap("the Vulkan loader lacks vkDeviceWaitIdle")
+    return call(device)
+
+func vkCreateImageView(device: u64, pCreateInfo: VkImageViewCreateInfo*?, pAllocator: void*?, pView: u64*?) -> i32:
+    let call = vulkan_entry().vkCreateImageView else trap("the Vulkan loader lacks vkCreateImageView")
+    return call(device, pCreateInfo, pAllocator, pView)
+
+func vkDestroyImageView(device: u64, imageView: u64, pAllocator: void*?):
+    let call = vulkan_entry().vkDestroyImageView else trap("the Vulkan loader lacks vkDestroyImageView")
+    call(device, imageView, pAllocator)
+
+func vkCreateImage(device: u64, pCreateInfo: VkImageCreateInfo*?, pAllocator: void*?, pImage: u64*?) -> i32:
+    let call = vulkan_entry().vkCreateImage else trap("the Vulkan loader lacks vkCreateImage")
+    return call(device, pCreateInfo, pAllocator, pImage)
+
+func vkDestroyImage(device: u64, image: u64, pAllocator: void*?):
+    let call = vulkan_entry().vkDestroyImage else trap("the Vulkan loader lacks vkDestroyImage")
+    call(device, image, pAllocator)
+
+func vkGetImageMemoryRequirements(device: u64, image: u64, pMemoryRequirements: VkMemoryRequirements*?):
+    let call = vulkan_entry().vkGetImageMemoryRequirements else trap("the Vulkan loader lacks vkGetImageMemoryRequirements")
+    call(device, image, pMemoryRequirements)
+
+func vkAllocateMemory(device: u64, pAllocateInfo: VkMemoryAllocateInfo*?, pAllocator: void*?, pMemory: u64*?) -> i32:
+    let call = vulkan_entry().vkAllocateMemory else trap("the Vulkan loader lacks vkAllocateMemory")
+    return call(device, pAllocateInfo, pAllocator, pMemory)
+
+func vkFreeMemory(device: u64, memory_value: u64, pAllocator: void*?):
+    let call = vulkan_entry().vkFreeMemory else trap("the Vulkan loader lacks vkFreeMemory")
+    call(device, memory_value, pAllocator)
+
+func vkBindImageMemory(device: u64, image: u64, memory_value: u64, memoryOffset: u64) -> i32:
+    let call = vulkan_entry().vkBindImageMemory else trap("the Vulkan loader lacks vkBindImageMemory")
+    return call(device, image, memory_value, memoryOffset)
+
+func vkCreateBuffer(device: u64, pCreateInfo: VkBufferCreateInfo*?, pAllocator: void*?, pBuffer: u64*?) -> i32:
+    let call = vulkan_entry().vkCreateBuffer else trap("the Vulkan loader lacks vkCreateBuffer")
+    return call(device, pCreateInfo, pAllocator, pBuffer)
+
+func vkDestroyBuffer(device: u64, buffer: u64, pAllocator: void*?):
+    let call = vulkan_entry().vkDestroyBuffer else trap("the Vulkan loader lacks vkDestroyBuffer")
+    call(device, buffer, pAllocator)
+
+func vkGetBufferMemoryRequirements(device: u64, buffer: u64, pMemoryRequirements: VkMemoryRequirements*?):
+    let call = vulkan_entry().vkGetBufferMemoryRequirements else trap("the Vulkan loader lacks vkGetBufferMemoryRequirements")
+    call(device, buffer, pMemoryRequirements)
+
+func vkBindBufferMemory(device: u64, buffer: u64, memory_value: u64, memoryOffset: u64) -> i32:
+    let call = vulkan_entry().vkBindBufferMemory else trap("the Vulkan loader lacks vkBindBufferMemory")
+    return call(device, buffer, memory_value, memoryOffset)
+
+func vkMapMemory(device: u64, memory_value: u64, offset: u64, size: u64, flags: u32, ppData: void*?*?) -> i32:
+    let call = vulkan_entry().vkMapMemory else trap("the Vulkan loader lacks vkMapMemory")
+    return call(device, memory_value, offset, size, flags, ppData)
+
+func vkUnmapMemory(device: u64, memory_value: u64):
+    let call = vulkan_entry().vkUnmapMemory else trap("the Vulkan loader lacks vkUnmapMemory")
+    call(device, memory_value)
+
+func vkCreateRenderPass(device: u64, pCreateInfo: VkRenderPassCreateInfo*?, pAllocator: void*?, pRenderPass: u64*?) -> i32:
+    let call = vulkan_entry().vkCreateRenderPass else trap("the Vulkan loader lacks vkCreateRenderPass")
+    return call(device, pCreateInfo, pAllocator, pRenderPass)
+
+func vkDestroyRenderPass(device: u64, renderPass: u64, pAllocator: void*?):
+    let call = vulkan_entry().vkDestroyRenderPass else trap("the Vulkan loader lacks vkDestroyRenderPass")
+    call(device, renderPass, pAllocator)
+
+func vkCreateFramebuffer(device: u64, pCreateInfo: VkFramebufferCreateInfo*?, pAllocator: void*?, pFramebuffer: u64*?) -> i32:
+    let call = vulkan_entry().vkCreateFramebuffer else trap("the Vulkan loader lacks vkCreateFramebuffer")
+    return call(device, pCreateInfo, pAllocator, pFramebuffer)
+
+func vkDestroyFramebuffer(device: u64, framebuffer: u64, pAllocator: void*?):
+    let call = vulkan_entry().vkDestroyFramebuffer else trap("the Vulkan loader lacks vkDestroyFramebuffer")
+    call(device, framebuffer, pAllocator)
+
+func vkCreateShaderModule(device: u64, pCreateInfo: VkShaderModuleCreateInfo*?, pAllocator: void*?, pShaderModule: u64*?) -> i32:
+    let call = vulkan_entry().vkCreateShaderModule else trap("the Vulkan loader lacks vkCreateShaderModule")
+    return call(device, pCreateInfo, pAllocator, pShaderModule)
+
+func vkDestroyShaderModule(device: u64, shaderModule: u64, pAllocator: void*?):
+    let call = vulkan_entry().vkDestroyShaderModule else trap("the Vulkan loader lacks vkDestroyShaderModule")
+    call(device, shaderModule, pAllocator)
+
+func vkCreatePipelineLayout(device: u64, pCreateInfo: VkPipelineLayoutCreateInfo*?, pAllocator: void*?, pPipelineLayout: u64*?) -> i32:
+    let call = vulkan_entry().vkCreatePipelineLayout else trap("the Vulkan loader lacks vkCreatePipelineLayout")
+    return call(device, pCreateInfo, pAllocator, pPipelineLayout)
+
+func vkDestroyPipelineLayout(device: u64, pipelineLayout: u64, pAllocator: void*?):
+    let call = vulkan_entry().vkDestroyPipelineLayout else trap("the Vulkan loader lacks vkDestroyPipelineLayout")
+    call(device, pipelineLayout, pAllocator)
+
+func vkCreateGraphicsPipelines(device: u64, pipelineCache: u64, createInfoCount: u32, pCreateInfos: VkGraphicsPipelineCreateInfo*?, pAllocator: void*?, pPipelines: u64*?) -> i32:
+    let call = vulkan_entry().vkCreateGraphicsPipelines else trap("the Vulkan loader lacks vkCreateGraphicsPipelines")
+    return call(device, pipelineCache, createInfoCount, pCreateInfos, pAllocator, pPipelines)
+
+func vkDestroyPipeline(device: u64, pipeline: u64, pAllocator: void*?):
+    let call = vulkan_entry().vkDestroyPipeline else trap("the Vulkan loader lacks vkDestroyPipeline")
+    call(device, pipeline, pAllocator)
+
+func vkCreateCommandPool(device: u64, pCreateInfo: VkCommandPoolCreateInfo*?, pAllocator: void*?, pCommandPool: u64*?) -> i32:
+    let call = vulkan_entry().vkCreateCommandPool else trap("the Vulkan loader lacks vkCreateCommandPool")
+    return call(device, pCreateInfo, pAllocator, pCommandPool)
+
+func vkDestroyCommandPool(device: u64, commandPool: u64, pAllocator: void*?):
+    let call = vulkan_entry().vkDestroyCommandPool else trap("the Vulkan loader lacks vkDestroyCommandPool")
+    call(device, commandPool, pAllocator)
+
+func vkAllocateCommandBuffers(device: u64, pAllocateInfo: VkCommandBufferAllocateInfo*?, pCommandBuffers: u64*?) -> i32:
+    let call = vulkan_entry().vkAllocateCommandBuffers else trap("the Vulkan loader lacks vkAllocateCommandBuffers")
+    return call(device, pAllocateInfo, pCommandBuffers)
+
+func vkResetCommandPool(device: u64, commandPool: u64, flags: u32) -> i32:
+    let call = vulkan_entry().vkResetCommandPool else trap("the Vulkan loader lacks vkResetCommandPool")
+    return call(device, commandPool, flags)
+
+func vkBeginCommandBuffer(commandBuffer: u64, pBeginInfo: VkCommandBufferBeginInfo*?) -> i32:
+    let call = vulkan_entry().vkBeginCommandBuffer else trap("the Vulkan loader lacks vkBeginCommandBuffer")
+    return call(commandBuffer, pBeginInfo)
+
+func vkEndCommandBuffer(commandBuffer: u64) -> i32:
+    let call = vulkan_entry().vkEndCommandBuffer else trap("the Vulkan loader lacks vkEndCommandBuffer")
+    return call(commandBuffer)
+
+func vkCmdBeginRenderPass(commandBuffer: u64, pRenderPassBegin: VkRenderPassBeginInfo*?, contents: u32):
+    let call = vulkan_entry().vkCmdBeginRenderPass else trap("the Vulkan loader lacks vkCmdBeginRenderPass")
+    call(commandBuffer, pRenderPassBegin, contents)
+
+func vkCmdEndRenderPass(commandBuffer: u64):
+    let call = vulkan_entry().vkCmdEndRenderPass else trap("the Vulkan loader lacks vkCmdEndRenderPass")
+    call(commandBuffer)
+
+func vkCmdBindPipeline(commandBuffer: u64, pipelineBindPoint: u32, pipeline: u64):
+    let call = vulkan_entry().vkCmdBindPipeline else trap("the Vulkan loader lacks vkCmdBindPipeline")
+    call(commandBuffer, pipelineBindPoint, pipeline)
+
+func vkCmdSetViewport(commandBuffer: u64, firstViewport: u32, viewportCount: u32, pViewports: VkViewport*?):
+    let call = vulkan_entry().vkCmdSetViewport else trap("the Vulkan loader lacks vkCmdSetViewport")
+    call(commandBuffer, firstViewport, viewportCount, pViewports)
+
+func vkCmdSetScissor(commandBuffer: u64, firstScissor: u32, scissorCount: u32, pScissors: VkRect2D*?):
+    let call = vulkan_entry().vkCmdSetScissor else trap("the Vulkan loader lacks vkCmdSetScissor")
+    call(commandBuffer, firstScissor, scissorCount, pScissors)
+
+func vkCmdBindVertexBuffers(commandBuffer: u64, firstBinding: u32, bindingCount: u32, pBuffers: u64*?, pOffsets: u64*?):
+    let call = vulkan_entry().vkCmdBindVertexBuffers else trap("the Vulkan loader lacks vkCmdBindVertexBuffers")
+    call(commandBuffer, firstBinding, bindingCount, pBuffers, pOffsets)
+
+func vkCmdDraw(commandBuffer: u64, vertexCount: u32, instanceCount: u32, firstVertex: u32, firstInstance: u32):
+    let call = vulkan_entry().vkCmdDraw else trap("the Vulkan loader lacks vkCmdDraw")
+    call(commandBuffer, vertexCount, instanceCount, firstVertex, firstInstance)
+
+func vkCreateSemaphore(device: u64, pCreateInfo: VkSemaphoreCreateInfo*?, pAllocator: void*?, pSemaphore: u64*?) -> i32:
+    let call = vulkan_entry().vkCreateSemaphore else trap("the Vulkan loader lacks vkCreateSemaphore")
+    return call(device, pCreateInfo, pAllocator, pSemaphore)
+
+func vkDestroySemaphore(device: u64, semaphore: u64, pAllocator: void*?):
+    let call = vulkan_entry().vkDestroySemaphore else trap("the Vulkan loader lacks vkDestroySemaphore")
+    call(device, semaphore, pAllocator)
+
+func vkCreateFence(device: u64, pCreateInfo: VkFenceCreateInfo*?, pAllocator: void*?, pFence: u64*?) -> i32:
+    let call = vulkan_entry().vkCreateFence else trap("the Vulkan loader lacks vkCreateFence")
+    return call(device, pCreateInfo, pAllocator, pFence)
+
+func vkDestroyFence(device: u64, fence: u64, pAllocator: void*?):
+    let call = vulkan_entry().vkDestroyFence else trap("the Vulkan loader lacks vkDestroyFence")
+    call(device, fence, pAllocator)
+
+func vkWaitForFences(device: u64, fenceCount: u32, pFences: u64*?, waitAll: u32, timeout: u64) -> i32:
+    let call = vulkan_entry().vkWaitForFences else trap("the Vulkan loader lacks vkWaitForFences")
+    return call(device, fenceCount, pFences, waitAll, timeout)
+
+func vkResetFences(device: u64, fenceCount: u32, pFences: u64*?) -> i32:
+    let call = vulkan_entry().vkResetFences else trap("the Vulkan loader lacks vkResetFences")
+    return call(device, fenceCount, pFences)
+
+func vkCreateDescriptorSetLayout(device: u64, pCreateInfo: VkDescriptorSetLayoutCreateInfo*?, pAllocator: void*?, pSetLayout: u64*?) -> i32:
+    let call = vulkan_entry().vkCreateDescriptorSetLayout else trap("the Vulkan loader lacks vkCreateDescriptorSetLayout")
+    return call(device, pCreateInfo, pAllocator, pSetLayout)
+
+func vkDestroyDescriptorSetLayout(device: u64, descriptorSetLayout: u64, pAllocator: void*?):
+    let call = vulkan_entry().vkDestroyDescriptorSetLayout else trap("the Vulkan loader lacks vkDestroyDescriptorSetLayout")
+    call(device, descriptorSetLayout, pAllocator)
+
+func vkCreateDescriptorPool(device: u64, pCreateInfo: VkDescriptorPoolCreateInfo*?, pAllocator: void*?, pDescriptorPool: u64*?) -> i32:
+    let call = vulkan_entry().vkCreateDescriptorPool else trap("the Vulkan loader lacks vkCreateDescriptorPool")
+    return call(device, pCreateInfo, pAllocator, pDescriptorPool)
+
+func vkDestroyDescriptorPool(device: u64, descriptorPool: u64, pAllocator: void*?):
+    let call = vulkan_entry().vkDestroyDescriptorPool else trap("the Vulkan loader lacks vkDestroyDescriptorPool")
+    call(device, descriptorPool, pAllocator)
+
+func vkAllocateDescriptorSets(device: u64, pAllocateInfo: VkDescriptorSetAllocateInfo*?, pDescriptorSets: u64*?) -> i32:
+    let call = vulkan_entry().vkAllocateDescriptorSets else trap("the Vulkan loader lacks vkAllocateDescriptorSets")
+    return call(device, pAllocateInfo, pDescriptorSets)
+
+func vkUpdateDescriptorSets(device: u64, descriptorWriteCount: u32, pDescriptorWrites: VkWriteDescriptorSet*?, descriptorCopyCount: u32, pDescriptorCopies: VkCopyDescriptorSet*?):
+    let call = vulkan_entry().vkUpdateDescriptorSets else trap("the Vulkan loader lacks vkUpdateDescriptorSets")
+    call(device, descriptorWriteCount, pDescriptorWrites, descriptorCopyCount, pDescriptorCopies)
+
+func vkCmdBindDescriptorSets(commandBuffer: u64, pipelineBindPoint: u32, layout: u64, firstSet: u32, descriptorSetCount: u32, pDescriptorSets: u64*?, dynamicOffsetCount: u32, pDynamicOffsets: u32*?):
+    let call = vulkan_entry().vkCmdBindDescriptorSets else trap("the Vulkan loader lacks vkCmdBindDescriptorSets")
+    call(commandBuffer, pipelineBindPoint, layout, firstSet, descriptorSetCount, pDescriptorSets, dynamicOffsetCount, pDynamicOffsets)
+
+func vkCmdPushConstants(commandBuffer: u64, layout: u64, stageFlags: u32, offset: u32, size: u32, pValues: void*?):
+    let call = vulkan_entry().vkCmdPushConstants else trap("the Vulkan loader lacks vkCmdPushConstants")
+    call(commandBuffer, layout, stageFlags, offset, size, pValues)
+
+func vkCreateSampler(device: u64, pCreateInfo: VkSamplerCreateInfo*?, pAllocator: void*?, pSampler: u64*?) -> i32:
+    let call = vulkan_entry().vkCreateSampler else trap("the Vulkan loader lacks vkCreateSampler")
+    return call(device, pCreateInfo, pAllocator, pSampler)
+
+func vkDestroySampler(device: u64, sampler: u64, pAllocator: void*?):
+    let call = vulkan_entry().vkDestroySampler else trap("the Vulkan loader lacks vkDestroySampler")
+    call(device, sampler, pAllocator)
+
+func vkCmdPipelineBarrier(commandBuffer: u64, srcStageMask: u32, dstStageMask: u32, dependencyFlags: u32, memoryBarrierCount: u32, pMemoryBarriers: void*?, bufferMemoryBarrierCount: u32, pBufferMemoryBarriers: void*?, imageMemoryBarrierCount: u32, pImageMemoryBarriers: VkImageMemoryBarrier*?):
+    let call = vulkan_entry().vkCmdPipelineBarrier else trap("the Vulkan loader lacks vkCmdPipelineBarrier")
+    call(commandBuffer, srcStageMask, dstStageMask, dependencyFlags, memoryBarrierCount, pMemoryBarriers, bufferMemoryBarrierCount, pBufferMemoryBarriers, imageMemoryBarrierCount, pImageMemoryBarriers)
+
+func vkCmdCopyBufferToImage(commandBuffer: u64, srcBuffer: u64, dstImage: u64, dstImageLayout: u32, regionCount: u32, pRegions: VkBufferImageCopy*?):
+    let call = vulkan_entry().vkCmdCopyBufferToImage else trap("the Vulkan loader lacks vkCmdCopyBufferToImage")
+    call(commandBuffer, srcBuffer, dstImage, dstImageLayout, regionCount, pRegions)
+
+func vkCmdCopyImageToBuffer(commandBuffer: u64, srcImage: u64, srcImageLayout: u32, dstBuffer: u64, regionCount: u32, pRegions: VkBufferImageCopy*?):
+    let call = vulkan_entry().vkCmdCopyImageToBuffer else trap("the Vulkan loader lacks vkCmdCopyImageToBuffer")
+    call(commandBuffer, srcImage, srcImageLayout, dstBuffer, regionCount, pRegions)
+
+func vkCreateXlibSurfaceKHR(instance: u64, pCreateInfo: VkXlibSurfaceCreateInfoKHR*?, pAllocator: void*?, pSurface: u64*?) -> i32:
+    let call = vulkan_entry().vkCreateXlibSurfaceKHR else trap("the Vulkan loader lacks vkCreateXlibSurfaceKHR")
+    return call(instance, pCreateInfo, pAllocator, pSurface)

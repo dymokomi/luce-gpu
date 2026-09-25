@@ -10,7 +10,7 @@
 #==============================================================================================
 
 func backend_texture_create(device: DeviceState*, width: u32, height: u32, pixel_format: Format) -> void*!:
-    if platform.windows and device.backend == Backend.vulkan:
+    if (platform.windows or platform.linux) and device.backend == Backend.vulkan:
         return (void*)try vulkan_texture_create((VulkanDevice*)device.native, width, height, pixel_format)
     if platform.macos and platform.arm64:
         if device.backend == Backend.metal:
@@ -18,7 +18,7 @@ func backend_texture_create(device: DeviceState*, width: u32, height: u32, pixel
     error(unsupported, "the GPU backend is not implemented")
 
 func backend_texture_upload(device: DeviceState*, native: void*, pixels: const u8[], region: Region) -> !:
-    if platform.windows and device.backend == Backend.vulkan:
+    if (platform.windows or platform.linux) and device.backend == Backend.vulkan:
         try vulkan_texture_upload((VulkanDevice*)device.native, (VulkanTexture*)native, pixels, region)
         return
     if platform.macos and platform.arm64:
@@ -28,7 +28,7 @@ func backend_texture_upload(device: DeviceState*, native: void*, pixels: const u
     error(unsupported, "the GPU backend is not implemented")
 
 func backend_texture_read(device: DeviceState*, native: void*, pixels: u8[], region: Region) -> !:
-    if platform.windows and device.backend == Backend.vulkan:
+    if (platform.windows or platform.linux) and device.backend == Backend.vulkan:
         try vulkan_texture_read((VulkanDevice*)device.native, (VulkanTexture*)native, pixels, region)
         return
     if platform.macos and platform.arm64:
@@ -38,7 +38,7 @@ func backend_texture_read(device: DeviceState*, native: void*, pixels: u8[], reg
     error(unsupported, "the GPU backend is not implemented")
 
 func backend_texture_render(device: DeviceState*, native: void*, canvas: Canvas, color: Color) -> !:
-    if platform.windows and device.backend == Backend.vulkan:
+    if (platform.windows or platform.linux) and device.backend == Backend.vulkan:
         try vulkan_texture_render((VulkanDevice*)device.native, (VulkanTexture*)native, canvas, color)
         return
     if platform.macos and platform.arm64:
@@ -52,7 +52,7 @@ func backend_texture_destroy(device: DeviceState*, native: void*):
 
 ## The backend's texture release, bound once per device at open.
 func backend_texture_destroyer(backend: Backend) -> func(void*, void*) -> unit:
-    if platform.windows and backend == Backend.vulkan:
+    if (platform.windows or platform.linux) and backend == Backend.vulkan:
         return vulkan_texture_release
     if platform.macos and platform.arm64:
         if backend == Backend.metal:
@@ -60,7 +60,7 @@ func backend_texture_destroyer(backend: Backend) -> func(void*, void*) -> unit:
     trap("invalid GPU backend when binding texture release")
 
 func vulkan_texture_release(device: void*, native: void*):
-    if platform.windows:
+    if platform.windows or platform.linux:
         vulkan_texture_destroy((VulkanDevice*)device, (VulkanTexture*)native)
 
 func metal_texture_release(device: void*, native: void*):
@@ -71,7 +71,7 @@ func metal_texture_release(device: void*, native: void*):
 # mark: Shaders and pipelines =================================================================
 
 func backend_shader_create(device: DeviceState*, spirv: const u32[], msl: c.str) -> void*!:
-    if platform.windows and device.backend == Backend.vulkan:
+    if (platform.windows or platform.linux) and device.backend == Backend.vulkan:
         return (void*)try vulkan_shader_create((VulkanDevice*)device.native, spirv)
     if platform.macos and platform.arm64:
         if device.backend == Backend.metal:
@@ -79,7 +79,7 @@ func backend_shader_create(device: DeviceState*, spirv: const u32[], msl: c.str)
     error(unsupported, "the GPU backend is not implemented")
 
 func backend_pipeline_create(device: DeviceState*, shader: void*, blend: Blend, pixel_format: Format?) -> void*!:
-    if platform.windows and device.backend == Backend.vulkan:
+    if (platform.windows or platform.linux) and device.backend == Backend.vulkan:
         return (void*)try vulkan_pipeline_create((VulkanDevice*)device.native, (VulkanShader*)shader, blend, pixel_format)
     if platform.macos and platform.arm64:
         if device.backend == Backend.metal:
@@ -87,7 +87,7 @@ func backend_pipeline_create(device: DeviceState*, shader: void*, blend: Blend, 
     error(unsupported, "the GPU backend is not implemented")
 
 func backend_shader_destroyer(backend: Backend) -> func(void*, void*) -> unit:
-    if platform.windows and backend == Backend.vulkan:
+    if (platform.windows or platform.linux) and backend == Backend.vulkan:
         return vulkan_shader_release
     if platform.macos and platform.arm64:
         if backend == Backend.metal:
@@ -95,7 +95,7 @@ func backend_shader_destroyer(backend: Backend) -> func(void*, void*) -> unit:
     trap("invalid GPU backend when binding shader release")
 
 func backend_pipeline_destroyer(backend: Backend) -> func(void*, void*) -> unit:
-    if platform.windows and backend == Backend.vulkan:
+    if (platform.windows or platform.linux) and backend == Backend.vulkan:
         return vulkan_pipeline_release
     if platform.macos and platform.arm64:
         if backend == Backend.metal:
@@ -103,11 +103,11 @@ func backend_pipeline_destroyer(backend: Backend) -> func(void*, void*) -> unit:
     trap("invalid GPU backend when binding pipeline release")
 
 func vulkan_shader_release(device: void*, native: void*):
-    if platform.windows:
+    if platform.windows or platform.linux:
         vulkan_shader_destroy((VulkanDevice*)device, (VulkanShader*)native)
 
 func vulkan_pipeline_release(device: void*, native: void*):
-    if platform.windows:
+    if platform.windows or platform.linux:
         vulkan_pipeline_destroy((VulkanDevice*)device, (VulkanPipeline*)native)
 
 func metal_shader_release(device: void*, native: void*):

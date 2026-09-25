@@ -17,8 +17,10 @@ metal/drawing.lucb
 metal/texture.lucb
 metal/surface.lucb
 vulkan/bindings.lucb
+vulkan/entry.lucb
 vulkan/presentation/module.lucb
 vulkan/presentation/windows.lucb
+vulkan/presentation/x11.lucb
 vulkan/device.lucb
 vulkan/texture.lucb
 vulkan/shader.lucb

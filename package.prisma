@@ -1,7 +1,7 @@
 #prisma 4.0
 def package "luce-gpu" {
     str owner = "dymokomi"
-    str version = "0.1.5"
+    str version = "0.1.6"
     str kind = "package"
     str language = "luce-base"
     str description = "GPU devices, textures, shaders and frames for Luce: Metal on macOS and Vulkan on Windows and Linux, presenting to luce-window windows."
@@ -19,17 +19,12 @@ def package "luce-gpu" {
 
     def dependency "luce-window" {
         str owner = "dymokomi"
-        str version = "^0.1.0"
+        str version = "^0.1.4"
         str path = "../luce-window"
     }
 
     def native "macos" {
         str[] libraries = ["objc"]
         str[] frameworks = ["Metal", "CoreGraphics", "QuartzCore"]
-    }
-
-    def native "windows" {
-        str[] libraries = ["vulkan-1"]
-        str[] link_search = ["$VULKAN_SDK/Lib"]
     }
 }
