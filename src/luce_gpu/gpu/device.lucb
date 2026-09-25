@@ -28,6 +28,17 @@ pub struct Device:
     pub func backend() -> Backend!:
         return (try self.checked()).backend
 
+    ## Another owner of the same device, destroyed on its own: documents that
+    ## share their textures share one device.
+    pub func share() -> Device!:
+        let state = try self.checked()
+        state.references += 1
+        return Device(state = state)
+
+    ## Whether `other` is the same device.
+    pub func same(other: const Device*) -> bool:
+        return self.state != none and self.state == other.state
+
     ## Release the device on the main thread; open surfaces keep it alive until they close.
     pub mutating func destroy():
         let state = self.state else return
