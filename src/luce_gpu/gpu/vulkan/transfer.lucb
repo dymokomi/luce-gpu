@@ -126,3 +126,38 @@ func vulkan_upload_room(device: VulkanDevice*, bytes: u64) -> VulkanRingSlot*!:
     try vulkan_wait(device, slot.serial)
     slot.used = 0
     return slot
+
+# mark: Upload batches ========================================================================
+
+## Whether `bytes` fit the current upload slot without moving on to the next.
+func vulkan_upload_fits(device: VulkanDevice*, bytes: u64) -> bool:
+    let slot = &device.uploads[device.upload_slot]
+    let start = (slot.used + 15) // 16 * 16
+    return slot.buffer != 0 and start + bytes <= slot.size
+
+## Copy `pixels` into the upload ring for a batch: the ring slot and the offset.
+func vulkan_upload_stage(device: VulkanDevice*, pixels: const u8[]) -> usize[2]!:
+    try vulkan_drawing(device)
+    let ring = try vulkan_upload_room(device, (u64)pixels.length)
+    let base = ring.mapped else trap("a mapped Vulkan ring slot lost its mapping")
+    memory.copy(u8[]((u8*)base + (usize)ring.used, pixels.length), pixels, pixels.length)
+    let offset = ring.used
+    ring.used += (u64)pixels.length
+    return [device.upload_slot, (usize)offset]
+
+## Record every staged copy of a batch into one command buffer and submit it.
+func vulkan_upload_submit(device: VulkanDevice*, entries: const UploadEntry[]) -> !:
+    let slot = try vulkan_begin(device)
+    for entry in entries:
+        let texture = (VulkanTexture*)entry.texture.native
+        vulkan_transition(slot.command, texture, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
+        var copy = vulkan_copy_region(entry.region)
+        copy.bufferOffset = (u64)entry.offset
+        vkCmdCopyBufferToImage(slot.command, device.uploads[entry.ring].buffer, texture.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy)
+    # Back to sampling, once per image however many regions it took.
+    for entry in entries:
+        vulkan_transition(slot.command, (VulkanTexture*)entry.texture.native, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+    let serial = try vulkan_end(device, slot)
+    for entry in entries:
+        ((VulkanTexture*)entry.texture.native).last_use = serial
+        device.uploads[entry.ring].serial = serial

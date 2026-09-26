@@ -1,0 +1,146 @@
+#==============================================================================================
+#
+#   upload - Many texture uploads, one submission
+#
+#   DESCRIPTION:
+#       An upload batch stages the pixels of many texture regions and sends them to the GPU
+#       together: on Vulkan they go straight into the device's upload ring and every copy is
+#       recorded into one command buffer; on Metal they share one staging buffer and one blit
+#       encoder. A tile editor that changes dozens of cells a frame (a smudge) then pays one
+#       submission a frame instead of one per cell.
+#
+#       The copies happen at `submit`, in the order added, after every earlier submission and
+#       before every later one. On Vulkan a batch that fills the current ring slot submits what
+#       it holds before moving on, so bytes not yet on their way are never overwritten.
+#
+#==============================================================================================
+
+## One staged copy: `region` of `texture` from `offset` in the staging memory
+## (on Vulkan, ring slot `ring`; on Metal, the batch's own bytes).
+struct UploadEntry:
+    var texture: TextureState*
+    var region: Region
+    var offset: usize
+    var ring: usize
+
+## A batch of texture uploads on one device. `add` stages, `submit` sends what
+## is staged, and the batch records again; `finish` drops anything unsent. Main
+## thread only, like every GPU call; the zero value is finished.
+pub struct UploadBatch:
+    var device: DeviceState*?
+    var entries: UploadEntry[]
+    var count: usize
+    ## Metal: the staged bytes, `used` of them.
+    var staging: u8[]
+    var used: usize
+    ## How many submissions the batch has made.
+    var submissions: usize
+
+    ## A batch for `device`'s textures.
+    pub static func begin(device: Device) -> UploadBatch!:
+        try check_thread()
+        return UploadBatch(device = try device.checked())
+
+    ## Stage tightly packed, top-down `pixels` for `region` of `texture` (the
+    ## whole texture by default); `pixels` may be reused at once. The texture
+    ## stays alive until the batch is submitted.
+    pub mutating func add(texture: Texture, pixels: const u8[], region: Region? = none) -> !:
+        try check_thread()
+        let device = self.device else error(closed, "the upload batch is finished")
+        let state = try texture.checked()
+        if state.device != device:
+            error(wrong_device, "an upload batch writes textures of its own device")
+        let area = try state.check_region(region, pixels.length)
+        if (platform.windows or platform.linux) and device.backend == Backend.vulkan:
+            let native = (VulkanDevice*)device.native
+            if not vulkan_upload_fits(native, (u64)pixels.length):
+                # The ring moves on to a slot of its own: what is staged goes first.
+                try self.submit()
+                if (u64)pixels.length > vulkan_upload_slot_bytes:
+                    try backend_texture_upload(device, state.native, pixels, area)
+                    self.submissions += 1
+                    return
+            let place = try vulkan_upload_stage(native, pixels)
+            try self.record(state, area, place[1], place[0])
+            return
+        # Metal: the bytes join the batch's own staging.
+        let offset = (self.used + 15) // 16 * 16
+        try self.grow(offset + pixels.length)
+        memory.copy(self.staging[offset..<offset + pixels.length], pixels, pixels.length)
+        self.used = offset + pixels.length
+        try self.record(state, area, offset, 0)
+
+    ## How many copies are staged and not yet sent.
+    pub func pending() -> usize:
+        return self.count
+
+    ## How many submissions this batch has made so far.
+    pub func submitted() -> usize:
+        return self.submissions
+
+    ## Send every staged copy as one submission, without waiting; the batch
+    ## records again afterwards.
+    pub mutating func submit() -> !:
+        try check_thread()
+        let device = self.device else error(closed, "the upload batch is finished")
+        if self.count == 0:
+            return
+        defer self.release_textures()
+        try backend_upload_submit(device, self.entries[..<self.count], self.staging[..<self.used])
+        self.used = 0
+        self.submissions += 1
+
+    ## Drop anything unsent and let the batch go.
+    pub mutating func finish():
+        self.release_textures()
+        if self.entries.length > 0:
+            free(self.entries) in memory.heap
+        if self.staging.length > 0:
+            free(self.staging) in memory.heap
+        var no_entries: UploadEntry[]
+        var no_bytes: u8[]
+        self.entries = no_entries
+        self.staging = no_bytes
+        self.used = 0
+        self.device = none
+
+    mutating func record(state: TextureState*, area: Region, offset: usize, ring: usize) -> !:
+        if self.count == self.entries.length:
+            let grown = try alloc UploadEntry[self.entries.length * 2 + 64] in memory.heap
+            memory.copy(grown, self.entries, self.count)
+            if self.entries.length > 0:
+                free(self.entries) in memory.heap
+            self.entries = grown
+        state.references += 1
+        self.entries[self.count] = UploadEntry(texture = state, region = area, offset = offset, ring = ring)
+        self.count += 1
+
+    mutating func grow(bytes: usize) -> !:
+        if bytes <= self.staging.length:
+            return
+        var capacity = self.staging.length * 2 if self.staging.length > 0 else (usize)1 << 20
+        while capacity < bytes:
+            capacity *= 2
+        let grown = try alloc u8[capacity] in memory.heap
+        if self.used > 0:
+            memory.copy(grown[..<self.used], self.staging[..<self.used], self.used)
+        if self.staging.length > 0:
+            free(self.staging) in memory.heap
+        self.staging = grown
+
+    mutating func release_textures():
+        for index in 0..<self.count:
+            release_texture(self.entries[index].texture)
+        self.count = 0
+
+# mark: Dispatch ==============================================================================
+
+func backend_upload_submit(device: DeviceState*, entries: const UploadEntry[], staged: const u8[]) -> !:
+    if (platform.windows or platform.linux) and device.backend == Backend.vulkan:
+        try vulkan_upload_submit((VulkanDevice*)device.native, entries)
+        return
+    if platform.macos and platform.arm64:
+        if device.backend == Backend.metal:
+            try metal_upload_submit((MetalDevice*)device.native, entries, staged)
+            return
+    error(unsupported, "the GPU backend is not implemented")

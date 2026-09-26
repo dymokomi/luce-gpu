@@ -202,6 +202,7 @@ pub func main(arguments: str[]) -> i32!:
             error(failure.code, failure.message)
         try textures.pixels(device)
         try textures.batches(device)
+        try textures.upload_batches(device)
         try textures.programs(device)
         device.destroy()
         print("ok GPU device")
