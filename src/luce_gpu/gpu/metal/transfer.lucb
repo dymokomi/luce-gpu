@@ -73,6 +73,12 @@ func metal_read_wait(ticket: ReadTicket) -> !:
     if status != 4:
         error(execution_failed, "Metal command execution failed")
 
+## Whether a batch's command buffer has finished, completed or failed
+## (MTLCommandBufferStatus 4 or 5), without waiting.
+func metal_read_ready(ticket: ReadTicket) -> bool:
+    let command = ticket.command else return true
+    return metal_uint(command, metal_sel("status")) >= 4
+
 ## Give slot `index` back; a batch still on the GPU is waited for first, so the
 ## next one never shares its bytes.
 func metal_read_release(device: MetalDevice*, index: usize, ticket: ReadTicket, pending: bool):

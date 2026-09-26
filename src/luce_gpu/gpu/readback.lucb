@@ -134,6 +134,21 @@ pub struct ReadBatch:
         self.ticket = ReadTicket()
         try backend_read_wait(device, ticket)
 
+    ## Whether the submitted copies are done, without waiting: true once they
+    ## are (the batch is then complete, as after `wait`), false while the GPU
+    ## is still on them. What keeps an input path from ever stopping on the
+    ## GPU: poll once a frame instead of waiting.
+    pub mutating func ready() -> bool!:
+        if self.phase == 2:
+            return true
+        if self.phase != 1:
+            error(invalid_geometry, "submit a read batch before polling it")
+        let device = self.device else error(closed, "the read batch is finished")
+        if not (try backend_read_ready(device, self.ticket)):
+            return false
+        try self.wait()
+        return true
+
     ## `length` bytes of the slot from `offset`, once the batch is complete.
     pub func bytes(offset: usize, length: usize) -> const u8[]!:
         if self.phase != 2:
@@ -233,6 +248,16 @@ func backend_read_wait(device: DeviceState*, ticket: ReadTicket) -> !:
         if device.backend == Backend.metal:
             try metal_read_wait(ticket)
             return
+    error(unsupported, "the GPU backend is not implemented")
+
+func backend_read_ready(device: DeviceState*, ticket: ReadTicket) -> bool!:
+    if (platform.windows or platform.linux) and device.backend == Backend.vulkan:
+        let native = (VulkanDevice*)device.native
+        vulkan_poll(native)
+        return native.completed >= ticket.serial
+    if platform.macos and platform.arm64:
+        if device.backend == Backend.metal:
+            return metal_read_ready(ticket)
     error(unsupported, "the GPU backend is not implemented")
 
 func backend_read_release(device: DeviceState*, slot: usize, ticket: ReadTicket, pending: bool):
