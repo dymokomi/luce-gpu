@@ -18,9 +18,24 @@ pub struct Rect:
     ## The height in points.
     pub var height: f64
 
+## Frames begun so far, and how many are recording now: a frame's serial
+## tells whether two draws went into one frame, and a count above one means a
+## frame (a texture's, say) is recording inside another. Main thread only.
+var frames_begun: u64 = 0
+var frames_open: usize = 0
+
+## How many frames are recording now: more than one while a texture's frame
+## records inside a window's.
+pub func open_frames() -> usize:
+    return frames_open
+
 struct FrameState:
     var canvas: Canvas
     var size: window.Size
+    ## This frame's number among every frame begun, and whether it still
+    ## counts as open.
+    var serial: u64 = 0
+    var counted: bool = false
     # Presentation hooks are installed only by Surface.frame. Portable recording
     # and its ownership metadata therefore have no native backend dependency.
     var presentation: void*?
@@ -39,6 +54,9 @@ struct FrameState:
 
     mutating func close():
         self.ended = true
+        if self.counted:
+            self.counted = false
+            frames_open -= 1
         self.canvas.destroy()
         if let context = self.presentation:
             self.presentation = none
@@ -58,7 +76,9 @@ pub struct Frame:
     ## Begin a standalone frame recording commands for `size`.
     pub func init(size: window.Size) -> !:
         try check_frame_size(size)
-        let native = try new FrameState(canvas = Canvas(), size = size)
+        frames_begun += 1
+        let native = try new FrameState(canvas = Canvas(), size = size, serial = frames_begun, counted = true)
+        frames_open += 1
         let state = try interop.Reference[FrameState].adopt(native, frame_state_type)
         errdefer state.release()
         let lease = try state.lease()
@@ -124,6 +144,11 @@ pub struct RenderTarget:
     var lease: interop.Lease
     var rectangle: Rect
     var clipping: Clip
+
+    ## The number of the frame this target draws into: draws sharing it are
+    ## one frame's, recorded together and submitted when it presents.
+    pub func frame_serial() -> u64:
+        return self.frame.serial
 
     ## The target's extent in logical points and backing pixels.
     pub func size() -> window.Size!:

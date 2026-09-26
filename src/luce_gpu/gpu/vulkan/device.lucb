@@ -181,14 +181,17 @@ func vulkan_device_rank(physical: u64) -> u32:
         return 1
     return 2
 
-## The largest device-local heap as the budget, the image memory held as used.
+## The budget: a discrete GPU's largest device-local heap; an integrated
+## GPU's largest heap of any kind, since its textures live in system memory
+## (an APU's device-local heap is often a small carve-out, 512 MB, while its
+## images spill into the far larger host heap). The image memory held as used.
 func vulkan_memory_report(device: VulkanDevice*) -> DeviceMemory:
     vulkan_poll(device)
     var budget: u64 = 0
     for index in 0..<(usize)device.memory.memoryHeapCount:
         let heap = device.memory.memoryHeaps[index]
         # VK_MEMORY_HEAP_DEVICE_LOCAL_BIT
-        if (heap.flags & 1) != 0 and heap.size > budget:
+        if (device.integrated or (heap.flags & 1) != 0) and heap.size > budget:
             budget = heap.size
     return DeviceMemory(budget = budget, used = device.image_bytes, unified = device.integrated)
 

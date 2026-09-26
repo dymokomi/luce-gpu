@@ -24,6 +24,25 @@ func quad(color: gpu.Vertex) -> gpu.Vertex[6]:
     return [a, b, c, a, c, d]
 
 pub func contracts() -> !:
+    # Frames are numbered as they begin and counted while they record: two draws
+    # into one frame share its serial, and a frame inside another makes two open.
+    let open_before = gpu.open_frames()
+    var outer = try gpu.Frame(window.Size(width = 10.0, height = 10.0, pixel_width = 10.0, pixel_height = 10.0, scale = 1.0))
+    let outer_target = try outer.target()
+    let first = outer_target.value().frame_serial()
+    let again = try outer.target()
+    assert(again.value().frame_serial() == first and gpu.open_frames() == open_before + 1)
+    var inner = try gpu.Frame(window.Size(width = 10.0, height = 10.0, pixel_width = 10.0, pixel_height = 10.0, scale = 1.0))
+    let inner_target = try inner.target()
+    assert(inner_target.value().frame_serial() > first and gpu.open_frames() == open_before + 2)
+    inner_target.release()
+    inner.close()
+    inner.close()
+    assert(gpu.open_frames() == open_before + 1)
+    again.release()
+    outer_target.release()
+    outer.close()
+    assert(gpu.open_frames() == open_before)
     var frame = try gpu.Frame(window.Size(width = 100.0, height = 80.0, pixel_width = 200.0, pixel_height = 160.0, scale = 2.0))
     defer frame.close()
     let target = try frame.target()
