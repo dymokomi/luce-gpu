@@ -271,6 +271,17 @@ pub func batches(device: gpu.Device) -> !:
     try batch.submit()
     try batch.wait()
     assert((try batch.bytes(again, 4))[0] == 255)
+    # Polled rather than waited for: done at some point, then the same bytes.
+    try batch.reset()
+    let polled = (try batch.add(right, gpu.Region(3, 4, 1, 1))) else trap("a texel fits")
+    try batch.submit()
+    var polls = 0
+    while not (try batch.ready()):
+        polls += 1
+        assert(polls < 100000000)
+    assert(try batch.ready())
+    let texel = try batch.bytes(polled, 4)
+    assert(texel[0] == 3 and texel[1] == 4 and texel[2] == 100)
     # Three slots at most are held at once.
     var second = try gpu.ReadBatch.begin(device)
     var third = try gpu.ReadBatch.begin(device)
