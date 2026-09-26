@@ -209,14 +209,22 @@ struct VulkanStaging:
     var buffer: u64
     var block: u64
 
-func vulkan_staging(device: VulkanDevice*, bytes: usize, usage: u32) -> VulkanStaging!:
+## A buffer the CPU maps. One read back (`cached`) takes host-cached memory
+## where the device has it: uncached (write-combined) memory, the first
+## host-visible kind on most discrete and AMD drivers, reads back at a small
+## fraction of memory speed, which made every readback of a large document
+## crawl.
+func vulkan_staging(device: VulkanDevice*, bytes: usize, usage: u32, cached: bool = false) -> VulkanStaging!:
     var staging: VulkanStaging
     errdefer vulkan_staging_destroy(device, staging)
     var info = VkBufferCreateInfo(sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, size = (u64)bytes, usage = usage)
     try vulkan_check(vkCreateBuffer(device.device, &info, none, &staging.buffer), "a Vulkan staging buffer could not be created")
     var requirements: VkMemoryRequirements
     vkGetBufferMemoryRequirements(device.device, staging.buffer, &requirements)
-    staging.block = try vulkan_memory(device, requirements, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+    let plain = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+    let fast = plain | VK_MEMORY_PROPERTY_HOST_CACHED_BIT
+    let flags = fast if cached and vulkan_has_memory_type(device, requirements, fast) else plain
+    staging.block = try vulkan_memory(device, requirements, flags)
     try vulkan_check(vkBindBufferMemory(device.device, staging.buffer, staging.block, 0), "Vulkan staging memory could not be bound")
     return staging
 
@@ -251,7 +259,7 @@ func vulkan_texture_upload(device: VulkanDevice*, state: VulkanTexture*, pixels:
 ## Copy `region` back into `pixels`: the one texture operation that waits, for
 ## its own submission and so for every earlier one.
 func vulkan_texture_read(device: VulkanDevice*, state: VulkanTexture*, pixels: u8[], region: Region) -> !:
-    let staging = try vulkan_staging(device, pixels.length, VK_BUFFER_USAGE_TRANSFER_DST_BIT)
+    let staging = try vulkan_staging(device, pixels.length, VK_BUFFER_USAGE_TRANSFER_DST_BIT, cached = true)
     defer vulkan_staging_destroy(device, staging)
     let slot = try vulkan_begin(device)
     vulkan_transition(slot.command, state, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL)

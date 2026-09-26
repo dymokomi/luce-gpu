@@ -193,6 +193,13 @@ func vulkan_memory_type(device: VulkanDevice*, requirements: VkMemoryRequirement
             return (u32)index
     error(unavailable, "no compatible Vulkan memory type is available")
 
+## Whether a memory type has every property in `flags`.
+func vulkan_has_memory_type(device: VulkanDevice*, requirements: VkMemoryRequirements, flags: u32) -> bool:
+    for index in 0..<(usize)device.memory.memoryTypeCount:
+        if (requirements.memoryTypeBits & (1u32 << (u32)index)) != 0 and (device.memory.memoryTypes[index].propertyFlags & flags) == flags:
+            return true
+    return false
+
 func vulkan_allocate(device: VulkanDevice*, size: u64, type_index: u32) -> u64!:
     var info = VkMemoryAllocateInfo(sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, allocationSize = size, memoryTypeIndex = type_index)
     var block: u64 = 0
