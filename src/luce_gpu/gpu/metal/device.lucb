@@ -11,6 +11,8 @@ struct MetalDevice:
     var device: void*?
     var queue: void*?
     var drawing: MetalDrawing*?
+    # The readback ring; see metal/transfer.lucb.
+    var reads: MetalRingSlot[3]
 
 func metal_device_open() -> MetalDevice*!:
     let pool = objc_autoreleasePoolPush()
@@ -27,6 +29,7 @@ func metal_device_destroy(state: MetalDevice*):
     defer objc_autoreleasePoolPop(pool)
     if let drawing = state.drawing:
         metal_drawing_destroy(drawing)
+    metal_rings_destroy(state)
     if let queue = state.queue:
         metal_void(queue, metal_sel("release"))
     if let device = state.device:

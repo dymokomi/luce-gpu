@@ -27,16 +27,6 @@ func backend_texture_upload(device: DeviceState*, native: void*, pixels: const u
             return
     error(unsupported, "the GPU backend is not implemented")
 
-func backend_texture_read(device: DeviceState*, native: void*, pixels: u8[], region: Region) -> !:
-    if (platform.windows or platform.linux) and device.backend == Backend.vulkan:
-        try vulkan_texture_read((VulkanDevice*)device.native, (VulkanTexture*)native, pixels, region)
-        return
-    if platform.macos and platform.arm64:
-        if device.backend == Backend.metal:
-            try metal_texture_read((MetalDevice*)device.native, (MetalTexture*)native, pixels, region)
-            return
-    error(unsupported, "the GPU backend is not implemented")
-
 func backend_texture_render(device: DeviceState*, native: void*, canvas: Canvas, color: Color) -> !:
     if (platform.windows or platform.linux) and device.backend == Backend.vulkan:
         try vulkan_texture_render((VulkanDevice*)device.native, (VulkanTexture*)native, canvas, color)

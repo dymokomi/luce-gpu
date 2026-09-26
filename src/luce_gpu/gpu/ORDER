@@ -6,6 +6,7 @@ mask.lucb
 surface.lucb
 frame.lucb
 texture.lucb
+readback.lucb
 shader.lucb
 shaders.lucb
 backend.lucb
@@ -15,6 +16,7 @@ metal/objc.lucb
 metal/device.lucb
 metal/drawing.lucb
 metal/texture.lucb
+metal/transfer.lucb
 metal/surface.lucb
 vulkan/bindings.lucb
 vulkan/entry.lucb
@@ -23,6 +25,7 @@ vulkan/presentation/windows.lucb
 vulkan/presentation/x11.lucb
 vulkan/device.lucb
 vulkan/texture.lucb
+vulkan/transfer.lucb
 vulkan/shader.lucb
 vulkan/surface.lucb
 vulkan/pipeline.lucb

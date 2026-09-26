@@ -1,0 +1,20 @@
+#prisma 4.0
+def package "readbench" {
+    str owner = "dymokomi"
+    str version = "0.0.0"
+    str kind = "tool"
+    str language = "luce-base"
+    str entry = "bench.lucb"
+
+    def dependency "luce-gpu" {
+        str owner = "dymokomi"
+        str version = "^0.1.0"
+        str path = "../../.."
+    }
+
+    def dependency "luce-window" {
+        str owner = "dymokomi"
+        str version = "^0.1.0"
+        str path = "../../../../luce-window"
+    }
+}

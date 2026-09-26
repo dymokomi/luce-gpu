@@ -98,6 +98,10 @@ struct VulkanDevice:
     var depth_view: u64
     var depth_width: u32
     var depth_height: u32
+    # The staging rings; see vulkan/transfer.lucb.
+    var reads: VulkanRingSlot[3]
+    var uploads: VulkanRingSlot[4]
+    var upload_slot: usize
 
 func vulkan_check(result: i32, message: str) -> !:
     if result != VK_SUCCESS:

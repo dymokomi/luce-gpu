@@ -1,0 +1,59 @@
+## Readback and upload timings, phase by phase: for profiling a device's
+## transfers (LINUX, WINDOWS). Not a check: build and run it by hand.
+##   luc build   (in this directory), then run build/readbench
+import gpu
+import memory
+import time
+
+func milliseconds(first: u64, last: u64) -> f64:
+    return (f64)(last - first) / 1000000.0
+
+func fill(texture: gpu.Texture*, color: gpu.Color) -> !:
+    let frame = try texture.frame()
+    defer frame.release()
+    discard(try frame.value().present(color))
+
+pub func main(arguments: str[]) -> i32!:
+    discard(arguments)
+    var device = try gpu.Device.open()
+    defer device.destroy()
+    let count: usize = 64
+    var tiles = try alloc gpu.Texture[count] in memory.heap
+    defer free(tiles) in memory.heap
+    for index in 0..<count:
+        tiles[index] = try gpu.Texture.create(device, 256, 256, gpu.Format.rgba16_float)
+        try fill(&tiles[index], gpu.Color((f64)index / 64.0, 0.5, 0.25, 1.0))
+    let tile_bytes: usize = 256 * 256 * 8
+    let out = try alloc u8[count * tile_bytes] in memory.heap
+    defer free(out) in memory.heap
+    for round in 0..<(usize)3:
+        # The first batch makes and maps the ring's slot: the one allocation.
+        let t0 = time.now()
+        var batch = try gpu.ReadBatch.begin(device)
+        let t1 = time.now()
+        # One read per tile, each its own submission and wait.
+        for index in 0..<count:
+            try tiles[index].read(out[index * tile_bytes..<(index + 1) * tile_bytes])
+        let t2 = time.now()
+        # All tiles in one batch, side by side as one 16384-wide strip.
+        let strip = (try batch.reserve(count * tile_bytes)) else trap("a strip fits a slot")
+        for index in 0..<count:
+            try batch.copy(tiles[index], gpu.Region(0, 0, 256, 256), strip + index * 256 * 8, row_texels = (u32)(count * 256))
+        let t3 = time.now()
+        try batch.submit()
+        let t4 = time.now()
+        try batch.wait()
+        let t5 = time.now()
+        memory.copy(out, try batch.bytes(strip, count * tile_bytes), count * tile_bytes)
+        let t6 = time.now()
+        batch.finish()
+        # 64 tile uploads through the upload ring, then a read to wait for them.
+        for index in 0..<count:
+            try tiles[index].upload(out[index * tile_bytes..<(index + 1) * tile_bytes])
+        let t7 = time.now()
+        try tiles[0].read(out[..<tile_bytes])
+        let t8 = time.now()
+        print(f"round {round}: acquire {milliseconds(t0, t1)} ms | 64 single reads {milliseconds(t1, t2)} ms | batch record {milliseconds(t2, t3)} submit {milliseconds(t3, t4)} wait {milliseconds(t4, t5)} copy-out {milliseconds(t5, t6)} ms | 64 uploads {milliseconds(t6, t7)} ms, drain {milliseconds(t7, t8)} ms")
+    for index in 0..<count:
+        tiles[index].destroy()
+    return 0

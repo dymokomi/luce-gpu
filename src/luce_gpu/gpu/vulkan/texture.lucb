@@ -76,6 +76,7 @@ func vulkan_drawing_destroy(device: VulkanDevice*):
         device.placeholder = none
         vulkan_texture_destroy(device, placeholder)
     vulkan_depth_destroy(device)
+    vulkan_rings_destroy(device)
     vulkan_slots_destroy(device)
     for state in device.formats[..<device.format_count]:
         if state.overlay != 0: vkDestroyPipeline(device.device, state.overlay, none)
@@ -209,22 +210,15 @@ struct VulkanStaging:
     var buffer: u64
     var block: u64
 
-## A buffer the CPU maps. One read back (`cached`) takes host-cached memory
-## where the device has it: uncached (write-combined) memory, the first
-## host-visible kind on most discrete and AMD drivers, reads back at a small
-## fraction of memory speed, which made every readback of a large document
-## crawl.
-func vulkan_staging(device: VulkanDevice*, bytes: usize, usage: u32, cached: bool = false) -> VulkanStaging!:
+## A buffer the CPU maps, of its own: an upload too large for the ring.
+func vulkan_staging(device: VulkanDevice*, bytes: usize, usage: u32) -> VulkanStaging!:
     var staging: VulkanStaging
     errdefer vulkan_staging_destroy(device, staging)
     var info = VkBufferCreateInfo(sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, size = (u64)bytes, usage = usage)
     try vulkan_check(vkCreateBuffer(device.device, &info, none, &staging.buffer), "a Vulkan staging buffer could not be created")
     var requirements: VkMemoryRequirements
     vkGetBufferMemoryRequirements(device.device, staging.buffer, &requirements)
-    let plain = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
-    let fast = plain | VK_MEMORY_PROPERTY_HOST_CACHED_BIT
-    let flags = fast if cached and vulkan_has_memory_type(device, requirements, fast) else plain
-    staging.block = try vulkan_memory(device, requirements, flags)
+    staging.block = try vulkan_memory(device, requirements, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
     try vulkan_check(vkBindBufferMemory(device.device, staging.buffer, staging.block, 0), "Vulkan staging memory could not be bound")
     return staging
 
@@ -237,9 +231,27 @@ func vulkan_copy_region(region: Region) -> VkBufferImageCopy:
                              imageOffset = VkOffset3D(x = (i32)region.x, y = (i32)region.y, z = 0),
                              imageExtent = VkExtent3D(width = region.width, height = region.height, depth = 1))
 
-## Record the upload of `pixels` into `region` and submit it without waiting.
-## The staging buffer is freed when the submission completes.
+## Record the upload of `pixels` into `region` and submit it without waiting,
+## staged through the upload ring (or, when larger than a ring slot, a buffer of
+## its own freed when the submission completes).
 func vulkan_texture_upload(device: VulkanDevice*, state: VulkanTexture*, pixels: const u8[], region: Region) -> !:
+    if (u64)pixels.length <= vulkan_upload_slot_bytes:
+        try vulkan_drawing(device)
+        let ring = try vulkan_upload_room(device, (u64)pixels.length)
+        let base = ring.mapped else trap("a mapped Vulkan ring slot lost its mapping")
+        memory.copy(u8[]((u8*)base + (usize)ring.used, pixels.length), pixels, pixels.length)
+        let offset = ring.used
+        ring.used += (u64)pixels.length
+        let slot = try vulkan_begin(device)
+        vulkan_transition(slot.command, state, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
+        var copy = vulkan_copy_region(region)
+        copy.bufferOffset = offset
+        vkCmdCopyBufferToImage(slot.command, ring.buffer, state.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy)
+        vulkan_transition(slot.command, state, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+        let serial = try vulkan_end(device, slot)
+        state.last_use = serial
+        ring.serial = serial
+        return
     var staging = try vulkan_staging(device, pixels.length, VK_BUFFER_USAGE_TRANSFER_SRC_BIT)
     defer vulkan_staging_destroy(device, staging)
     var mapped: void*? = none
@@ -255,25 +267,6 @@ func vulkan_texture_upload(device: VulkanDevice*, state: VulkanTexture*, pixels:
     try vulkan_retire(slot, VulkanRetired(kind = vulkan_retired_buffer, handle = staging.buffer, allocation = VulkanAllocation(memory = staging.block)))
     staging = VulkanStaging()
     state.last_use = try vulkan_end(device, slot)
-
-## Copy `region` back into `pixels`: the one texture operation that waits, for
-## its own submission and so for every earlier one.
-func vulkan_texture_read(device: VulkanDevice*, state: VulkanTexture*, pixels: u8[], region: Region) -> !:
-    let staging = try vulkan_staging(device, pixels.length, VK_BUFFER_USAGE_TRANSFER_DST_BIT, cached = true)
-    defer vulkan_staging_destroy(device, staging)
-    let slot = try vulkan_begin(device)
-    vulkan_transition(slot.command, state, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL)
-    var copy = vulkan_copy_region(region)
-    vkCmdCopyImageToBuffer(slot.command, state.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging.buffer, 1, &copy)
-    vulkan_transition(slot.command, state, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
-    let serial = try vulkan_end(device, slot)
-    state.last_use = serial
-    try vulkan_wait(device, serial)
-    var mapped: void*? = none
-    try vulkan_check(vkMapMemory(device.device, staging.block, 0, (u64)pixels.length, 0, &mapped), "Vulkan readback memory could not be mapped")
-    let source = mapped else error(failed, "Vulkan returned an empty memory mapping")
-    memory.copy(pixels, u8[]((u8*)source, pixels.length), pixels.length)
-    vkUnmapMemory(device.device, staging.block)
 
 ## Destroy a framebuffer this call still owns; zero once it has been retired.
 func vulkan_framebuffer_release(device: VulkanDevice*, framebuffer: u64):

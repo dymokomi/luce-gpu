@@ -1,0 +1,128 @@
+#==============================================================================================
+#
+#   transfer - Vulkan staging rings for uploads and readbacks
+#
+#   DESCRIPTION:
+#       Host memory for moving pixels is allocated once per device and mapped for good, then
+#       reused: `vkAllocateMemory` per transfer is slow on the drivers that matter (Windows,
+#       RADV) and counted against a small allocation limit.
+#       - Readback: a few slots, each held whole by one read batch. Host-cached memory where
+#         the device has it; uncached memory reads back at a small fraction of memory speed.
+#       - Upload: a few slots filled front to back by consecutive uploads. Moving on to a slot
+#         waits for the newest submission that used it, so the ring never overwrites bytes
+#         still on their way to the GPU. An upload larger than a slot stages on its own.
+#
+#==============================================================================================
+
+## One persistently mapped buffer of a ring.
+struct VulkanRingSlot:
+    var buffer: u64
+    var memory: u64
+    var mapped: void*?
+    var size: u64
+    ## Upload: the bytes filled so far.
+    var used: u64
+    ## The newest submission that uses the slot's bytes.
+    var serial: u64
+    ## Readback: held by a batch.
+    var busy: bool
+
+let vulkan_read_slot_count: usize = 3
+let vulkan_read_slot_bytes: u64 = 32u64 << 20
+let vulkan_upload_slot_count: usize = 4
+let vulkan_upload_slot_bytes: u64 = 8u64 << 20
+
+## A mapped buffer of `size` bytes for `usage`, host-cached when `cached` and the
+## device has such memory.
+func vulkan_ring_slot_create(device: VulkanDevice*, size: u64, usage: u32, cached: bool) -> VulkanRingSlot!:
+    var slot = VulkanRingSlot(size = size)
+    errdefer vulkan_ring_slot_destroy(device, &slot)
+    var info = VkBufferCreateInfo(sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, size = size, usage = usage)
+    try vulkan_check(vkCreateBuffer(device.device, &info, none, &slot.buffer), "a Vulkan transfer buffer could not be created")
+    var requirements: VkMemoryRequirements
+    vkGetBufferMemoryRequirements(device.device, slot.buffer, &requirements)
+    let plain = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+    let fast = plain | VK_MEMORY_PROPERTY_HOST_CACHED_BIT
+    let flags = fast if cached and vulkan_has_memory_type(device, requirements, fast) else plain
+    slot.memory = try vulkan_memory(device, requirements, flags)
+    try vulkan_check(vkBindBufferMemory(device.device, slot.buffer, slot.memory, 0), "Vulkan transfer memory could not be bound")
+    try vulkan_check(vkMapMemory(device.device, slot.memory, 0, size, 0, &slot.mapped), "Vulkan transfer memory could not be mapped")
+    if slot.mapped == none:
+        error(failed, "Vulkan returned an empty memory mapping")
+    return slot
+
+func vulkan_ring_slot_destroy(device: VulkanDevice*, slot: VulkanRingSlot*):
+    if slot.mapped != none:
+        vkUnmapMemory(device.device, slot.memory)
+    if slot.buffer != 0: vkDestroyBuffer(device.device, slot.buffer, none)
+    if slot.memory != 0: vkFreeMemory(device.device, slot.memory, none)
+    *slot = VulkanRingSlot()
+
+## Free both rings; the device is idle.
+func vulkan_rings_destroy(device: VulkanDevice*):
+    for index in 0..<vulkan_read_slot_count:
+        vulkan_ring_slot_destroy(device, &device.reads[index])
+    for index in 0..<vulkan_upload_slot_count:
+        vulkan_ring_slot_destroy(device, &device.uploads[index])
+    device.upload_slot = 0
+
+# mark: Readback ==============================================================================
+
+## A free readback slot, made on first use; its last batch's work has finished.
+func vulkan_read_acquire(device: VulkanDevice*) -> ReadSlot!:
+    try vulkan_drawing(device)
+    for index in 0..<vulkan_read_slot_count:
+        let slot = &device.reads[index]
+        if slot.busy:
+            continue
+        if slot.buffer == 0:
+            *slot = try vulkan_ring_slot_create(device, vulkan_read_slot_bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true)
+        try vulkan_wait(device, slot.serial)
+        slot.busy = true
+        let data = slot.mapped else trap("a mapped Vulkan ring slot lost its mapping")
+        return ReadSlot(index = index, data = (u8*)data, capacity = (usize)slot.size)
+    error(failed, "every Vulkan readback slot is held; finish a read batch first")
+
+## Record every copy of a batch into readback slot `index` and submit them as one.
+func vulkan_read_submit(device: VulkanDevice*, index: usize, entries: const ReadEntry[]) -> ReadTicket!:
+    let ring = &device.reads[index]
+    let slot = try vulkan_begin(device)
+    for entry in entries:
+        let texture = (VulkanTexture*)entry.texture.native
+        vulkan_transition(slot.command, texture, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL)
+        var copy = vulkan_copy_region(entry.region)
+        copy.bufferOffset = (u64)entry.offset
+        copy.bufferRowLength = entry.row_texels
+        vkCmdCopyImageToBuffer(slot.command, texture.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, ring.buffer, 1, &copy)
+    # Back to sampling, once per image however many regions it gave.
+    for entry in entries:
+        vulkan_transition(slot.command, (VulkanTexture*)entry.texture.native, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+    let serial = try vulkan_end(device, slot)
+    for entry in entries:
+        ((VulkanTexture*)entry.texture.native).last_use = serial
+    ring.serial = serial
+    return ReadTicket(serial = serial)
+
+## Give readback slot `index` back. Work still in flight on it is waited for
+## by the next batch that takes the slot.
+func vulkan_read_release(device: VulkanDevice*, index: usize):
+    device.reads[index].busy = false
+
+# mark: Upload ================================================================================
+
+## Room for `bytes` in the upload ring: the slot and the offset in it. Moving on
+## to the next slot waits for the newest submission that used it.
+func vulkan_upload_room(device: VulkanDevice*, bytes: u64) -> VulkanRingSlot*!:
+    var slot = &device.uploads[device.upload_slot]
+    let start = (slot.used + 15) // 16 * 16
+    if slot.buffer != 0 and start + bytes <= slot.size:
+        slot.used = start
+        return slot
+    if slot.buffer != 0:
+        device.upload_slot = (device.upload_slot + 1) % vulkan_upload_slot_count
+        slot = &device.uploads[device.upload_slot]
+    if slot.buffer == 0:
+        *slot = try vulkan_ring_slot_create(device, vulkan_upload_slot_bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, false)
+    try vulkan_wait(device, slot.serial)
+    slot.used = 0
+    return slot

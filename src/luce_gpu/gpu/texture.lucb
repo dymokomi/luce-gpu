@@ -54,7 +54,7 @@ pub struct Texture:
     pub func read(pixels: u8[], region: Region? = none) -> !:
         let state = try self.checked()
         let area = try state.check_region(region, pixels.length)
-        try backend_texture_read(state.device, state.native, pixels, area)
+        try read_texture(state, pixels, area)
 
     ## Begin one recording frame whose target is this texture; its points equal
     ## texels. `present` clears the texture to the given color and draws, ordered

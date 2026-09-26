@@ -1,0 +1,88 @@
+#==============================================================================================
+#
+#   transfer - The Metal readback ring
+#
+#   DESCRIPTION:
+#       Shared-storage buffers made once per device and kept: on unified memory their contents
+#       are the host's view of the bytes, with no copy across a bus. A read batch holds one
+#       slot, blits every region into it in one command buffer, and waits for that once.
+#
+#==============================================================================================
+
+## One shared buffer of the ring, and the command buffer still writing it.
+struct MetalRingSlot:
+    var buffer: void*?
+    var data: void*?
+    var size: u64
+    var busy: bool
+
+let metal_read_slot_count: usize = 3
+let metal_read_slot_bytes: u64 = 32u64 << 20
+
+## A free readback slot, made on first use.
+func metal_read_acquire(device: MetalDevice*) -> ReadSlot!:
+    for index in 0..<metal_read_slot_count:
+        let slot = &device.reads[index]
+        if slot.busy:
+            continue
+        if slot.buffer == none:
+            let pool = objc_autoreleasePoolPush()
+            defer objc_autoreleasePoolPop(pool)
+            # MTLResourceStorageModeShared: the CPU reads the buffer in place.
+            let buffer = metal_new_buffer(metal_required(device.device), metal_sel("newBufferWithLength:options:"), metal_read_slot_bytes, 0) else error(failed, "could not allocate GPU readback memory")
+            slot.buffer = buffer
+            slot.data = metal_ptr(buffer, metal_sel("contents"))
+            slot.size = metal_read_slot_bytes
+            if slot.data == none:
+                error(failed, "Metal readback storage is inaccessible")
+        slot.busy = true
+        let data = slot.data else trap("a Metal ring slot lost its contents")
+        return ReadSlot(index = index, data = (u8*)data, capacity = (usize)slot.size)
+    error(failed, "every Metal readback slot is held; finish a read batch first")
+
+## Blit every region of a batch into slot `index` in one command buffer, and
+## commit it; the ticket holds the command buffer until it is waited for.
+func metal_read_submit(device: MetalDevice*, index: usize, entries: const ReadEntry[]) -> ReadTicket!:
+    let pool = objc_autoreleasePoolPush()
+    defer objc_autoreleasePoolPop(pool)
+    let ring = &device.reads[index]
+    let command = metal_ptr(metal_required(device.queue), metal_sel("commandBuffer")) else error(failed, "could not create a Metal command buffer")
+    let blit = metal_ptr(command, metal_sel("blitCommandEncoder")) else error(failed, "could not create a Metal blit encoder")
+    for entry in entries:
+        let texture = (MetalTexture*)entry.texture.native
+        let texel = (u64)texel_bytes(texture.format)
+        let row = (u64)(entry.row_texels if entry.row_texels > 0 else entry.region.width) * texel
+        metal_copy_from_texture(blit, metal_sel("copyFromTexture:sourceSlice:sourceLevel:sourceOrigin:sourceSize:toBuffer:destinationOffset:destinationBytesPerRow:destinationBytesPerImage:"),
+                                metal_required(texture.texture), 0, 0, LuceGpuMetalOrigin((u64)entry.region.x, (u64)entry.region.y, 0),
+                                LuceGpuMetalExtent((u64)entry.region.width, (u64)entry.region.height, 1),
+                                metal_required(ring.buffer), (u64)entry.offset, row, row * (u64)entry.region.height)
+    metal_void(blit, metal_sel("endEncoding"))
+    # Kept past the pool: the wait needs it.
+    metal_void(command, metal_sel("retain"))
+    metal_void(command, metal_sel("commit"))
+    return ReadTicket(command = command)
+
+## Wait for a batch's command buffer and let it go, reporting execution failure.
+func metal_read_wait(ticket: ReadTicket) -> !:
+    let command = ticket.command else return
+    let pool = objc_autoreleasePoolPush()
+    defer objc_autoreleasePoolPop(pool)
+    metal_void(command, metal_sel("waitUntilCompleted"))
+    let status = metal_uint(command, metal_sel("status"))
+    metal_void(command, metal_sel("release"))
+    if status != 4:
+        error(execution_failed, "Metal command execution failed")
+
+## Give slot `index` back; a batch still on the GPU is waited for first, so the
+## next one never shares its bytes.
+func metal_read_release(device: MetalDevice*, index: usize, ticket: ReadTicket, pending: bool):
+    if pending:
+        metal_read_wait(ticket) catch failure:
+            discard(failure)
+    device.reads[index].busy = false
+
+func metal_rings_destroy(device: MetalDevice*):
+    for index in 0..<metal_read_slot_count:
+        if let buffer = device.reads[index].buffer:
+            metal_void(buffer, metal_sel("release"))
+        device.reads[index] = MetalRingSlot()

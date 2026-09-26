@@ -1,0 +1,245 @@
+#==============================================================================================
+#
+#   readback - Many texture reads, one submission, one wait
+#
+#   DESCRIPTION:
+#       A read batch holds one slot of the device's readback ring: host memory allocated once,
+#       mapped for good, and reused. Copies of texture regions are recorded into it at chosen
+#       offsets and row pitches (tiles side by side land as one scanline-contiguous strip), the
+#       batch is submitted once, and after one wait the caller reads the bytes in place. The
+#       ring has a few slots, so one batch can be on the GPU while the caller works through
+#       another. `Texture.read` is a batch of one, split into slot-sized runs of rows.
+#
+#       A per-read staging allocation and a full stop per tile made large readbacks crawl on
+#       Vulkan drivers (docs: luced-2d OPEN-SOURCE-STUDY.md §1); the ring removes both.
+#
+#==============================================================================================
+
+## Where a batch's offsets start: every backend accepts copies at this alignment.
+let read_alignment: usize = 256
+
+## One recorded copy: `region` of `texture` into the slot at `offset`, rows
+## `row_texels` apart (0 for tightly packed).
+struct ReadEntry:
+    var texture: TextureState*
+    var region: Region
+    var offset: usize
+    var row_texels: u32
+
+## A slot of the readback ring, held by one batch.
+struct ReadSlot:
+    var index: usize
+    var data: u8*?
+    var capacity: usize
+
+## What a submitted batch waits on: a Vulkan serial or a Metal command buffer.
+struct ReadTicket:
+    var serial: u64
+    var command: void*?
+
+## A batch of texture reads on one device. Record with `add` or `reserve` and
+## `copy`, `submit`, `wait`, then read `bytes`; `reset` records again into the
+## same slot, and `finish` gives the slot back. Main thread only, like every GPU
+## call; the zero value is finished.
+pub struct ReadBatch:
+    var device: DeviceState*?
+    var slot: ReadSlot
+    var used: usize
+    var entries: ReadEntry[]
+    var count: usize
+    var ticket: ReadTicket
+    ## 0 recording, 1 submitted, 2 complete.
+    var phase: u8
+
+    ## A batch holding a free slot of `device`'s readback ring.
+    pub static func begin(device: Device) -> ReadBatch!:
+        return try read_batch_open(try device.checked())
+
+    ## The bytes a batch can hold.
+    pub func capacity() -> usize:
+        return self.slot.capacity
+
+    ## The bytes left, from the next aligned offset.
+    pub func room() -> usize:
+        let next = align_read(self.used)
+        return self.slot.capacity - next if next < self.slot.capacity else 0
+
+    ## `bytes` of the slot for the caller's copies, at an aligned offset; none
+    ## when they do not fit.
+    pub mutating func reserve(bytes: usize) -> usize?!:
+        try self.recording()
+        let offset = align_read(self.used)
+        if bytes > self.slot.capacity or offset > self.slot.capacity - bytes:
+            return none
+        self.used = offset + bytes
+        return offset
+
+    ## Record a copy of `region` of `texture` into the slot at `offset`, its
+    ## rows `row_texels` texels apart (0: tightly packed). The texture stays
+    ## alive until the batch is submitted; the bytes must lie in a reservation.
+    pub mutating func copy(texture: Texture, region: Region, offset: usize, row_texels: u32 = 0) -> !:
+        try self.recording()
+        let state = try texture.checked()
+        let device = self.device else error(closed, "the read batch is finished")
+        if state.device != device:
+            error(wrong_device, "a read batch reads textures of its own device")
+        if region.width == 0 or region.height == 0 or region.x > state.width - region.width or region.y > state.height - region.height:
+            error(invalid_geometry, "a texture region must lie inside the texture and be non-empty")
+        let texel = texel_bytes(state.format)
+        let row = (usize)(row_texels if row_texels > 0 else region.width)
+        if row < (usize)region.width or offset % texel != 0:
+            error(invalid_geometry, "a read's rows are at least its width apart, at an offset of whole texels")
+        let span = ((usize)region.height - 1) * row * texel + (usize)region.width * texel
+        if offset > self.slot.capacity or span > self.slot.capacity - offset:
+            error(invalid_pixels, "a read must fit the batch")
+        if self.count == self.entries.length:
+            let grown = try alloc ReadEntry[self.entries.length * 2 + 64] in memory.heap
+            memory.copy(grown, self.entries, self.count)
+            if self.entries.length > 0:
+                free(self.entries) in memory.heap
+            self.entries = grown
+        state.references += 1
+        self.entries[self.count] = ReadEntry(texture = state, region = region, offset = offset, row_texels = row_texels)
+        self.count += 1
+
+    ## Reserve room for `region` of `texture`, tightly packed, and record its
+    ## copy there: its offset, or none when the batch is full.
+    pub mutating func add(texture: Texture, region: Region) -> usize?!:
+        let state = try texture.checked()
+        let offset = (try self.reserve((usize)region.width * (usize)region.height * texel_bytes(state.format))) else return none
+        try self.copy(texture, region, offset)
+        return offset
+
+    ## How many copies are recorded.
+    pub func copies() -> usize:
+        return self.count
+
+    ## Submit every recorded copy as one submission, without waiting.
+    pub mutating func submit() -> !:
+        try self.recording()
+        let device = self.device else error(closed, "the read batch is finished")
+        defer self.release_textures()
+        self.ticket = try backend_read_submit(device, self.slot.index, self.entries[..<self.count])
+        self.phase = 1
+
+    ## Wait for the submitted copies; after this, `bytes` reads them.
+    pub mutating func wait() -> !:
+        if self.phase == 2:
+            return
+        if self.phase != 1:
+            error(invalid_geometry, "submit a read batch before waiting for it")
+        let device = self.device else error(closed, "the read batch is finished")
+        self.phase = 2
+        let ticket = self.ticket
+        self.ticket = ReadTicket()
+        try backend_read_wait(device, ticket)
+
+    ## `length` bytes of the slot from `offset`, once the batch is complete.
+    pub func bytes(offset: usize, length: usize) -> const u8[]!:
+        if self.phase != 2:
+            error(invalid_geometry, "a read batch's bytes are there once it has been waited for")
+        if offset > self.slot.capacity or length > self.slot.capacity - offset:
+            error(invalid_pixels, "a view must lie inside the batch")
+        let data = self.slot.data else error(closed, "the read batch is finished")
+        return u8[](data + offset, length)
+
+    ## Record again into the same slot; a submitted batch is waited for first.
+    pub mutating func reset() -> !:
+        if self.phase == 1:
+            try self.wait()
+        self.release_textures()
+        self.used = 0
+        self.phase = 0
+
+    ## Give the slot back to the ring (waiting for a submitted batch).
+    pub mutating func finish():
+        let device = self.device else return
+        self.device = none
+        self.release_textures()
+        backend_read_release(device, self.slot.index, self.ticket, self.phase == 1)
+        self.ticket = ReadTicket()
+        if self.entries.length > 0:
+            free(self.entries) in memory.heap
+        var none_left: ReadEntry[]
+        self.entries = none_left
+        self.phase = 0
+
+    func recording() -> !:
+        try check_thread()
+        if self.device == none:
+            error(closed, "the read batch is finished")
+        if self.phase != 0:
+            error(invalid_geometry, "a submitted read batch records again after reset")
+
+    mutating func release_textures():
+        for index in 0..<self.count:
+            release_texture(self.entries[index].texture)
+        self.count = 0
+
+func align_read(offset: usize) -> usize:
+    return (offset + read_alignment - 1) // read_alignment * read_alignment
+
+func read_batch_open(device: DeviceState*) -> ReadBatch!:
+    let slot = try backend_read_acquire(device)
+    return ReadBatch(device = device, slot = slot)
+
+## `Texture.read` through the ring: runs of whole rows, each as large as a slot
+## holds, copied out after one wait apiece.
+func read_texture(state: TextureState*, pixels: u8[], area: Region) -> !:
+    var batch = try read_batch_open(state.device)
+    defer batch.finish()
+    let row = (usize)area.width * texel_bytes(state.format)
+    let rows_per = batch.capacity() // row
+    if rows_per == 0:
+        error(invalid_pixels, "a texture row is larger than a read batch")
+    let texture = Texture(state = state)
+    var done: u32 = 0
+    while done < area.height:
+        let rows = (u32)min_rows(rows_per, (usize)(area.height - done))
+        try batch.copy(texture, Region(area.x, area.y + done, area.width, rows), 0)
+        try batch.submit()
+        try batch.wait()
+        let length = (usize)rows * row
+        memory.copy(pixels[(usize)done * row..<(usize)done * row + length], try batch.bytes(0, length), length)
+        try batch.reset()
+        done += rows
+
+func min_rows(a: usize, b: usize) -> usize:
+    return a if a < b else b
+
+# mark: Dispatch ==============================================================================
+
+func backend_read_acquire(device: DeviceState*) -> ReadSlot!:
+    if (platform.windows or platform.linux) and device.backend == Backend.vulkan:
+        return try vulkan_read_acquire((VulkanDevice*)device.native)
+    if platform.macos and platform.arm64:
+        if device.backend == Backend.metal:
+            return try metal_read_acquire((MetalDevice*)device.native)
+    error(unsupported, "the GPU backend is not implemented")
+
+func backend_read_submit(device: DeviceState*, slot: usize, entries: const ReadEntry[]) -> ReadTicket!:
+    if (platform.windows or platform.linux) and device.backend == Backend.vulkan:
+        return try vulkan_read_submit((VulkanDevice*)device.native, slot, entries)
+    if platform.macos and platform.arm64:
+        if device.backend == Backend.metal:
+            return try metal_read_submit((MetalDevice*)device.native, slot, entries)
+    error(unsupported, "the GPU backend is not implemented")
+
+func backend_read_wait(device: DeviceState*, ticket: ReadTicket) -> !:
+    if (platform.windows or platform.linux) and device.backend == Backend.vulkan:
+        try vulkan_wait((VulkanDevice*)device.native, ticket.serial)
+        return
+    if platform.macos and platform.arm64:
+        if device.backend == Backend.metal:
+            try metal_read_wait(ticket)
+            return
+    error(unsupported, "the GPU backend is not implemented")
+
+func backend_read_release(device: DeviceState*, slot: usize, ticket: ReadTicket, pending: bool):
+    if (platform.windows or platform.linux) and device.backend == Backend.vulkan:
+        vulkan_read_release((VulkanDevice*)device.native, slot)
+        return
+    if platform.macos and platform.arm64:
+        if device.backend == Backend.metal:
+            metal_read_release((MetalDevice*)device.native, slot, ticket, pending)
+            return

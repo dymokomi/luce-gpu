@@ -15,6 +15,7 @@ pub func main(arguments: str[]) -> i32!:
         error(failure.code, failure.message)
     defer device.destroy()
     try ordering(device)
+    try batched_reads(device)
     try stress(device, 20000, 256)
     # 1536 live tiles are 768 MiB: several pages, filled, emptied and freed.
     try stress(device, 6000, 1536)
@@ -82,3 +83,37 @@ func stress(device: gpu.Device, count: usize, window: usize) -> !:
     if window * 512 > 256 * 1024:
         assert(peak > baseline)
     assert(after == baseline)
+
+## A read batch on Vulkan: two tiles side by side in one strip at a row pitch,
+## read with one submission; then uploads through the ring, many more than it
+## holds at once, each read back as uploaded.
+func batched_reads(device: gpu.Device) -> !:
+    var tiles: gpu.Texture[2] = [try gpu.Texture.create(device, 256, 256, gpu.Format.rgba16_float), try gpu.Texture.create(device, 256, 256, gpu.Format.rgba16_float)]
+    defer tiles[0].destroy()
+    defer tiles[1].destroy()
+    try fill(&tiles[0], gpu.Color(1.0, 0.0, 0.0, 1.0))
+    try fill(&tiles[1], gpu.Color(0.0, 1.0, 0.0, 1.0))
+    var batch = try gpu.ReadBatch.begin(device)
+    defer batch.finish()
+    let strip = (try batch.reserve(512 * 256 * 8)) else trap("a strip fits")
+    try batch.copy(tiles[0], gpu.Region(0, 0, 256, 256), strip, row_texels = 512)
+    try batch.copy(tiles[1], gpu.Region(0, 0, 256, 256), strip + 256 * 8, row_texels = 512)
+    try batch.submit()
+    try batch.wait()
+    let bytes = try batch.bytes(strip, 512 * 256 * 8)
+    # Half-float 1.0 is 0x3c00: red on the left, green on the right, every row.
+    for y in [(usize)0, 100, 255]:
+        assert(bytes[(y * 512 + 5) * 8 + 1] == 0x3c and bytes[(y * 512 + 5) * 8 + 3] == 0)
+        assert(bytes[(y * 512 + 300) * 8 + 1] == 0 and bytes[(y * 512 + 300) * 8 + 3] == 0x3c)
+    var texels: u8[1024]
+    var back: u8[1024]
+    var target = try gpu.Texture.create(device, 16, 16, gpu.Format.rgba8_linear)
+    defer target.destroy()
+    for round in 0..<(usize)300:
+        for index in 0..<(usize)1024:
+            texels[index] = (u8)((index + round) % 256)
+        try target.upload(texels)
+        if round % 50 == 49:
+            try target.read(back)
+            for index in 0..<(usize)1024:
+                assert(back[index] == (u8)((index + round) % 256))

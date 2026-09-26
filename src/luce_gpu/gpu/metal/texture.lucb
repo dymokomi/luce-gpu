@@ -3,9 +3,8 @@
 #   texture - Metal textures, uploads, readback and offscreen passes
 #
 #   DESCRIPTION:
-#       Private-storage Metal textures. Uploads and readbacks go through a blit on the device's
-#       queue and wait for it, so they are ordered after earlier submissions on any storage
-#       mode. An offscreen pass renders a canvas into the texture and waits for completion.
+#       Private-storage Metal textures. Uploads go through a blit on the device's queue, ordered
+#       after earlier submissions on any storage mode; readbacks are metal/transfer.lucb's. An offscreen pass renders a canvas into the texture and waits for completion.
 #
 #==============================================================================================
 
@@ -82,22 +81,6 @@ func metal_texture_upload(device: MetalDevice*, state: MetalTexture*, pixels: co
     metal_void(blit, metal_sel("endEncoding"))
     # The bytes were copied into the staging buffer, which the command buffer keeps.
     metal_submit(command)
-
-func metal_texture_read(device: MetalDevice*, state: MetalTexture*, pixels: u8[], region: Region) -> !:
-    let pool = objc_autoreleasePoolPush()
-    defer objc_autoreleasePoolPop(pool)
-    let row = (u64)region.width * (u64)texel_bytes(state.format)
-    let staging = metal_new_buffer(metal_required(device.device), metal_sel("newBufferWithLength:options:"), (u64)pixels.length, 0) else error(failed, "could not stage GPU texture readback")
-    defer metal_void(staging, metal_sel("release"))
-    let command = metal_ptr(metal_required(device.queue), metal_sel("commandBuffer")) else error(failed, "could not create a Metal command buffer")
-    let blit = metal_ptr(command, metal_sel("blitCommandEncoder")) else error(failed, "could not create a Metal blit encoder")
-    metal_copy_from_texture(blit, metal_sel("copyFromTexture:sourceSlice:sourceLevel:sourceOrigin:sourceSize:toBuffer:destinationOffset:destinationBytesPerRow:destinationBytesPerImage:"),
-                            metal_required(state.texture), 0, 0, LuceGpuMetalOrigin((u64)region.x, (u64)region.y, 0), LuceGpuMetalExtent((u64)region.width, (u64)region.height, 1),
-                            staging, 0, row, row * (u64)region.height)
-    metal_void(blit, metal_sel("endEncoding"))
-    try metal_complete(command)
-    let contents = metal_ptr(staging, metal_sel("contents")) else error(failed, "Metal readback storage is inaccessible")
-    memory.copy(pixels, u8[]((u8*)contents, pixels.length), pixels.length)
 
 func metal_texture_render(device: MetalDevice*, state: MetalTexture*, canvas: Canvas, color: Color) -> !:
     let pool = objc_autoreleasePoolPush()

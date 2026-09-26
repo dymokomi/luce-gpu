@@ -159,7 +159,9 @@ The files under `src/luce_gpu/gpu/` share one standard module scope:
 | `metal/objc.lucb` | Exact typed system ABI declarations, including native aggregates. |
 | `metal/device.lucb` | Metal device and queue creation and release. |
 | `metal/drawing.lucb` | The vertex library, the built-in fill pipeline per color format, client libraries and pipelines, samplers, depth state and the shared render pass. |
-| `metal/texture.lucb` | Private textures, blit uploads and readbacks, offscreen passes. |
+| `readback.lucb` | Read batches over the readback ring, and `Texture.read` on them. |
+| `metal/texture.lucb` | Private textures, blit uploads, offscreen passes. |
+| `metal/transfer.lucb`, `vulkan/transfer.lucb` | The staging rings: readback slots (and Vulkan's upload slots), allocated once and mapped for good. |
 | `metal/surface.lucb` | CAMetalLayer, sRGB color space, drawable sizing, presentation, completion, and teardown. |
 | `vulkan/*` | The same contract on Vulkan: `device`, `texture` (images, samplers, transfers), `pipeline` (passes and pipelines per format), `shader` (client modules and their per-format pipelines), `render` (uploads, descriptors, encoding), `surface` (swapchain). |
 
@@ -267,6 +269,22 @@ ordered after earlier submissions; `upload` does not wait for its copy (the byte
 may be reused at once), and `read` waits, so `read` after a frame sees that
 frame. Pixel lengths must equal the region's texels times `texel_bytes(format)`,
 or `invalid_pixels` is returned.
+
+Transfers go through host memory each device allocates once, keeps mapped and
+reuses (a readback ring of three 32 MiB slots, host-cached where the device has
+it; on Vulkan an upload ring of four 8 MiB slots too): no allocation per read or
+upload. `ReadBatch.begin(device)` holds one readback slot for many reads at a
+time. `reserve(bytes)` hands out an aligned offset (none when the batch is
+full), `copy(texture, region, offset, row_texels?)` records a copy there with
+rows `row_texels` apart, so tiles side by side land as one scanline-contiguous
+strip, and `add(texture, region)` does both, tightly packed. `submit()` sends
+every copy as one submission without waiting; `wait()` waits once; then
+`bytes(offset, length)` views the result in place until `reset()` records again
+into the slot or `finish()` gives it back. A batch keeps the textures it copies
+from alive until it is submitted. At most three batches are held at once per
+device, so one can be on the GPU while the caller works through another.
+`read` is a batch of one, split into runs of rows when a region is larger than a
+slot. `tests/programs/readbench` times each phase on a device.
 
 `texture.frame()` begins a recording frame whose target is the texture (points
 equal texels). Its `present(color)` clears to `color` — alpha included — draws

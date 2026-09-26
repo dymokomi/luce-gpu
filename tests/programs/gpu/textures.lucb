@@ -222,3 +222,92 @@ pub func programs(device: gpu.Device) -> !:
         rejected = true
         recover gpu.Pipeline())
     assert(rejected)
+
+## A read batch: copies of many regions at chosen offsets and row pitches, one
+## submission and one wait, views of the bytes in place; a full batch refuses
+## more, a texture destroyed after its copy is recorded still reads, the ring's
+## slots run out only while held, and a read larger than a slot is split.
+pub func batches(device: gpu.Device) -> !:
+    var left = try gpu.Texture.create(device, 256, 256, gpu.Format.rgba8_linear)
+    var right = try gpu.Texture.create(device, 256, 256, gpu.Format.rgba8_linear)
+    defer right.destroy()
+    let texels = try alloc u8[256 * 256 * 4] in memory.heap
+    defer free(texels) in memory.heap
+    for side in 0..<(usize)2:
+        for y in 0..<(usize)256:
+            for x in 0..<(usize)256:
+                let at = (y * 256 + x) * 4
+                texels[at] = (u8)x
+                texels[at + 1] = (u8)y
+                texels[at + 2] = (u8)(side * 100)
+                texels[at + 3] = 255
+        try (left if side == 0 else right).upload(texels)
+    var batch = try gpu.ReadBatch.begin(device)
+    defer batch.finish()
+    assert(batch.capacity() >= 1 << 20)
+    # Both tiles side by side: one strip 512 texels wide.
+    let strip = (try batch.reserve(512 * 256 * 4)) else trap("a strip fits")
+    try batch.copy(left, gpu.Region(0, 0, 256, 256), strip, row_texels = 512)
+    try batch.copy(right, gpu.Region(0, 0, 256, 256), strip + 256 * 4, row_texels = 512)
+    # A packed corner of the right tile after it.
+    let corner = (try batch.add(right, gpu.Region(10, 20, 3, 2))) else trap("a corner fits")
+    assert(corner >= strip + 512 * 256 * 4 and batch.copies() == 3)
+    assert((try batch.reserve(batch.capacity() + 1)) == none)
+    # The batch keeps what it reads alive until it is submitted.
+    left.destroy()
+    assert(refuses_bytes(&batch))
+    try batch.submit()
+    try batch.wait()
+    let bytes = try batch.bytes(strip, 512 * 256 * 4)
+    for y in [(usize)0, 7, 255]:
+        for x in [(usize)0, 3, 255, 256, 300, 511]:
+            let at = (y * 512 + x) * 4
+            assert(bytes[at] == (u8)(x % 256) and bytes[at + 1] == (u8)y and bytes[at + 2] == (u8)(0 if x < 256 else 100) and bytes[at + 3] == 255)
+    let small = try batch.bytes(corner, 3 * 2 * 4)
+    assert(small[0] == 10 and small[1] == 20 and small[2] == 100 and small[12] == 10 and small[13] == 21)
+    # Recording again into the same slot.
+    try batch.reset()
+    let again = (try batch.add(right, gpu.Region(255, 255, 1, 1))) else trap("a texel fits")
+    try batch.submit()
+    try batch.wait()
+    assert((try batch.bytes(again, 4))[0] == 255)
+    # Three slots at most are held at once.
+    var second = try gpu.ReadBatch.begin(device)
+    var third = try gpu.ReadBatch.begin(device)
+    var refused = false
+    var fourth = gpu.ReadBatch.begin(device) catch failure:
+        discard(failure)
+        refused = true
+        recover gpu.ReadBatch()
+    assert(refused)
+    fourth.finish()
+    second.finish()
+    third.finish()
+    # A read larger than a slot comes back whole, a slot's worth of rows at a time.
+    var large = try gpu.Texture.create(device, 4096, 4096, gpu.Format.rgba8_linear)
+    defer large.destroy()
+    let whole = try alloc u8[4096 * 4096 * 4] in memory.heap
+    defer free(whole) in memory.heap
+    for row in 0..<(usize)4096:
+        for column in 0..<(usize)4096:
+            let at = (row * 4096 + column) * 4
+            whole[at] = (u8)(row % 251)
+            whole[at + 1] = (u8)(column % 241)
+            whole[at + 2] = 7
+            whole[at + 3] = 255
+    try large.upload(whole)
+    let back = try alloc u8[4096 * 4096 * 4] in memory.heap
+    defer free(back) in memory.heap
+    try large.read(back)
+    for row in [(usize)0, 1000, 2048, 4095]:
+        for column in [(usize)0, 17, 4095]:
+            let at = (row * 4096 + column) * 4
+            assert(back[at] == (u8)(row % 251) and back[at + 1] == (u8)(column % 241) and back[at + 2] == 7)
+
+## Whether the batch refuses to show its bytes (before it has been waited for).
+func refuses_bytes(batch: gpu.ReadBatch*) -> bool:
+    let view = batch.bytes(0, 4) catch failure:
+        discard(failure)
+        return true
+    discard(view)
+    return false
