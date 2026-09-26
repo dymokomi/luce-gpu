@@ -44,7 +44,7 @@ func metal_texture_create(device: MetalDevice*, width: u32, height: u32, pixel_f
     # MTLStorageModePrivate; MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget.
     metal_uint_arg(descriptor, metal_sel("setStorageMode:"), 2)
     metal_uint_arg(descriptor, metal_sel("setUsage:"), 5)
-    state.texture = metal_with_object(metal_required(device.device), metal_sel("newTextureWithDescriptor:"), descriptor) else error(failed, "could not allocate GPU texture storage")
+    state.texture = metal_with_object(metal_required(device.device), metal_sel("newTextureWithDescriptor:"), descriptor) else error(out_of_memory, "could not allocate GPU texture storage")
     return state
 
 func metal_texture_destroy(state: MetalTexture*):

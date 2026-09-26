@@ -53,6 +53,9 @@ pub let wrong_device: ErrorCode = ErrorCode.package(120)
 pub let wrong_target: ErrorCode = ErrorCode.package(121)
 ## A shader could not be compiled or a pipeline could not be built from it.
 pub let invalid_shader: ErrorCode = ErrorCode.package(122)
+## The device had no memory left for a texture or buffer: free some (evict
+## what can be made again or kept elsewhere) and try again.
+pub let out_of_memory: ErrorCode = ErrorCode.package(123)
 
 # mark: Backends, colors and formats =========================================================
 ## automatic chooses the implemented native backend. An explicit unsupported

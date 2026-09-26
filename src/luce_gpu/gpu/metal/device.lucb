@@ -24,6 +24,12 @@ func metal_device_open() -> MetalDevice*!:
     state.queue = metal_ptr(metal_required(state.device), metal_sel("newCommandQueue")) else error(failed, "could not create a Metal command queue")
     return state
 
+## The recommended working set, what the device holds now, and unified memory.
+func metal_memory_report(state: MetalDevice*) -> DeviceMemory:
+    let device = state.device else return DeviceMemory()
+    let unified = (metal_uint(device, metal_sel("hasUnifiedMemory")) & 0xff) != 0
+    return DeviceMemory(budget = metal_uint(device, metal_sel("recommendedMaxWorkingSetSize")), used = metal_uint(device, metal_sel("currentAllocatedSize")), unified = unified)
+
 func metal_device_destroy(state: MetalDevice*):
     let pool = objc_autoreleasePoolPush()
     defer objc_autoreleasePoolPop(pool)

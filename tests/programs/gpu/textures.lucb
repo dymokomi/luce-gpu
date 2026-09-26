@@ -5,6 +5,13 @@ import shaders
 ## Texture contracts that need a device but no window: uploads, offscreen
 ## frames, image draws with both filters, readback, and refusals.
 pub func pixels(device: gpu.Device) -> !:
+    # The device reports a budget, and what it holds grows with a large texture.
+    let before = try device.memory()
+    assert(before.budget > 0)
+    var large = try gpu.Texture.create(device, 2048, 2048, gpu.Format.rgba16_float)
+    let held = try device.memory()
+    assert(held.used >= before.used)
+    large.destroy()
     # A 2x2 sRGB texture: red, green / blue, opaque white with half alpha.
     var source = try gpu.Texture.create(device, 2, 2, gpu.Format.rgba8)
     defer source.destroy()

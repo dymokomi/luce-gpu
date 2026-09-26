@@ -85,6 +85,9 @@ struct VulkanDevice:
     # Image memory pages; see vulkan_image_memory.
     var pages: VulkanPage*?
     var page_count: usize
+    # Device-local bytes held for images: pages and dedicated image memory.
+    var image_bytes: u64
+    var integrated: bool
     var descriptor_layout: u64
     var layout: u64
     var nearest: u64
@@ -104,6 +107,9 @@ struct VulkanDevice:
     var upload_slot: usize
 
 func vulkan_check(result: i32, message: str) -> !:
+    # VK_ERROR_OUT_OF_HOST_MEMORY and VK_ERROR_OUT_OF_DEVICE_MEMORY: room can be made.
+    if result == -1 or result == -2:
+        error(out_of_memory, message)
     if result != VK_SUCCESS:
         error(failed, message)
 
@@ -155,6 +161,7 @@ func vulkan_device_open() -> VulkanDevice*!:
             if vkCreateDevice(physical, &device_info, none, &state.device) != 0:
                 continue
             state.physical = physical
+            state.integrated = vulkan_device_rank(physical) == 1
             state.family = (u32)family
             vkGetDeviceQueue(state.device, state.family, 0, &state.queue)
             vkGetPhysicalDeviceMemoryProperties(physical, &state.memory)
@@ -173,6 +180,17 @@ func vulkan_device_rank(physical: u64) -> u32:
     if kind == 1:
         return 1
     return 2
+
+## The largest device-local heap as the budget, the image memory held as used.
+func vulkan_memory_report(device: VulkanDevice*) -> DeviceMemory:
+    vulkan_poll(device)
+    var budget: u64 = 0
+    for index in 0..<(usize)device.memory.memoryHeapCount:
+        let heap = device.memory.memoryHeaps[index]
+        # VK_MEMORY_HEAP_DEVICE_LOCAL_BIT
+        if (heap.flags & 1) != 0 and heap.size > budget:
+            budget = heap.size
+    return DeviceMemory(budget = budget, used = device.image_bytes, unified = device.integrated)
 
 ## Retire finished submissions and count the image memory pages held.
 func vulkan_memory_pages(device: VulkanDevice*) -> usize:
@@ -230,7 +248,9 @@ func vulkan_image_memory(device: VulkanDevice*, requirements: VkMemoryRequiremen
     let type_index = try vulkan_memory_type(device, requirements, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
     let page_size = vulkan_page_size(device, type_index)
     if requirements.size > page_size // 4:
-        return VulkanAllocation(memory = try vulkan_allocate(device, requirements.size, type_index), size = requirements.size)
+        let dedicated = VulkanAllocation(memory = try vulkan_allocate(device, requirements.size, type_index), size = requirements.size)
+        device.image_bytes += requirements.size
+        return dedicated
     var cursor = device.pages
     while let page = cursor:
         if page.type_index == type_index:
@@ -252,6 +272,7 @@ func vulkan_page_create(device: VulkanDevice*, type_index: u32, size: u64) -> Vu
     page.next = device.pages
     device.pages = page
     device.page_count += 1
+    device.image_bytes += size
     return page
 
 func vulkan_page_destroy(device: VulkanDevice*, page: VulkanPage*):
@@ -265,9 +286,11 @@ func vulkan_page_destroy(device: VulkanDevice*, page: VulkanPage*):
                 break
             cursor = previous.next
     vkFreeMemory(device.device, page.memory, none)
+    let size = page.size
     free(page.ranges) in memory.heap
     free(page) in memory.heap
     device.page_count -= 1
+    device.image_bytes -= size if size <= device.image_bytes else device.image_bytes
 
 ## First fit: the aligned offset of `size` bytes taken from a free range, or none
 ## when no range fits. Free ranges never outnumber live allocations plus one, so
@@ -341,6 +364,8 @@ func vulkan_allocation_free(device: VulkanDevice*, allocation: VulkanAllocation)
             vulkan_page_destroy(device, page)
     elif allocation.memory != 0:
         vkFreeMemory(device.device, allocation.memory, none)
+        # Dedicated image memory carries its size; staging buffers carry none.
+        device.image_bytes -= allocation.size if allocation.size <= device.image_bytes else device.image_bytes
 
 # mark: Submissions ===========================================================================
 

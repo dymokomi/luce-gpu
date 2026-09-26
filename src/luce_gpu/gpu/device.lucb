@@ -42,6 +42,12 @@ pub struct Device:
         let state = try self.checked()
         return backend_memory_pages(state)
 
+    ## How much memory the device offers this process and how much it holds
+    ## now, for budgets that keep work inside it.
+    pub func memory() -> DeviceMemory!:
+        let state = try self.checked()
+        return backend_memory(state)
+
     ## Whether `other` is the same device.
     pub func same(other: const Device*) -> bool:
         return self.state != none and self.state == other.state
@@ -56,6 +62,16 @@ pub struct Device:
     func checked() -> DeviceState*!:
         try check_thread()
         return self.state else error(closed, "the GPU device is closed")
+
+## A device's memory as its backend reports it. `budget` is what the process
+## may use without the system paging GPU memory (Metal's recommended working
+## set; Vulkan's largest device-local heap), `used` what this process holds
+## there now. On `unified` memory (Apple silicon, integrated GPUs) the GPU's
+## memory is the machine's RAM too.
+pub struct DeviceMemory:
+    pub var budget: u64 = 0
+    pub var used: u64 = 0
+    pub var unified: bool = false
 
 struct DeviceState:
     var backend: Backend
