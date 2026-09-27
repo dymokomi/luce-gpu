@@ -144,7 +144,8 @@ pub struct Canvas:
     ## is cleared or destroyed, so destroying the handle meanwhile is safe.
     mutating func image(texture: TextureState*, source: Region, rectangle: Rect, opacity: f64, filter: Filter,
                         clip: Clip, target_width: f64, target_height: f64, mode: u32 = draw_sampled) -> !:
-        if source.width == 0 or source.height == 0 or source.x > texture.width - source.width or source.y > texture.height - source.height:
+        # Widths compared before subtracting: a released texture is 0 wide.
+        if source.width == 0 or source.height == 0 or source.width > texture.width or source.height > texture.height or source.x > texture.width - source.width or source.y > texture.height - source.height:
             error(invalid_geometry, "an image source region must lie inside its texture")
         if not (opacity >= 0.0 and opacity <= 1.0):
             error(invalid_color, "image opacity must be finite and in 0..1")
