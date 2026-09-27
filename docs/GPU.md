@@ -323,7 +323,9 @@ Vulkan against this contract, and run `tools/embed_shaders.py OUTPUT.lucb
 FILE.frag...` (`--public` for a module other packages import) to generate a
 Base module holding, per shader, `<stem>_frag_words: u32[]` and
 `<stem>_frag_msl: c.str`. glslangValidator and spirv-cross are needed only when
-a shader changes; the generated module is checked in.
+a shader changes; the generated module is checked in. `#include "name.glsl"`
+resolves beside the shader and then in each `-I DIR` given, so packages share
+one include file instead of copying it.
 
 ```glsl
 #version 450
