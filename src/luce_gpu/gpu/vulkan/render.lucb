@@ -155,6 +155,8 @@ func vulkan_encode(device: VulkanDevice*, command: u64, formats: VulkanFormatSta
                 viewport.height = (f32)region.height
             vkCmdSetViewport(command, 0, 1, &viewport)
             vkCmdSetScissor(command, 0, 1, &scissor)
+            # Zero clamp requires no optional depthBiasClamp device feature.
+            vkCmdSetDepthBias(command,0.0,0.0,draw.depth_slope)
             var selected = formats.depth_test if draw.depth else formats.overlay
             if let custom = draw.pipeline:
                 selected = try vulkan_pipeline_for(device, (VulkanPipeline*)custom.native, formats.format)

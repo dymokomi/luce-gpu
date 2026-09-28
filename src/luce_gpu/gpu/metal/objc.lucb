@@ -40,6 +40,7 @@ extern func metal_buffer as "objc_msgSend"(object: void*, selector: void*, bytes
 extern func metal_bind_buffer as "objc_msgSend"(object: void*, selector: void*, buffer: void*, offset: u64, index: u64)
 extern func metal_scissor as "objc_msgSend"(object: void*, selector: void*, rectangle: LuceGpuMetalScissor)
 extern func metal_draw as "objc_msgSend"(object: void*, selector: void*, primitive: u64, start: u64, count: u64)
+extern func metal_depth_bias as "objc_msgSend"(object: void*, selector: void*, bias: f32, slope: f32, clamp: f32)
 extern func pthread_main_np() -> i32
 extern func MTLCreateSystemDefaultDevice() -> void*?
 extern func objc_getClass(name: c.str) -> void*?

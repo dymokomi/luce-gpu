@@ -1,0 +1,73 @@
+## Portable offscreen depth-slope regression, shared by Metal and Vulkan tests.
+import gpu
+import memory
+
+let matrix: f32[16] = [1.0,0.0,0.0,0.0,0.0,1.0,0.0,0.0,0.0,0.0,1.0,0.0,0.0,0.0,0.0,1.0]
+
+pub func plane(sx: f32, sy: f32) -> gpu.Vertex[6]:
+    let a = gpu.Vertex(x = -1.0,y = -1.0,z = 0.5-sx-sy,red = 1.0)
+    let b = gpu.Vertex(x = 1.0,y = -1.0,z = 0.5+sx-sy,red = 1.0)
+    let c = gpu.Vertex(x = 1.0,y = 1.0,z = 0.5+sx+sy,red = 1.0)
+    let d = gpu.Vertex(x = -1.0,y = 1.0,z = 0.5-sx+sy,red = 1.0)
+    return [a,b,c,a,c,d]
+
+pub func segment(horizontal: bool, offset: f32, sx: f32, sy: f32, behind: f32) -> gpu.Vertex:
+    let ax = -0.8 if horizontal else offset
+    let ay = offset if horizontal else -0.8
+    let bx = 0.8 if horizontal else offset
+    let by = offset if horizontal else 0.8
+    return gpu.Vertex(x = ax,y = ay,z = 0.5+sx*ax+sy*ay+behind,
+                      red = bx,green = by,blue = 0.5+sx*bx+sy*by+behind)
+
+pub func pixels(device: gpu.Device) -> !:
+    var target = try gpu.Texture.create(device,256,192,gpu.Format.rgba8_linear)
+    defer target.destroy()
+    let bytes = try alloc u8[256*192*4] in memory.heap
+    defer free(bytes) in memory.heap
+    for retained in [false,true]:
+        for horizontal in [false,true]:
+            for sign in [-1.0,1.0]:
+                let sx = (f32)(sign*0.3)
+                let sy = (f32)(sign*0.1)
+                var fill = try gpu.Geometry.create(device,plane(sx,sy))
+                defer fill.destroy()
+                var front = try gpu.Geometry.create(device,[segment(horizontal,0.0,sx,sy,0.0)],true)
+                defer front.destroy()
+                var back = try gpu.Geometry.create(device,[segment(horizontal,0.5,sx,sy,0.05)],true)
+                defer back.destroy()
+                let frame = try target.frame()
+                defer frame.release()
+                let view = try frame.value().target()
+                defer view.release()
+                let native = try view.get()
+                let footprint = 2.8284271247461903
+                if retained: try gpu.draw_geometry(native,fill,matrix,slope_bias = footprint)
+                else: try native.triangles(plane(sx,sy),true,footprint)
+                try gpu.draw_geometry(native,front,matrix,gpu.Color(green = 1.0),4.0)
+                try gpu.draw_geometry(native,back,matrix,gpu.Color(blue = 1.0),4.0)
+                discard(try frame.value().present())
+                try target.read(bytes)
+                for station in (usize)2..<(usize)7:
+                    let along: usize = (256 if horizontal else 192)*station//8
+                    let across: usize = (192 if horizontal else 256)//2
+                    for pixel in [across-1,across]:
+                        check(bytes,along if horizontal else pixel,pixel if horizontal else along,true)
+                    check(bytes,along if horizontal else 192,48 if horizontal else along,false)
+                var close_back = try gpu.Geometry.create(device,[segment(horizontal,0.0,sx,sy,0.002)],true)
+                defer close_back.destroy()
+                let next = try target.frame()
+                defer next.release()
+                let next_view = try next.value().target()
+                defer next_view.release()
+                try gpu.draw_geometry(try next_view.get(),fill,matrix,slope_bias = footprint)
+                try gpu.draw_geometry(try next_view.get(),fill,matrix)
+                try gpu.draw_geometry(try next_view.get(),close_back,matrix,gpu.Color(green = 1.0),1.0)
+                discard(try next.value().present())
+                try target.read(bytes)
+                check(bytes,128,96,false)
+
+func check(bytes: const u8[], x: usize, y: usize, green: bool):
+    let at = (y*256+x)*4
+    assert(bytes[at] == (0 if green else (u8)255))
+    assert(bytes[at+1] == (255 if green else (u8)0))
+    assert(bytes[at+2] == 0 and bytes[at+3] == 255)

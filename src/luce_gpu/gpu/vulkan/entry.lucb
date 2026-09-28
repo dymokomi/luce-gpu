@@ -75,6 +75,7 @@ struct VulkanFunctions:
     var vkCmdEndRenderPass: (func(u64) -> unit)?
     var vkCmdBindPipeline: (func(u64, u32, u64) -> unit)?
     var vkCmdSetViewport: (func(u64, u32, u32, VkViewport*?) -> unit)?
+    var vkCmdSetDepthBias: (func(u64, f32, f32, f32) -> unit)?
     var vkCmdSetScissor: (func(u64, u32, u32, VkRect2D*?) -> unit)?
     var vkCmdBindVertexBuffers: (func(u64, u32, u32, u64*?, u64*?) -> unit)?
     var vkCmdDraw: (func(u64, u32, u32, u32, u32) -> unit)?
@@ -223,6 +224,8 @@ func vulkan_load() -> !:
         table.vkCmdBindPipeline = (func(u64, u32, u64) -> unit)found
     if let found = vulkan_symbol(library, "vkCmdSetViewport"):
         table.vkCmdSetViewport = (func(u64, u32, u32, VkViewport*?) -> unit)found
+    if let found = vulkan_symbol(library, "vkCmdSetDepthBias"):
+        table.vkCmdSetDepthBias = (func(u64, f32, f32, f32) -> unit)found
     if let found = vulkan_symbol(library, "vkCmdSetScissor"):
         table.vkCmdSetScissor = (func(u64, u32, u32, VkRect2D*?) -> unit)found
     if let found = vulkan_symbol(library, "vkCmdBindVertexBuffers"):
@@ -516,6 +519,10 @@ func vkCmdEndRenderPass(commandBuffer: u64):
 func vkCmdBindPipeline(commandBuffer: u64, pipelineBindPoint: u32, pipeline: u64):
     let call = vulkan_entry().vkCmdBindPipeline else trap("the Vulkan loader lacks vkCmdBindPipeline")
     call(commandBuffer, pipelineBindPoint, pipeline)
+
+func vkCmdSetDepthBias(commandBuffer: u64, constant: f32, clamp: f32, slope: f32):
+    let call = vulkan_entry().vkCmdSetDepthBias else trap("the Vulkan loader lacks vkCmdSetDepthBias")
+    call(commandBuffer,constant,clamp,slope)
 
 func vkCmdSetViewport(commandBuffer: u64, firstViewport: u32, viewportCount: u32, pViewports: VkViewport*?):
     let call = vulkan_entry().vkCmdSetViewport else trap("the Vulkan loader lacks vkCmdSetViewport")

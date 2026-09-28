@@ -56,6 +56,17 @@ pub func contracts() -> !:
     assert(rejected and canvas.count() == 6)
     canvas.clear()
     assert(canvas.count() == 0)
+    for bias in [-1.0,257.0,f64.bits(9221120237041090560),f64.bits(9218868437227405312)]:
+        rejected = false
+        canvas.triangles(full(gpu.Vertex(red = 1.0)),clip,true,slope_bias = bias) catch failure:
+            assert(failure.code == gpu.invalid_geometry)
+            rejected = true
+        assert(rejected and canvas.count() == 0)
+    rejected = false
+    canvas.triangles(full(gpu.Vertex(red = 1.0)),clip,false,slope_bias = 1.0) catch failure:
+        assert(failure.code == gpu.invalid_geometry)
+        rejected = true
+    assert(rejected and canvas.count() == 0)
     canvas.destroy()
     assert(tracker.live == 0)
 

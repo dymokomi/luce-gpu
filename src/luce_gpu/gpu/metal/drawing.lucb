@@ -246,6 +246,8 @@ func metal_encode(encoder: void*, drawing: MetalDrawing*, pipeline: void*, geome
         metal_viewport(encoder, metal_sel("setViewport:"), LuceGpuMetalViewport(x = region.x, y = region.y, width = region.width, height = region.height, near = 0.0, far = 1.0))
         metal_scissor(encoder, metal_sel("setScissorRect:"), LuceGpuMetalScissor(x = x, y = y, width = w, height = h))
         metal_object(encoder, metal_sel("setDepthStencilState:"), drawing.depth_on if draw.depth else drawing.depth_off)
+        # Always reset between draws: neither wires nor UI inherit fill bias.
+        metal_depth_bias(encoder,metal_sel("setDepthBias:slopeScale:clamp:"),0.0,draw.depth_slope,0.0)
         var selected = pipeline
         if let custom = draw.pipeline:
             selected = custom.native

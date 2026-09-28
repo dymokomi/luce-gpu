@@ -58,6 +58,7 @@ struct Draw:
     var count: usize
     var clip: Clip
     var depth: bool
+    var depth_slope: f32
     var viewport: Viewport?
     var params: DrawParams
     # Sampled images (bindings 1..4) and a client pipeline are retained until
@@ -111,7 +112,7 @@ pub struct Canvas:
             if let geometry = draw.geometry:
                 release_geometry(geometry)
 
-    mutating func retained(geometry: GeometryState*, clip: Clip, viewport: Viewport, uniforms: f32[28]) -> !:
+    mutating func retained(geometry: GeometryState*, clip: Clip, viewport: Viewport, uniforms: f32[28], depth_slope: f32 = 0.0) -> !:
         if clip.width == 0 or clip.height == 0: return
         if self.draw_count == 4096: error(command_limit, "canvas exceeds 4096 draws")
         if self.draw_count == self.draws.length:
@@ -119,14 +120,18 @@ pub struct Canvas:
             if self.draw_count > 0: memory.copy(grown, self.draws, self.draw_count)
             if self.draws.length > 0: free(self.draws) in memory.heap
             self.draws = grown
-        self.draws[self.draw_count] = Draw(first = 0, count = geometry.count * (6 if geometry.lines else 1), clip = clip, depth = true, viewport = viewport, geometry = geometry, geometry_uniforms = uniforms)
+        self.draws[self.draw_count] = Draw(first = 0, count = geometry.count * (6 if geometry.lines else 1), clip = clip, depth = true, depth_slope = depth_slope, viewport = viewport, geometry = geometry, geometry_uniforms = uniforms)
         geometry.references += 1
         self.draw_count += 1
 
     ## Independent triangles, in submission order. Depth-enabled draws use less
     ## comparison and write depth; other draws leave depth untouched. Each frame
     ## starts with depth 1.0. No culling, multisampling, or texture sampling yet.
-    pub mutating func triangles(vertices: const Vertex[], clip: Clip, depth: bool = false, viewport: Viewport? = none) -> !:
+    ## slope_bias is a nonnegative raster depth-slope factor in backing pixels;
+    ## zero is ordinary depth. It moves fills away for coplanar wire overlays.
+    pub mutating func triangles(vertices: const Vertex[], clip: Clip, depth: bool = false, viewport: Viewport? = none, slope_bias: f64 = 0.0) -> !:
+        if not (slope_bias >= 0.0 and slope_bias <= 256.0) or (not depth and slope_bias != 0.0):
+            error(invalid_geometry, "depth slope bias requires depth testing and a finite factor in 0..256")
         if vertices.length % 3 != 0:
             error(invalid_geometry, "triangle input must contain a multiple of three vertices")
         for vertex in vertices:
@@ -160,7 +165,7 @@ pub struct Canvas:
                 free(self.draws) in memory.heap
             self.draws = grown
         memory.copy(self.vertices[self.vertex_count..], vertices, vertices.length)
-        self.draws[self.draw_count] = Draw(first = self.vertex_count, count = vertices.length, clip = clip, depth = depth, viewport = viewport)
+        self.draws[self.draw_count] = Draw(first = self.vertex_count, count = vertices.length, clip = clip, depth = depth, depth_slope = (f32)slope_bias, viewport = viewport)
         self.vertex_count = needed
         self.draw_count += 1
 

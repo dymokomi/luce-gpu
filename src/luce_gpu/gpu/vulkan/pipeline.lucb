@@ -99,7 +99,7 @@ func vulkan_build_pipeline(device: VulkanDevice*, pass: u64, fragment: u64, blen
         vertex_info.vertexBindingDescriptionCount = 0
         vertex_info.vertexAttributeDescriptionCount = 0
     var viewport_info = VkPipelineViewportStateCreateInfo(sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, viewportCount = 1, scissorCount = 1)
-    var raster = VkPipelineRasterizationStateCreateInfo(sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, lineWidth = 1.0)
+    var raster = VkPipelineRasterizationStateCreateInfo(sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, lineWidth = 1.0, depthBiasEnable = VK_TRUE if depth else VK_FALSE)
     var multisample = VkPipelineMultisampleStateCreateInfo(sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO, rasterizationSamples = VK_SAMPLE_COUNT_1_BIT)
     var depth_info = VkPipelineDepthStencilStateCreateInfo(sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO, depthCompareOp = VK_COMPARE_OP_LESS,
                                                            depthTestEnable = VK_TRUE if depth else VK_FALSE, depthWriteEnable = VK_TRUE if depth else VK_FALSE)
@@ -108,8 +108,8 @@ func vulkan_build_pipeline(device: VulkanDevice*, pass: u64, fragment: u64, blen
     var color = VkPipelineColorBlendAttachmentState(blendEnable = VK_FALSE if blend == Blend.replace else VK_TRUE, srcColorBlendFactor = VK_BLEND_FACTOR_ONE, dstColorBlendFactor = destination,
                                                     srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE, dstAlphaBlendFactor = destination, colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT)
     var blend_info = VkPipelineColorBlendStateCreateInfo(sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, attachmentCount = 1, pAttachments = &color)
-    var dynamic_states: u32[2] = [VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR]
-    var dynamic_info = VkPipelineDynamicStateCreateInfo(sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, dynamicStateCount = 2, pDynamicStates = &dynamic_states[0])
+    var dynamic_states: u32[3] = [VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_DEPTH_BIAS]
+    var dynamic_info = VkPipelineDynamicStateCreateInfo(sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, dynamicStateCount = 3, pDynamicStates = &dynamic_states[0])
     var pipeline_info = VkGraphicsPipelineCreateInfo(sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
                                                      stageCount = 2, pStages = &stages[0], pVertexInputState = &vertex_info, pInputAssemblyState = &assembly,
                                                      pViewportState = &viewport_info, pRasterizationState = &raster, pMultisampleState = &multisample,

@@ -21,12 +21,23 @@ contract. Creation validates finite data and limits a buffer to 4,194,304
 
 Triangles use ordinary `Vertex` position/color records, in multiples of three.
 Line records pack the start in `x/y/z` and end in `red/green/blue`, one record per
-segment. `draw_geometry(target_pointer, geometry, matrix, color, width, bias)`
+segment. `draw_geometry(target_pointer, geometry, matrix, color, width, bias, slope_bias)`
 records an owned reference and 112 bytes of parameters. Matrix is 16 column-major
 world-to-clip floats; color, logical-pixel width and depth bias apply to lines.
 The vertex shader clips lines at near/far planes and expands them on the GPU.
 Triangles and lines use the frame's depth buffer. Geometry belongs to one device;
 mixing devices is a checked error. Retained-only frames need no dynamic vertices.
+
+`slope_bias` defaults to zero. For triangle fills it reserves a depth allowance
+proportional to the rasterized surface's maximum screen-space depth gradient.
+Its factor is in logical pixels and is scaled to backing pixels, so coplanar
+wire overlays need not use a large constant depth pull. The same option exists
+on `RenderTarget.triangles`; `Canvas.triangles` takes the factor directly in
+backing pixels. It requires depth testing, accepts only nonnegative finite
+values, and is reset for every draw. Lines retain their independent constant
+`bias` and cannot request fill slope bias. Metal and Vulkan use their native
+slope-scale rasterizer state (zero constant factor and clamp); no geometry or
+shaders are regenerated. A zero clamp needs no optional Vulkan clamp feature.
 
 Destroying a geometry owner after recording is safe. The canvas retains it until
 clear/close; Metal command buffers retain bound resources, and Vulkan buffers

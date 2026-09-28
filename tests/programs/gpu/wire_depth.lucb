@@ -1,0 +1,72 @@
+## Actual GPU pixels: sloping coplanar wires, occluders and draw-state reset.
+import gpu
+import window
+import native
+from depth_slope import plane, segment
+
+let matrix: f32[16] = [1.0,0.0,0.0,0.0,0.0,1.0,0.0,0.0,0.0,0.0,1.0,0.0,0.0,0.0,0.0,1.0]
+
+pub func pixels() -> !:
+    var device = try gpu.Device.open()
+    defer device.destroy()
+    var target = try window.Window.open(window.Options(title = "GPU wire depth",width = 256,height = 192))
+    defer target.destroy()
+    var surface = try gpu.Surface.open(device,target)
+    defer surface.destroy()
+    try target.show()
+    while (try target.poll()) != none: discard(0)
+    let size = try surface.size()
+    let width = (u64)size.pixel_width
+    let height = (u64)size.pixel_height
+    for retained in [false,true]:
+        for horizontal in [false,true]:
+            for sign in [-1.0,1.0]:
+                let sx = (f32)(sign*0.3)
+                let sy = (f32)(sign*0.1)
+                var fill = try gpu.Geometry.create(device,plane(sx,sy))
+                defer fill.destroy()
+                var front = try gpu.Geometry.create(device,[segment(horizontal,0.0,sx,sy,0.0)],true)
+                defer front.destroy()
+                var back = try gpu.Geometry.create(device,[segment(horizontal,0.5,sx,sy,0.05)],true)
+                defer back.destroy()
+                let frame = try surface.frame()
+                defer frame.release()
+                let view = try frame.value().target()
+                defer view.release()
+                let native_target = try view.get()
+                # Four logical pixels: sqrt(2) times half-width accommodates
+                # any orientation using the rasterizer's maximum depth slope.
+                let footprint = 2.8284271247461903
+                if retained: try gpu.draw_geometry(native_target,fill,matrix,slope_bias = footprint)
+                else: try native_target.triangles(plane(sx,sy),true,footprint)
+                try gpu.draw_geometry(native_target,front,matrix,gpu.Color(green = 1.0),4.0)
+                try gpu.draw_geometry(native_target,back,matrix,gpu.Color(blue = 1.0),4.0)
+                native.begin("GPU wire depth")
+                discard(try frame.value().present())
+                try surface.wait_idle()
+                for station in (u64)2..<(u64)7:
+                    let along = (width if horizontal else height)*station//8
+                    let across = (height if horizontal else width)//2
+                    # Both sides of the line's center must survive self-depth.
+                    for pixel in [across-1,across]:
+                        native.pixel(along if horizontal else pixel,pixel if horizontal else along,0,255,0)
+                    # A truly farther line stays behind the sloping fill.
+                    native.pixel(along if horizontal else width*3//4,height//4 if horizontal else along,255,0,0)
+                native.end()
+                # Biased state must not leak into an ordinary following fill.
+                # This separation exceeds the one-pixel line footprint but is
+                # less than the preceding four-pixel surface slope allowance.
+                var close_back = try gpu.Geometry.create(device,[segment(horizontal,0.0,sx,sy,0.002)],true)
+                defer close_back.destroy()
+                let next = try surface.frame()
+                defer next.release()
+                let next_view = try next.value().target()
+                defer next_view.release()
+                try gpu.draw_geometry(try next_view.get(),fill,matrix,slope_bias = footprint)
+                try gpu.draw_geometry(try next_view.get(),fill,matrix)
+                try gpu.draw_geometry(try next_view.get(),close_back,matrix,gpu.Color(green = 1.0),1.0)
+                native.begin("GPU wire depth")
+                discard(try next.value().present())
+                try surface.wait_idle()
+                native.pixel(width//2,height//2,255,0,0)
+                native.end()

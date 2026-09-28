@@ -194,14 +194,15 @@ pub struct RenderTarget:
         try self.frame.check()
         try self.frame.canvas.allow_vertices(count)
 
-    ## Record a list of clip-space triangles into this target.
-    pub func triangles(vertices: const Vertex[], depth: bool = false) -> !:
+    ## Record clip-space triangles. Optional slope_bias is in logical pixels,
+    ## scaled to the backing target; zero preserves ordinary surface depth.
+    pub func triangles(vertices: const Vertex[], depth: bool = false, slope_bias: f64 = 0.0) -> !:
         try self.frame.check()
         let scale_x = frame_scale(self.frame.size.pixel_width, self.frame.size.width)
         let scale_y = frame_scale(self.frame.size.pixel_height, self.frame.size.height)
         let viewport = Viewport(self.rectangle.x * scale_x, self.rectangle.y * scale_y,
                                 self.rectangle.width * scale_x, self.rectangle.height * scale_y)
-        try self.frame.canvas.triangles(vertices, self.clipping, depth, viewport)
+        try self.frame.canvas.triangles(vertices, self.clipping, depth, viewport, slope_bias * math.max(scale_x,scale_y))
 
     ## Draw a top-down, tightly packed 8-bit coverage image tinted with a linear
     ## color. Pixels are copied into the frame; the caller can reuse them at once.

@@ -45,11 +45,14 @@ func release_geometry(state: GeometryState*):
 
 ## Draw retained world-space geometry. Matrix is column-major world-to-clip.
 ## Lines are clipped at near/far planes and expanded by the vertex shader.
-pub func draw_geometry(target: const RenderTarget*, geometry: Geometry, matrix: const f32[], color: Color = Color(1.0, 1.0, 1.0), width: f64 = 1.0, bias: f64 = 0.000001) -> !:
+## slope_bias is an optional logical-pixel raster depth-slope factor for fills;
+## it does not change vertices or line depth. Zero leaves ordinary depth intact.
+pub func draw_geometry(target: const RenderTarget*, geometry: Geometry, matrix: const f32[], color: Color = Color(1.0, 1.0, 1.0), width: f64 = 1.0, bias: f64 = 0.000001, slope_bias: f64 = 0.0) -> !:
     try target.frame.check()
     let state = geometry.state else error(closed, "retained geometry is closed")
     if target.frame.device != state.device: error(invalid_geometry, "retained geometry belongs to another device")
     if matrix.length != 16 or not (width > 0.0 and width <= 32.0) or not math.is_finite(bias): error(invalid_geometry, "invalid geometry drawing parameters")
+    if not (slope_bias >= 0.0 and slope_bias <= 32.0) or (state.lines and slope_bias != 0.0): error(invalid_geometry,"slope bias requires triangle geometry and a finite factor in 0..32")
     for value in matrix:
         if not math.is_finite((f64)value): error(invalid_geometry, "nonfinite geometry matrix")
     try check_color(color)
@@ -69,7 +72,9 @@ pub func draw_geometry(target: const RenderTarget*, geometry: Geometry, matrix: 
     values[22] = (f32)size.height
     values[23] = -1.0 if state.device.backend == Backend.vulkan else 1.0
     values[24] = (f32)bias
-    try target.frame.canvas.retained(state, target.clipping, region, values)
+    let depth_slope = slope_bias * math.max(scale_x,scale_y)
+    if depth_slope > 256.0: error(invalid_geometry,"backing depth slope factor exceeds 256")
+    try target.frame.canvas.retained(state, target.clipping, region, values, (f32)depth_slope)
 
 func backend_geometry_create(device: DeviceState*, vertices: const Vertex[]) -> void*!:
     if (platform.windows or platform.linux) and device.backend == Backend.vulkan:

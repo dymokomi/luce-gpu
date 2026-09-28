@@ -2,6 +2,8 @@ import gpu
 import frames
 import ownership
 import drawing
+import wire_depth
+import depth_slope
 import textures
 import allocation
 import memory
@@ -201,6 +203,7 @@ pub func main(arguments: str[]) -> i32!:
                 return ownership.finish_run(0)
             error(failure.code, failure.message)
         try textures.pixels(device)
+        try depth_slope.pixels(device)
         try textures.batches(device)
         try textures.upload_batches(device)
         try textures.programs(device)
@@ -216,6 +219,7 @@ pub func main(arguments: str[]) -> i32!:
         try gui()
         assert(tracker.live == 0)
         try drawing.pixels()
+        try wire_depth.pixels()
         ownership.collect()
         assert(tracker.live == 0)
         try frames.pixels()
