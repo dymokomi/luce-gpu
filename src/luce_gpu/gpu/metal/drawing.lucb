@@ -20,6 +20,8 @@ struct MetalDrawing:
     var library: void*?
     var fill: void*?
     var pipelines: void*?[5]
+    var geometry_library: void*?
+    var geometry_pipelines: void*?[5]
     var depth_on: void*?
     var depth_off: void*?
     var nearest: void*?
@@ -106,9 +108,9 @@ func metal_pipeline_for(device: MetalDevice*, drawing: MetalDrawing*, slot: usiz
 
 ## A pipeline of the vertex stage, `fragment_library`'s `luce_fragment`, and `blend`,
 ## rendering into color attachments of `slot`.
-func metal_build_pipeline(device: MetalDevice*, drawing: MetalDrawing*, fragment_library: void*, blend: Blend, slot: usize) -> void*!:
+func metal_build_pipeline(device: MetalDevice*, drawing: MetalDrawing*, fragment_library: void*, blend: Blend, slot: usize, geometry: bool = false) -> void*!:
     let native = metal_required(device.device)
-    let vertex = metal_with_object(metal_required(drawing.library), metal_sel("newFunctionWithName:"), try metal_text("luce_vertex")) else error(failed, "the GPU vertex entry is missing")
+    let vertex = metal_with_object(metal_required(drawing.geometry_library if geometry else drawing.library), metal_sel("newFunctionWithName:"), try metal_text("luce_geometry" if geometry else "luce_vertex")) else error(failed, "the GPU vertex entry is missing")
     defer metal_void(vertex, metal_sel("release"))
     let fragment = metal_with_object(fragment_library, metal_sel("newFunctionWithName:"), try metal_text("luce_fragment")) else error(invalid_shader, "the fragment shader has no luce_fragment entry")
     defer metal_void(fragment, metal_sel("release"))
@@ -178,7 +180,9 @@ func metal_drawing_destroy(state: MetalDrawing*):
     for pipeline in state.pipelines:
         if let value = pipeline:
             metal_void(value, metal_sel("release"))
-    for object in [state.depth_on, state.depth_off, state.nearest, state.linear, state.library, state.fill]:
+    for pipeline in state.geometry_pipelines:
+        if let value = pipeline: metal_void(value, metal_sel("release"))
+    for object in [state.depth_on, state.depth_off, state.nearest, state.linear, state.library, state.fill, state.geometry_library]:
         if let value = object:
             metal_void(value, metal_sel("release"))
     free(state) in memory.heap
@@ -198,7 +202,7 @@ func metal_pass(device: MetalDevice*, target: void*, slot: usize, canvas: Canvas
     var buffer: void*? = none
     defer metal_release_slot(&buffer)
     var drawing: MetalDrawing*? = none
-    if canvas.vertex_count > 0:
+    if canvas.draw_count > 0:
         let state = try metal_drawing(device)
         drawing = state
         let depth = metal_required(metal_ptr(descriptor, metal_sel("depthAttachment")))
@@ -206,7 +210,8 @@ func metal_pass(device: MetalDevice*, target: void*, slot: usize, canvas: Canvas
         metal_uint_arg(depth, metal_sel("setLoadAction:"), 2)
         metal_uint_arg(depth, metal_sel("setStoreAction:"), 0)
         metal_double_arg(depth, metal_sel("setClearDepth:"), 1.0)
-        buffer = metal_buffer(metal_required(device.device), metal_sel("newBufferWithBytes:length:options:"), canvas.vertices.data, (u64)(canvas.vertex_count * 32), 0) else error(failed, "could not upload GPU triangle data")
+        var empty_vertex = Vertex()
+        buffer = metal_buffer(metal_required(device.device), metal_sel("newBufferWithBytes:length:options:"), canvas.vertices.data if canvas.vertex_count > 0 else &empty_vertex, (u64)(canvas_max(1, canvas.vertex_count) * 32), 0) else error(failed, "could not upload GPU triangle data")
         var empty: u32 = 0
         let source = canvas.coverage.data if canvas.coverage_count > 0 else &empty
         masks = metal_buffer(metal_required(device.device), metal_sel("newBufferWithBytes:length:options:"), source, (u64)(canvas_max(1, canvas.coverage_count) * 4), 0) else error(failed, "could not upload GPU coverage")
@@ -216,11 +221,18 @@ func metal_pass(device: MetalDevice*, target: void*, slot: usize, canvas: Canvas
         let pipeline = metal_pipeline_for(device, state, slot) catch failure:
             metal_void(encoder, metal_sel("endEncoding"))
             error(failure.code, failure.message)
-        metal_encode(encoder, state, pipeline, metal_required(buffer), metal_required(masks), canvas, width, height)
+        var geometry_pipeline = pipeline
+        for draw in canvas.draws[..<canvas.draw_count]:
+            if draw.geometry != none:
+                geometry_pipeline = metal_geometry_pipeline(device, state, slot) catch failure:
+                    metal_void(encoder, metal_sel("endEncoding"))
+                    error(failure.code, failure.message)
+                break
+        metal_encode(encoder, state, pipeline, geometry_pipeline, metal_required(buffer), metal_required(masks), canvas, width, height)
     metal_void(encoder, metal_sel("endEncoding"))
     return command
 
-func metal_encode(encoder: void*, drawing: MetalDrawing*, pipeline: void*, buffer: void*, masks: void*, canvas: Canvas, width: u64, height: u64):
+func metal_encode(encoder: void*, drawing: MetalDrawing*, pipeline: void*, geometry_pipeline: void*, buffer: void*, masks: void*, canvas: Canvas, width: u64, height: u64):
     metal_bind_buffer(encoder, metal_sel("setVertexBuffer:offset:atIndex:"), buffer, 0, 0)
     metal_bind_buffer(encoder, metal_sel("setFragmentBuffer:offset:atIndex:"), masks, 0, 5)
     for draw in canvas.draws[..<canvas.draw_count]:
@@ -237,6 +249,11 @@ func metal_encode(encoder: void*, drawing: MetalDrawing*, pipeline: void*, buffe
         var selected = pipeline
         if let custom = draw.pipeline:
             selected = custom.native
+        if let geometry = draw.geometry:
+            selected = geometry_pipeline
+            metal_bind_buffer(encoder, metal_sel("setVertexBuffer:offset:atIndex:"), geometry.native, 0, 6)
+            var uniforms = draw.geometry_uniforms
+            metal_inline_bytes(encoder, metal_sel("setVertexBytes:length:atIndex:"), &uniforms, 112, 7)
         metal_object(encoder, metal_sel("setRenderPipelineState:"), selected)
         if draw.uniform_count > 0:
             var uniforms = draw.uniforms

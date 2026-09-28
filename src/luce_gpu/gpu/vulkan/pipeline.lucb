@@ -81,8 +81,8 @@ func vulkan_pipelines(device: VulkanDevice*, state: VulkanFormatState*) -> !:
 ## One graphics pipeline: the quad vertex stage, `fragment` (a shader module
 ## with the fragment contract), `blend`, and depth testing or not, compatible
 ## with every render pass of `pass`'s color format.
-func vulkan_build_pipeline(device: VulkanDevice*, pass: u64, fragment: u64, blend: Blend, depth: bool) -> u64!:
-    let vertex_shader = try vulkan_shader(device, quad_vert_words)
+func vulkan_build_pipeline(device: VulkanDevice*, pass: u64, fragment: u64, blend: Blend, depth: bool, geometry: bool = false) -> u64!:
+    let vertex_shader = (try vulkan_shader(device, geometry_vert_words)) if geometry else (try vulkan_shader(device, quad_vert_words))
     defer vkDestroyShaderModule(device.device, vertex_shader, none)
     var stages: VkPipelineShaderStageCreateInfo[2] = [
         VkPipelineShaderStageCreateInfo(sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, stage = VK_SHADER_STAGE_VERTEX_BIT, module = vertex_shader, pName = "main"),
@@ -95,6 +95,9 @@ func vulkan_build_pipeline(device: VulkanDevice*, pass: u64, fragment: u64, blen
                                                            vertexBindingDescriptionCount = 1, pVertexBindingDescriptions = &binding,
                                                            vertexAttributeDescriptionCount = 2, pVertexAttributeDescriptions = &attributes[0])
     var assembly = VkPipelineInputAssemblyStateCreateInfo(sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO, topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
+    if geometry:
+        vertex_info.vertexBindingDescriptionCount = 0
+        vertex_info.vertexAttributeDescriptionCount = 0
     var viewport_info = VkPipelineViewportStateCreateInfo(sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, viewportCount = 1, scissorCount = 1)
     var raster = VkPipelineRasterizationStateCreateInfo(sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, lineWidth = 1.0)
     var multisample = VkPipelineMultisampleStateCreateInfo(sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO, rasterizationSamples = VK_SAMPLE_COUNT_1_BIT)

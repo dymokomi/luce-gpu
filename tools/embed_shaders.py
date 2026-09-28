@@ -28,6 +28,7 @@ parser.add_argument('--glslang', default='glslangValidator')
 parser.add_argument('--spirv-cross', default='spirv-cross')
 parser.add_argument('--public', action='store_true', help='declare the embedded shaders `pub`')
 parser.add_argument('--shared', action='store_true', help='the output joins a module that already imports c')
+parser.add_argument('--vertex-metal', action='store_true', help='also translate vertex stages to MSL for retained geometry')
 args = parser.parse_args()
 visibility = 'pub ' if args.public else ''
 lines = ['#' + '=' * 94, '#', f'#   {args.output.stem} - Embedded GPU shaders', '#', '#   DESCRIPTION:',
@@ -76,8 +77,13 @@ def emit_words(name, words):
 with tempfile.TemporaryDirectory(prefix='luce-shader-') as temporary:
     for path in args.vertex:
         emit_mark(f'{path.stem}: vertex stage')
-        _, words = words_of(path, 'vert', temporary)
+        spv, words = words_of(path, 'vert', temporary)
         emit_words(path.stem + '_vert_words', words)
+        if args.vertex_metal:
+            msl = subprocess.run([args.spirv_cross, '--msl', '--msl-version', '20100', '--msl-decoration-binding', '--rename-entry-point', 'main', 'luce_geometry', 'vert', str(spv)], check=True, capture_output=True, text=True).stdout
+            check_msl(path, msl, temporary)
+            escaped = msl.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
+            lines.append(f'{visibility}let {path.stem}_vert_msl: c.str = "{escaped}"')
     for path in args.fragments:
         emit_mark(f'{path.stem}: fragment stage')
         spv, words = words_of(path, 'frag', temporary)

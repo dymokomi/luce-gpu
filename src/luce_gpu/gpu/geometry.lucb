@@ -1,0 +1,84 @@
+## Immutable retained vertex storage. Camera changes record only small uniforms.
+## Triangles use Vertex position/color; lines use xyz and rgb as endpoint pairs.
+pub struct Geometry:
+    var state: GeometryState*?
+
+    ## Upload once. The caller may release its CPU vertices immediately.
+    pub static func create(device: Device, vertices: const Vertex[], lines: bool = false) -> Geometry!:
+        let owner = try device.checked()
+        if vertices.length == 0 or vertices.length > 4194304 or (not lines and vertices.length % 3 != 0):
+            error(invalid_geometry, "invalid retained geometry count")
+        for vertex in vertices:
+            if not lines and not valid_vertex(vertex): error(invalid_geometry, "invalid retained triangle vertex")
+            for value in [vertex.x, vertex.y, vertex.z, vertex.w, vertex.red, vertex.green, vertex.blue, vertex.alpha]:
+                if not math.is_finite((f64)value): error(invalid_geometry, "nonfinite retained geometry")
+        let native = try backend_geometry_create(owner, vertices)
+        errdefer owner.destroy_geometry(owner.native, native)
+        let state = try new GeometryState(owner, native, 1, vertices.length, lines) in memory.heap
+        owner.references += 1
+        return Geometry(state)
+
+    ## Whether storage is present (zero value is closed).
+    pub func is_open() -> bool:
+        return self.state != none
+
+    ## Release this owner; recorded draws and pending GPU work retain storage.
+    pub mutating func destroy():
+        if let state = self.state:
+            require_thread()
+            self.state = none
+            release_geometry(state)
+
+struct GeometryState:
+    let device: DeviceState*
+    let native: void*
+    var references: usize
+    let count: usize
+    let lines: bool
+
+func release_geometry(state: GeometryState*):
+    state.references -= 1
+    if state.references == 0:
+        state.device.destroy_geometry(state.device.native, state.native)
+        release_device(state.device)
+        free(state) in memory.heap
+
+## Draw retained world-space geometry. Matrix is column-major world-to-clip.
+## Lines are clipped at near/far planes and expanded by the vertex shader.
+pub func draw_geometry(target: const RenderTarget*, geometry: Geometry, matrix: const f32[], color: Color = Color(1.0, 1.0, 1.0), width: f64 = 1.0, bias: f64 = 0.000001) -> !:
+    try target.frame.check()
+    let state = geometry.state else error(closed, "retained geometry is closed")
+    if target.frame.device != state.device: error(invalid_geometry, "retained geometry belongs to another device")
+    if matrix.length != 16 or not (width > 0.0 and width <= 32.0) or not math.is_finite(bias): error(invalid_geometry, "invalid geometry drawing parameters")
+    for value in matrix:
+        if not math.is_finite((f64)value): error(invalid_geometry, "nonfinite geometry matrix")
+    try check_color(color)
+    let size = try target.size()
+    if size.width <= 0.0 or size.height <= 0.0: return
+    let scale_x = frame_scale(target.frame.size.pixel_width, target.frame.size.width)
+    let scale_y = frame_scale(target.frame.size.pixel_height, target.frame.size.height)
+    let region = Viewport(target.rectangle.x * scale_x, target.rectangle.y * scale_y, size.pixel_width, size.pixel_height)
+    var values: f32[28]
+    for index in 0..<(usize)16: values[index] = matrix[index]
+    values[16] = (f32)color.red
+    values[17] = (f32)color.green
+    values[18] = (f32)color.blue
+    values[19] = (f32)color.alpha
+    values[20] = (f32)width if state.lines else 0.0
+    values[21] = (f32)size.width
+    values[22] = (f32)size.height
+    values[23] = -1.0 if state.device.backend == Backend.vulkan else 1.0
+    values[24] = (f32)bias
+    try target.frame.canvas.retained(state, target.clipping, region, values)
+
+func backend_geometry_create(device: DeviceState*, vertices: const Vertex[]) -> void*!:
+    if (platform.windows or platform.linux) and device.backend == Backend.vulkan:
+        return (void*)try vulkan_geometry_create((VulkanDevice*)device.native, vertices)
+    if platform.macos and platform.arm64:
+        return try metal_geometry_create((MetalDevice*)device.native, vertices)
+    error(unsupported, "retained geometry backend unavailable")
+
+func backend_geometry_destroyer(backend: Backend) -> func(void*, void*) -> unit:
+    if (platform.windows or platform.linux) and backend == Backend.vulkan: return vulkan_geometry_release
+    if platform.macos and platform.arm64 and backend == Backend.metal: return metal_geometry_release
+    trap("retained geometry backend unavailable")

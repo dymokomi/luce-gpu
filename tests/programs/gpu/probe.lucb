@@ -216,6 +216,7 @@ pub func main(arguments: str[]) -> i32!:
         try gui()
         assert(tracker.live == 0)
         try drawing.pixels()
+        ownership.collect()
         assert(tracker.live == 0)
         try frames.pixels()
         ownership.collect()

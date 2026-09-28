@@ -59,6 +59,27 @@ pub func contracts() -> !:
     canvas.destroy()
     assert(tracker.live == 0)
 
+    # Dense 3D is explicit: the default cap still rejects the same workload.
+    let dense = try alloc gpu.Vertex[1048578] in memory.heap
+    for index in 0..<dense.length:
+        dense[index] = gpu.Vertex(red = 1.0)
+    rejected = false
+    canvas.triangles(dense, clip) catch failure:
+        assert(failure.code == gpu.command_limit)
+        rejected = true
+    assert(rejected and canvas.count() == 0)
+    try canvas.allow_vertices(2097152)
+    try canvas.triangles(dense, clip)
+    assert(canvas.count() == dense.length)
+    rejected = false
+    canvas.allow_vertices(8388609) catch failure:
+        assert(failure.code == gpu.command_limit)
+        rejected = true
+    assert(rejected and canvas.count() == dense.length)
+    free(dense) in memory.heap
+    canvas.destroy()
+    assert(tracker.live == 0)
+
 pub func pixels() -> !:
     var device = try gpu.Device.open()
     defer device.destroy()
@@ -116,3 +137,22 @@ pub func pixels() -> !:
     try surface.wait_idle()
     native.pixel(0, 0, 0, 0, 0)
     native.pixel((u64)resized.pixel_width - 1, 0, 255, 0, 0)
+    native.end()
+    # Retained-only frames upload no dynamic vertices. Destroying input owners
+    # after recording is safe; depth-tested line expansion runs on the GPU.
+    var retained = try gpu.Geometry.create(device, full(gpu.Vertex(red = 1.0, z = 0.8)))
+    var wire = try gpu.Geometry.create(device, [gpu.Vertex(x = -1.0, y = 0.0, z = 0.2, red = 1.0, green = 0.0, blue = 0.2)], true)
+    let frame = try surface.frame()
+    defer frame.release()
+    let view = try frame.value().target()
+    defer view.release()
+    let matrix: f32[16] = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+    try gpu.draw_geometry(try view.get(), retained, matrix)
+    try gpu.draw_geometry(try view.get(), wire, matrix, gpu.Color(green = 1.0), 4.0)
+    retained.destroy()
+    wire.destroy()
+    native.begin("GPU triangles")
+    discard(try frame.value().present())
+    try surface.wait_idle()
+    native.pixel((u64)resized.pixel_width // 2, (u64)resized.pixel_height // 2, 0, 255, 0)
+    native.pixel((u64)resized.pixel_width // 2, 0, 255, 0, 0)

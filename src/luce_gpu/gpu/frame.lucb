@@ -188,6 +188,12 @@ pub struct RenderTarget:
         let clip = intersect_clip(self.clipping, absolute, scale_x, scale_y)
         return try interop.View[RenderTarget].make(RenderTarget(self.frame, self.lease, self.rectangle, clip), render_target_type, self.lease)
 
+    ## Raise this frame's shared vertex budget, without allocating storage.
+    ## Intended for dense 3D targets; ordinary UI frames retain their default.
+    pub func allow_vertices(count: usize) -> !:
+        try self.frame.check()
+        try self.frame.canvas.allow_vertices(count)
+
     ## Record a list of clip-space triangles into this target.
     pub func triangles(vertices: const Vertex[], depth: bool = false) -> !:
         try self.frame.check()

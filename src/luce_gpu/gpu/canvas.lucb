@@ -67,6 +67,8 @@ struct Draw:
     var pipeline: PipelineState*?
     var uniforms: u8[128]
     var uniform_count: u32
+    var geometry: GeometryState*?
+    var geometry_uniforms: f32[28]
 
 ## A reusable CPU command list, independent of any backend or window. triangles
 ## copies its input, so callers may reuse it immediately. A failed append leaves
@@ -79,6 +81,14 @@ pub struct Canvas:
     var draw_count: usize
     var coverage: u32[]
     var coverage_count: usize
+    var vertex_budget: usize
+
+    ## Opt in to a larger bounded frame; this changes no allocation until append.
+    ## The default UI budget and the draw-count limit remain unchanged.
+    pub mutating func allow_vertices(count: usize) -> !:
+        if count > 8388608:
+            error(command_limit, "canvas vertex budget cannot exceed 8388608")
+        self.vertex_budget = canvas_max(self.vertex_budget, count)
 
     ## The number of vertices recorded so far.
     pub func count() -> usize:
@@ -98,6 +108,20 @@ pub struct Canvas:
                     release_texture(texture)
             if let pipeline = draw.pipeline:
                 release_pipeline(pipeline)
+            if let geometry = draw.geometry:
+                release_geometry(geometry)
+
+    mutating func retained(geometry: GeometryState*, clip: Clip, viewport: Viewport, uniforms: f32[28]) -> !:
+        if clip.width == 0 or clip.height == 0: return
+        if self.draw_count == 4096: error(command_limit, "canvas exceeds 4096 draws")
+        if self.draw_count == self.draws.length:
+            let grown = try alloc Draw[canvas_max(16, self.draws.length * 2)] in memory.heap
+            if self.draw_count > 0: memory.copy(grown, self.draws, self.draw_count)
+            if self.draws.length > 0: free(self.draws) in memory.heap
+            self.draws = grown
+        self.draws[self.draw_count] = Draw(first = 0, count = geometry.count * (6 if geometry.lines else 1), clip = clip, depth = true, viewport = viewport, geometry = geometry, geometry_uniforms = uniforms)
+        geometry.references += 1
+        self.draw_count += 1
 
     ## Independent triangles, in submission order. Depth-enabled draws use less
     ## comparison and write depth; other draws leave depth untouched. Each frame
@@ -115,11 +139,12 @@ pub struct Canvas:
                 return
         if vertices.length == 0 or clip.width == 0 or clip.height == 0:
             return
-        if vertices.length > 1048576 - self.vertex_count or self.draw_count == 4096:
-            error(command_limit, "a canvas supports at most 1048576 vertices and 4096 draws")
+        let budget = canvas_max(1048576, self.vertex_budget)
+        if vertices.length > budget - self.vertex_count or self.draw_count == 4096:
+            error(command_limit, "canvas exceeds its vertex budget or 4096 draws")
         let needed = self.vertex_count + vertices.length
         if needed > self.vertices.length:
-            let capacity = canvas_max(needed, canvas_min(1048576, canvas_max(256, self.vertices.length * 2)))
+            let capacity = canvas_max(needed, canvas_min(budget, canvas_max(256, self.vertices.length * 2)))
             let grown = try alloc Vertex[capacity] in memory.heap
             if self.vertex_count > 0:
                 memory.copy(grown, self.vertices, self.vertex_count)

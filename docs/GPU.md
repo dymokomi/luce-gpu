@@ -11,6 +11,31 @@ Client fragment shaders are written once in GLSL and embedded for both
 backends; compute is a subsequent increment. The API remains provisional while
 those contracts are exercised.
 
+## Retained geometry (Base API)
+
+`Geometry.create(device, vertices, lines=false)` uploads immutable storage once.
+The returned manual owner has `is_open()` and idempotent `destroy()`. Copies
+borrow; destroy exactly one owner. All calls follow the device's main-thread
+contract. Creation validates finite data and limits a buffer to 4,194,304
+32-byte records (128 MiB); clients split larger data into separate batches.
+
+Triangles use ordinary `Vertex` position/color records, in multiples of three.
+Line records pack the start in `x/y/z` and end in `red/green/blue`, one record per
+segment. `draw_geometry(target_pointer, geometry, matrix, color, width, bias)`
+records an owned reference and 112 bytes of parameters. Matrix is 16 column-major
+world-to-clip floats; color, logical-pixel width and depth bias apply to lines.
+The vertex shader clips lines at near/far planes and expands them on the GPU.
+Triangles and lines use the frame's depth buffer. Geometry belongs to one device;
+mixing devices is a checked error. Retained-only frames need no dynamic vertices.
+
+Destroying a geometry owner after recording is safe. The canvas retains it until
+clear/close; Metal command buffers retain bound resources, and Vulkan buffers
+retire after their last submission fence. Backend destruction uses the device's
+hook, so portable ownership finalizers do not link optional platform symbols.
+The same GLSL vertex source generates SPIR-V and MSL; no scene/CAD logic lives
+here. macOS pixel/lifetime tests and cross-target compilation are covered;
+Vulkan runtime verification requires Windows/Linux hardware.
+
 ## Run the example
 
 ```sh
@@ -239,7 +264,10 @@ Depth-enabled draws compare less and write depth; overlays leave depth untouched
 Depth starts at 1 each frame. Draw order is preserved, culling is disabled, and
 colors blend in linear space before sRGB encoding. Empty clipped regions do no
 work. Invalid geometry is rejected before recording. A canvas allows up to
-1,048,576 vertices and 4,096 draws; failed growth preserves its recorded contents.
+1,048,576 vertices and 4,096 draws by default; failed growth preserves its recorded contents.
+Dense 3D clients may call `RenderTarget.allow_vertices` (or `Canvas.allow_vertices`)
+to raise the shared frame budget up to 8,388,608 vertices. This allocates nothing
+until triangles are appended and leaves ordinary UI frames unchanged.
 `clear` retains capacity; `destroy` releases it.
 
 The built-in pipeline's fragment stage is written once in GLSL

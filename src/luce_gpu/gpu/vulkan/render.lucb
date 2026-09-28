@@ -41,13 +41,14 @@ func vulkan_vertex_offset(canvas: Canvas) -> usize:
 func vulkan_upload(device: VulkanDevice*, canvas: Canvas) -> VulkanUpload!:
     var upload: VulkanUpload
     errdefer vulkan_upload_destroy(device, upload)
-    if canvas.vertex_count == 0:
+    if canvas.draw_count == 0:
         return upload
     try vulkan_drawing(device)
-    let vertex_bytes = canvas.vertex_count * sizeof(Vertex)
+    let vertex_bytes = canvas_max(1, canvas.vertex_count) * sizeof(Vertex)
     let mask_bytes = canvas_max(1, canvas.coverage_count) * 4
     let vertex_offset = vulkan_vertex_offset(canvas)
-    let bytes = vertex_offset + vertex_bytes
+    let parameter_offset = (vertex_offset + vertex_bytes + 255) // 256 * 256
+    let bytes = parameter_offset + canvas.draw_count * 256
     var info = VkBufferCreateInfo(sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, size = (u64)bytes, usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT)
     try vulkan_check(vkCreateBuffer(device.device, &info, none, &upload.buffer), "the Vulkan vertex buffer could not be created")
     var requirements: VkMemoryRequirements
@@ -61,11 +62,15 @@ func vulkan_upload(device: VulkanDevice*, canvas: Canvas) -> VulkanUpload!:
     masks[0] = 0
     if canvas.coverage_count > 0:
         memory.copy(masks, canvas.coverage, canvas.coverage_count)
-    memory.copy(u8[]((u8*)destination + vertex_offset, vertex_bytes), u8[]((u8*)canvas.vertices.data, vertex_bytes), vertex_bytes)
+    if canvas.vertex_count > 0:
+        memory.copy(u8[]((u8*)destination + vertex_offset, vertex_bytes), u8[]((u8*)canvas.vertices.data, vertex_bytes), vertex_bytes)
+    for index in 0..<canvas.draw_count:
+        var uniforms = canvas.draws[index].geometry_uniforms
+        memory.copy(u8[]((u8*)destination + parameter_offset + index * 256, 112), u8[]((u8*)&uniforms, 112), 112)
     vkUnmapMemory(device.device, upload.block)
     let count = (u32)canvas.draw_count
     var pool_sizes: VkDescriptorPoolSize[2] = [
-        VkDescriptorPoolSize(descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, descriptorCount = count),
+        VkDescriptorPoolSize(descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, descriptorCount = count * 3),
         VkDescriptorPoolSize(descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, descriptorCount = count * (u32)image_limit)]
     var pool_info = VkDescriptorPoolCreateInfo(sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, maxSets = count, poolSizeCount = 2, pPoolSizes = &pool_sizes[0])
     try vulkan_check(vkCreateDescriptorPool(device.device, &pool_info, none, &upload.descriptor_pool), "Vulkan draw descriptors could not be created")
@@ -81,7 +86,7 @@ func vulkan_upload(device: VulkanDevice*, canvas: Canvas) -> VulkanUpload!:
     for index in 0..<canvas.draw_count:
         let draw = canvas.draws[index]
         var image_infos: VkDescriptorImageInfo[4]
-        var writes: VkWriteDescriptorSet[5]
+        var writes: VkWriteDescriptorSet[7]
         for slot in 0..<image_limit:
             var image = placeholder
             if let texture = draw.images[slot]:
@@ -92,7 +97,15 @@ func vulkan_upload(device: VulkanDevice*, canvas: Canvas) -> VulkanUpload!:
                                                 descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, pImageInfo = &image_infos[slot])
         writes[4] = VkWriteDescriptorSet(sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, dstSet = upload.descriptors[index], dstBinding = 5, descriptorCount = 1,
                                          descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, pBufferInfo = &buffer_info)
-        vkUpdateDescriptorSets(device.device, 5, &writes[0], 0, none)
+        var geometry_info = VkDescriptorBufferInfo(buffer = upload.buffer, range = 32)
+        if let geometry = draw.geometry:
+            let native = (VulkanGeometry*)geometry.native
+            geometry_info.buffer = native.buffer
+            geometry_info.range = native.bytes
+        var parameter_info = VkDescriptorBufferInfo(buffer = upload.buffer, offset = (u64)(parameter_offset + index * 256), range = 112)
+        writes[5] = VkWriteDescriptorSet(sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, dstSet = upload.descriptors[index], dstBinding = 6, descriptorCount = 1, descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, pBufferInfo = &geometry_info)
+        writes[6] = VkWriteDescriptorSet(sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, dstSet = upload.descriptors[index], dstBinding = 7, descriptorCount = 1, descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, pBufferInfo = &parameter_info)
+        vkUpdateDescriptorSets(device.device, 7, &writes[0], 0, none)
     return upload
 
 # mark: Encoding and rendering ================================================================
@@ -108,6 +121,10 @@ func vulkan_encode(device: VulkanDevice*, command: u64, formats: VulkanFormatSta
     # Images sampled before anything was drawn into them get a defined layout
     # here, outside the pass.
     for index in 0..<canvas.draw_count:
+        if let geometry = canvas.draws[index].geometry:
+            if serial != 0: ((VulkanGeometry*)geometry.native).last_use = serial
+            if formats.geometry == 0:
+                formats.geometry = try vulkan_build_pipeline(device, formats.pass_texture, device.fill, Blend.over, true, true)
         for slot in 0..<image_limit:
             if let texture = canvas.draws[index].images[slot]:
                 let image = (VulkanTexture*)texture.native
@@ -117,7 +134,7 @@ func vulkan_encode(device: VulkanDevice*, command: u64, formats: VulkanFormatSta
     var begin = VkRenderPassBeginInfo(sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, renderPass = pass, framebuffer = framebuffer,
                                       renderArea = VkRect2D(extent = VkExtent2D(width = width, height = height)), clearValueCount = 2, pClearValues = &clears[0])
     vkCmdBeginRenderPass(command, &begin, VK_SUBPASS_CONTENTS_INLINE)
-    if canvas.vertex_count > 0:
+    if canvas.draw_count > 0:
         var buffer = upload.buffer
         var offset: u64 = (u64)vulkan_vertex_offset(canvas)
         vkCmdBindVertexBuffers(command, 0, 1, &buffer, &offset)
@@ -141,6 +158,7 @@ func vulkan_encode(device: VulkanDevice*, command: u64, formats: VulkanFormatSta
             var selected = formats.depth_test if draw.depth else formats.overlay
             if let custom = draw.pipeline:
                 selected = try vulkan_pipeline_for(device, (VulkanPipeline*)custom.native, formats.format)
+            if draw.geometry != none: selected = formats.geometry
             vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, selected)
             var descriptor = upload.descriptors[index]
             vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, device.layout, 0, 1, &descriptor, 0, none)

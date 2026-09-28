@@ -1,0 +1,35 @@
+## Immutable Vulkan geometry; storage survives all submissions that reference it.
+struct VulkanGeometry:
+    var buffer: u64
+    var memory: u64
+    var bytes: u64
+    var last_use: u64
+
+func vulkan_geometry_create(device: VulkanDevice*, vertices: const Vertex[]) -> VulkanGeometry*!:
+    let state = try new VulkanGeometry(bytes = (u64)(vertices.length * sizeof(Vertex))) in memory.heap
+    errdefer vulkan_geometry_release((void*)device, (void*)state)
+    var info = VkBufferCreateInfo(sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, size = state.bytes, usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT)
+    try vulkan_check(vkCreateBuffer(device.device, &info, none, &state.buffer), "retained geometry buffer allocation failed")
+    var requirements: VkMemoryRequirements
+    vkGetBufferMemoryRequirements(device.device, state.buffer, &requirements)
+    state.memory = try vulkan_memory(device, requirements, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+    try vulkan_check(vkBindBufferMemory(device.device, state.buffer, state.memory, 0), "retained geometry buffer binding failed")
+    var mapped: void*? = none
+    try vulkan_check(vkMapMemory(device.device, state.memory, 0, state.bytes, 0, &mapped), "retained geometry buffer mapping failed")
+    memory.copy(Vertex[]((Vertex*)(mapped else trap("empty Vulkan mapping")), vertices.length), vertices, vertices.length)
+    vkUnmapMemory(device.device, state.memory)
+    return state
+
+func vulkan_geometry_release(raw_device: void*, raw_state: void*):
+    let device = (VulkanDevice*)raw_device
+    let state = (VulkanGeometry*)raw_state
+    let item = VulkanRetired(kind = vulkan_retired_buffer, handle = state.buffer, allocation = VulkanAllocation(memory = state.memory))
+    let serial = state.last_use
+    free(state) in memory.heap
+    vulkan_poll(device)
+    if serial <= device.completed:
+        vulkan_retired_free(device, item)
+        return
+    vulkan_retire(&device.slots[(usize)(serial % (u64)vulkan_slot_limit)], item) catch failure:
+        vulkan_wait(device, serial) catch waited: discard(waited)
+        vulkan_retired_free(device, item)

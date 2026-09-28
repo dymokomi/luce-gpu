@@ -16,6 +16,7 @@ struct VulkanFormatState:
     var pass_texture: u64
     var overlay: u64
     var depth_test: u64
+    var geometry: u64
 
 ## A free range of a memory page.
 struct VulkanRange:

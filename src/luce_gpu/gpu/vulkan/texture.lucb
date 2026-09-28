@@ -41,11 +41,13 @@ func vulkan_drawing(device: VulkanDevice*) -> !:
     try vulkan_slots_create(device)
     # The fragment contract: sampled images at bindings 1..4, coverage words at 5,
     # uniforms as push constants.
-    var bindings: VkDescriptorSetLayoutBinding[5]
+    var bindings: VkDescriptorSetLayoutBinding[7]
     for index in 0..<(usize)4:
         bindings[index] = VkDescriptorSetLayoutBinding(binding = (u32)index + 1, descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, descriptorCount = 1, stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT)
     bindings[4] = VkDescriptorSetLayoutBinding(binding = 5, descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, descriptorCount = 1, stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT)
-    var descriptor_info = VkDescriptorSetLayoutCreateInfo(sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, bindingCount = 5, pBindings = &bindings[0])
+    bindings[5] = VkDescriptorSetLayoutBinding(binding = 6, descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, descriptorCount = 1, stageFlags = VK_SHADER_STAGE_VERTEX_BIT)
+    bindings[6] = VkDescriptorSetLayoutBinding(binding = 7, descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, descriptorCount = 1, stageFlags = VK_SHADER_STAGE_VERTEX_BIT)
+    var descriptor_info = VkDescriptorSetLayoutCreateInfo(sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, bindingCount = 7, pBindings = &bindings[0])
     try vulkan_check(vkCreateDescriptorSetLayout(device.device, &descriptor_info, none, &device.descriptor_layout), "the Vulkan draw layout could not be created")
     var push = VkPushConstantRange(stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT, size = (u32)uniform_limit)
     var layout_info = VkPipelineLayoutCreateInfo(sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
@@ -81,6 +83,7 @@ func vulkan_drawing_destroy(device: VulkanDevice*):
     for state in device.formats[..<device.format_count]:
         if state.overlay != 0: vkDestroyPipeline(device.device, state.overlay, none)
         if state.depth_test != 0: vkDestroyPipeline(device.device, state.depth_test, none)
+        if state.geometry != 0: vkDestroyPipeline(device.device, state.geometry, none)
         if state.pass_present != 0: vkDestroyRenderPass(device.device, state.pass_present, none)
         if state.pass_texture != 0: vkDestroyRenderPass(device.device, state.pass_texture, none)
     device.format_count = 0
