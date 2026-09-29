@@ -38,7 +38,7 @@ void main() {
         gl_Position.z -= p.line.w * gl_Position.w;
     }
     gl_Position.y *= p.eye.w;
-    vertex_color = vec4(p.tint.rgb, 1.0);
+    vertex_color = vec4(p.tint.rgb, 0.0);
     world_normal = vec3(0.0);
     world_position = pa;
     face_id = edge;

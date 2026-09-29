@@ -72,10 +72,12 @@ bindings 8..14 of `shaders/mesh.glsl`) with one 480-byte parameter block
 | `faces` | The face of each triangle (u32). |
 | `flags` | Bits per face; flagged faces take the `accent` color. |
 
-`MeshKind.surface` shades per `Shading`: `lit` (Lambert per vertex from the
-ambient sum and up to four directional lights), `flat` (the triangle's normal),
-`zebra` (reflected stripes of a cylinder or plane around `zebra_axis`,
-antialiased with `fwidth`), `isophote` (lines of equal N · axis), `normals` and
+`MeshKind.surface` shades per fragment per `Shading`: `lit` (Lambert from the
+ambient sum and up to four directional lights, on the side facing the eye, so
+inside-out and open meshes light on both sides), `flat` (the triangle's
+normal), `zebra` (reflected stripes of a cylinder or plane around
+`zebra_axis`, antialiased with `fwidth` and fading to their mean before they
+alias), `isophote` (lines of equal N · axis), `normals` and
 `unlit`. `MeshKind.wires` expands point pairs into constant-pixel-width lines.
 `MeshKind.ids` writes `id base + face + 1` little-endian into an `rgba8_linear`
 target for picking; zero is nothing. Shading is a parameter, so changing it

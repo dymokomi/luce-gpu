@@ -1,10 +1,12 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
-// Mesh fragments: the lit color from the vertex stage, or an analysis mode.
-// Zebra reflects stripes of an infinite cylinder (or plane) around the model
+// Mesh fragments: Lambert lighting of the vertex stage's base color, lit on
+// the side facing the eye (inside-out and open meshes light on both sides),
+// or an analysis mode. Zebra reflects stripes of an infinite cylinder (or plane) around the model
 // in the surface, so tangent and curvature breaks show as kinks and jumps;
 // isophotes are lines of equal N . axis. Stripes are antialiased with fwidth
-// and fade to their mean where they get finer than a pixel.
+// over a band a little wider than a pixel, and fade to their mean as they
+// approach a third of a pixel (dense stripes on bumpy surfaces would alias).
 #include "mesh.glsl"
 layout(location = 0) in vec4 vertex_color;
 layout(location = 1) in vec3 world_normal;
@@ -15,16 +17,17 @@ const float tau = 6.283185307179586;
 
 float stripe(float x, float duty) {
     float s = fract(x);
-    float w = fwidth(x);
+    float w = fwidth(x) * 1.5;
     float rising = smoothstep(duty - w, duty + w, s) * (1.0 - smoothstep(1.0 - w, 1.0 + w, s));
     float value = rising + (1.0 - smoothstep(-w, w, s));
-    return mix(clamp(value, 0.0, 1.0), 1.0 - duty, clamp((w - 0.25) * 4.0, 0.0, 1.0));
+    return mix(clamp(value, 0.0, 1.0), 1.0 - duty, clamp((w - 0.3) * 4.0, 0.0, 1.0));
 }
 
 void main() {
     int shading = int(p.mode.x);
-    if (shading == shade_lit || shading == shade_flat || shading == shade_unlit) {
-        fragment_color = vertex_color;
+    vec3 base = vertex_color.rgb;
+    if (shading == shade_unlit || ((shading == shade_lit || shading == shade_flat) && p.tint.a < 0.5)) {
+        fragment_color = vec4(mix(base, p.accent.rgb, vertex_color.a), 1.0);
         return;
     }
     vec3 n = world_normal;
@@ -35,6 +38,15 @@ void main() {
     view = vl > 1e-30 ? view / vl : vec3(0.0, 0.0, 1.0);
     // Two-sided: shade the side facing the eye.
     if (dot(n, view) < 0.0) n = -n;
+    if (shading == shade_lit || shading == shade_flat) {
+        vec3 light = p.ambient.rgb;
+        for (int at = 0; at < 4; at++) {
+            if (p.light_direction[at].w > 0.5)
+                light += p.light_color[at].rgb * max(0.0, dot(n, p.light_direction[at].xyz));
+        }
+        fragment_color = vec4(mix(min(vec3(1.0), base * light), p.accent.rgb, vertex_color.a), 1.0);
+        return;
+    }
     if (shading == shade_normals) {
         fragment_color = vec4(n * 0.5 + 0.5, 1.0);
         return;

@@ -1,8 +1,9 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
-// Vertex pulling for indexed meshes: triangle corner -> point -> position, the
-// normal and color of whichever domain carries them, and Lambert lighting per
-// vertex for the lit and flat modes. Analysis modes shade per fragment.
+// Vertex pulling for indexed meshes: triangle corner -> point -> position, and
+// the normal and color of whichever domain carries them. Every mode shades per
+// fragment; the vertex color is the unlit base, its alpha the selection
+// accent's weight.
 #include "mesh.glsl"
 layout(location = 0) out vec4 vertex_color;
 layout(location = 1) out vec3 world_normal;
@@ -45,18 +46,10 @@ void main() {
     vec3 base = vec3(1.0);
     int color_domain = int(p.mode.z);
     if (color_domain >= 0) base = clamp(color_at(element(color_domain, point, corner, face)), 0.0, 1.0);
-    vec3 color = p.tint.rgb * base;
-    if (p.tint.a > 0.5 && (shading == shade_lit || shading == shade_flat)) {
-        vec3 light = p.ambient.rgb;
-        for (int at = 0; at < 4; at++) {
-            if (p.light_direction[at].w > 0.5)
-                light += p.light_color[at].rgb * max(0.0, dot(wn, p.light_direction[at].xyz));
-        }
-        color = min(vec3(1.0), color * light);
-    }
+    float accent = 0.0;
     if (p.accent.w > 0.0 && ((face_flags[face / 32u] >> (face % 32u)) & 1u) != 0u)
-        color = mix(color, p.accent.rgb, p.accent.w);
-    vertex_color = vec4(color, 1.0);
+        accent = p.accent.w;
+    vertex_color = vec4(p.tint.rgb * base, accent);
     world_normal = wn;
     world_position = (p.world * vec4(local, 1.0)).xyz;
     face_id = face;
