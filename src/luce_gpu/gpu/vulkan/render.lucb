@@ -15,12 +15,15 @@ struct VulkanUpload:
     var block: u64
     var descriptor_pool: u64
     var descriptors: u64[]
+    # Mesh draws' sets (vulkan/mesh.lucb), 0 for other draws.
+    var mesh_descriptors: u64[]
 
 func vulkan_upload_destroy(device: VulkanDevice*, upload: VulkanUpload):
     if upload.descriptor_pool != 0: vkDestroyDescriptorPool(device.device, upload.descriptor_pool, none)
     if upload.buffer != 0: vkDestroyBuffer(device.device, upload.buffer, none)
     if upload.block != 0: vkFreeMemory(device.device, upload.block, none)
     if upload.descriptors.length > 0: free(upload.descriptors) in memory.heap
+    if upload.mesh_descriptors.length > 0: free(upload.mesh_descriptors) in memory.heap
 
 ## Hand the upload's buffer and descriptors to `slot`, to be freed when its
 ## submission completes, leaving `upload` holding nothing the device uses.
@@ -48,7 +51,13 @@ func vulkan_upload(device: VulkanDevice*, canvas: Canvas) -> VulkanUpload!:
     let mask_bytes = canvas_max(1, canvas.coverage_count) * 4
     let vertex_offset = vulkan_vertex_offset(canvas)
     let parameter_offset = (vertex_offset + vertex_bytes + 255) // 256 * 256
-    let bytes = parameter_offset + canvas.draw_count * 256
+    var meshes: usize = 0
+    for draw in canvas.draws[..<canvas.draw_count]:
+        if draw.mesh != none: meshes += 1
+    if meshes > 0: try vulkan_mesh_ready(device)
+    # Mesh parameter blocks follow, 512 bytes apart.
+    let mesh_offset = parameter_offset + canvas.draw_count * 256
+    let bytes = mesh_offset + meshes * 512
     var info = VkBufferCreateInfo(sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, size = (u64)bytes, usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT)
     try vulkan_check(vkCreateBuffer(device.device, &info, none, &upload.buffer), "the Vulkan vertex buffer could not be created")
     var requirements: VkMemoryRequirements
@@ -67,12 +76,18 @@ func vulkan_upload(device: VulkanDevice*, canvas: Canvas) -> VulkanUpload!:
     for index in 0..<canvas.draw_count:
         var uniforms = canvas.draws[index].geometry_uniforms
         memory.copy(u8[]((u8*)destination + parameter_offset + index * 256, 112), u8[]((u8*)&uniforms, 112), 112)
+    var placed: usize = 0
+    for draw in canvas.draws[..<canvas.draw_count]:
+        if let mesh = draw.mesh:
+            var parameters = mesh.parameters
+            memory.copy(u8[]((u8*)destination + mesh_offset + placed * 512, mesh_parameter_count * 4), u8[]((u8*)&parameters, mesh_parameter_count * 4), mesh_parameter_count * 4)
+            placed += 1
     vkUnmapMemory(device.device, upload.block)
     let count = (u32)canvas.draw_count
     var pool_sizes: VkDescriptorPoolSize[2] = [
-        VkDescriptorPoolSize(descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, descriptorCount = count * 3),
+        VkDescriptorPoolSize(descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, descriptorCount = count * 3 + (u32)meshes * 8),
         VkDescriptorPoolSize(descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, descriptorCount = count * (u32)image_limit)]
-    var pool_info = VkDescriptorPoolCreateInfo(sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, maxSets = count, poolSizeCount = 2, pPoolSizes = &pool_sizes[0])
+    var pool_info = VkDescriptorPoolCreateInfo(sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, maxSets = count + (u32)meshes, poolSizeCount = 2, pPoolSizes = &pool_sizes[0])
     try vulkan_check(vkCreateDescriptorPool(device.device, &pool_info, none, &upload.descriptor_pool), "Vulkan draw descriptors could not be created")
     upload.descriptors = try alloc u64[canvas.draw_count] in memory.heap
     let layouts = try alloc u64[canvas.draw_count] in memory.heap
@@ -106,6 +121,16 @@ func vulkan_upload(device: VulkanDevice*, canvas: Canvas) -> VulkanUpload!:
         writes[5] = VkWriteDescriptorSet(sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, dstSet = upload.descriptors[index], dstBinding = 6, descriptorCount = 1, descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, pBufferInfo = &geometry_info)
         writes[6] = VkWriteDescriptorSet(sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, dstSet = upload.descriptors[index], dstBinding = 7, descriptorCount = 1, descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, pBufferInfo = &parameter_info)
         vkUpdateDescriptorSets(device.device, 7, &writes[0], 0, none)
+    if meshes > 0:
+        upload.mesh_descriptors = try alloc u64[canvas.draw_count] in memory.heap
+        placed = 0
+        for index in 0..<canvas.draw_count:
+            upload.mesh_descriptors[index] = 0
+            let mesh = canvas.draws[index].mesh else continue
+            var mesh_set_info = VkDescriptorSetAllocateInfo(sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, descriptorPool = upload.descriptor_pool, descriptorSetCount = 1, pSetLayouts = &device.mesh_layout)
+            try vulkan_check(vkAllocateDescriptorSets(device.device, &mesh_set_info, &upload.mesh_descriptors[index]), "Vulkan mesh descriptors could not be allocated")
+            try vulkan_mesh_descriptors(device, upload.mesh_descriptors[index], mesh, upload.buffer, (u64)(mesh_offset + placed * 512))
+            placed += 1
     return upload
 
 # mark: Encoding and rendering ================================================================
@@ -121,6 +146,9 @@ func vulkan_encode(device: VulkanDevice*, command: u64, formats: VulkanFormatSta
     # Images sampled before anything was drawn into them get a defined layout
     # here, outside the pass.
     for index in 0..<canvas.draw_count:
+        if let mesh = canvas.draws[index].mesh:
+            vulkan_mesh_used(mesh, serial)
+            discard(try vulkan_mesh_pipeline(device, formats, mesh.kind))
         if let geometry = canvas.draws[index].geometry:
             if serial != 0: ((VulkanGeometry*)geometry.native).last_use = serial
             if formats.geometry == 0:
@@ -157,6 +185,12 @@ func vulkan_encode(device: VulkanDevice*, command: u64, formats: VulkanFormatSta
             vkCmdSetScissor(command, 0, 1, &scissor)
             # Zero clamp requires no optional depthBiasClamp device feature.
             vkCmdSetDepthBias(command,0.0,0.0,draw.depth_slope)
+            if let mesh = draw.mesh:
+                vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, formats.mesh[(usize)(u8)mesh.kind])
+                var mesh_set = upload.mesh_descriptors[index]
+                vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, device.mesh_pipeline_layout, 0, 1, &mesh_set, 0, none)
+                vkCmdDraw(command, (u32)draw.count, 1, 0, 0)
+                continue
             var selected = formats.depth_test if draw.depth else formats.overlay
             if let custom = draw.pipeline:
                 selected = try vulkan_pipeline_for(device, (VulkanPipeline*)custom.native, formats.format)

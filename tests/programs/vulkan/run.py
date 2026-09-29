@@ -37,6 +37,7 @@ def main():
         work = Path(temporary)
         shutil.copy2(SOURCE / 'batching.lucb', work / 'batching.lucb')
         shutil.copy2(SOURCE.parent / 'gpu/depth_slope.lucb', work / 'depth_slope.lucb')
+        shutil.copy2(SOURCE.parent / 'gpu/mesh_pixels.lucb', work / 'mesh_pixels.lucb')
         (work / 'package.prisma').write_text('#prisma 4.0\ndef package "vulkan-test" {\n' + DEPENDENCY + '}\n')
         for name, flags in [('native', ['--native']), ('c', ['--backend=c'])]:
             binary = work / name

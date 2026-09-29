@@ -21,7 +21,7 @@ pub struct Device:
         let native = try backend_device_open(selected)
         errdefer backend_device_destroy(selected, native)
         let state = try new DeviceState(backend = selected, native = native, references = 1, destroy_texture = backend_texture_destroyer(selected), destroy_shader = backend_shader_destroyer(selected),
-                                        destroy_pipeline = backend_pipeline_destroyer(selected), destroy_geometry = backend_geometry_destroyer(selected), destroy_device = backend_device_destroy) in memory.heap
+                                        destroy_pipeline = backend_pipeline_destroyer(selected), destroy_geometry = backend_geometry_destroyer(selected), destroy_buffer = backend_buffer_destroyer(selected), destroy_device = backend_device_destroy) in memory.heap
         return Device(state = state)
 
     ## Whether this handle still owns a device (the zero value is closed).
@@ -89,6 +89,7 @@ struct DeviceState:
     var destroy_shader: func(void*, void*) -> unit
     var destroy_pipeline: func(void*, void*) -> unit
     var destroy_geometry: func(void*, void*) -> unit
+    var destroy_buffer: func(void*, void*) -> unit
     var destroy_device: func(Backend, void*) -> unit
 
 func release_device(state: DeviceState*):

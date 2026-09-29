@@ -2,6 +2,7 @@ import gpu
 import memory
 import thread
 import depth_slope
+import mesh_pixels
 
 ## Vulkan batching contracts: texture passes and uploads do not wait, results are
 ## still ordered for later passes and reads, images destroyed while work that
@@ -16,6 +17,7 @@ pub func main(arguments: str[]) -> i32!:
         error(failure.code, failure.message)
     defer device.destroy()
     try depth_slope.pixels(device)
+    try mesh_pixels.pixels(device)
     try ordering(device)
     try batched_reads(device)
     try stress(device, 20000, 256)

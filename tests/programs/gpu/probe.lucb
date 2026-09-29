@@ -4,6 +4,7 @@ import ownership
 import drawing
 import wire_depth
 import depth_slope
+import mesh_pixels
 import textures
 import allocation
 import memory
@@ -204,6 +205,7 @@ pub func main(arguments: str[]) -> i32!:
             error(failure.code, failure.message)
         try textures.pixels(device)
         try depth_slope.pixels(device)
+        try mesh_pixels.pixels(device)
         try textures.batches(device)
         try textures.upload_batches(device)
         try textures.programs(device)

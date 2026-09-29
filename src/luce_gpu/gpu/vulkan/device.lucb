@@ -17,6 +17,8 @@ struct VulkanFormatState:
     var overlay: u64
     var depth_test: u64
     var geometry: u64
+    # Mesh pipelines by MeshKind (vulkan/mesh.lucb).
+    var mesh: u64[3]
 
 ## A free range of a memory page.
 struct VulkanRange:
@@ -106,6 +108,11 @@ struct VulkanDevice:
     var reads: VulkanRingSlot[3]
     var uploads: VulkanRingSlot[4]
     var upload_slot: usize
+    # Mesh draws: their descriptor and pipeline layouts and a buffer bound
+    # where a draw leaves one out; see vulkan/mesh.lucb.
+    var mesh_layout: u64
+    var mesh_pipeline_layout: u64
+    var mesh_placeholder: VulkanBuffer*?
 
 func vulkan_check(result: i32, message: str) -> !:
     # VK_ERROR_OUT_OF_HOST_MEMORY and VK_ERROR_OUT_OF_DEVICE_MEMORY: room can be made.

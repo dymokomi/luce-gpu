@@ -22,6 +22,14 @@ struct MetalDrawing:
     var pipelines: void*?[5]
     var geometry_library: void*?
     var geometry_pipelines: void*?[5]
+    # Mesh stages (metal/mesh.lucb): pipelines per MeshKind and slot, and a
+    # buffer bound where a draw leaves one out.
+    var mesh_library: void*?
+    var mesh_wire_library: void*?
+    var mesh_fragment_library: void*?
+    var mesh_id_library: void*?
+    var mesh_placeholder: void*?
+    var mesh_pipelines: void*?[15]
     var depth_on: void*?
     var depth_off: void*?
     var nearest: void*?
@@ -109,8 +117,13 @@ func metal_pipeline_for(device: MetalDevice*, drawing: MetalDrawing*, slot: usiz
 ## A pipeline of the vertex stage, `fragment_library`'s `luce_fragment`, and `blend`,
 ## rendering into color attachments of `slot`.
 func metal_build_pipeline(device: MetalDevice*, drawing: MetalDrawing*, fragment_library: void*, blend: Blend, slot: usize, geometry: bool = false) -> void*!:
+    return try metal_stage_pipeline(device, metal_required(drawing.geometry_library if geometry else drawing.library), "luce_geometry" if geometry else "luce_vertex", fragment_library, blend, slot)
+
+## A pipeline of `vertex_library`'s `vertex_name`, `fragment_library`'s
+## `luce_fragment`, and `blend`, rendering into color attachments of `slot`.
+func metal_stage_pipeline(device: MetalDevice*, vertex_library: void*, vertex_name: c.str, fragment_library: void*, blend: Blend, slot: usize) -> void*!:
     let native = metal_required(device.device)
-    let vertex = metal_with_object(metal_required(drawing.geometry_library if geometry else drawing.library), metal_sel("newFunctionWithName:"), try metal_text("luce_geometry" if geometry else "luce_vertex")) else error(failed, "the GPU vertex entry is missing")
+    let vertex = metal_with_object(vertex_library, metal_sel("newFunctionWithName:"), try metal_text(vertex_name)) else error(failed, "the GPU vertex entry is missing")
     defer metal_void(vertex, metal_sel("release"))
     let fragment = metal_with_object(fragment_library, metal_sel("newFunctionWithName:"), try metal_text("luce_fragment")) else error(invalid_shader, "the fragment shader has no luce_fragment entry")
     defer metal_void(fragment, metal_sel("release"))
@@ -182,7 +195,10 @@ func metal_drawing_destroy(state: MetalDrawing*):
             metal_void(value, metal_sel("release"))
     for pipeline in state.geometry_pipelines:
         if let value = pipeline: metal_void(value, metal_sel("release"))
-    for object in [state.depth_on, state.depth_off, state.nearest, state.linear, state.library, state.fill, state.geometry_library]:
+    for pipeline in state.mesh_pipelines:
+        if let value = pipeline: metal_void(value, metal_sel("release"))
+    for object in [state.depth_on, state.depth_off, state.nearest, state.linear, state.library, state.fill, state.geometry_library,
+                   state.mesh_library, state.mesh_wire_library, state.mesh_fragment_library, state.mesh_id_library, state.mesh_placeholder]:
         if let value = object:
             metal_void(value, metal_sel("release"))
     free(state) in memory.heap
@@ -228,11 +244,17 @@ func metal_pass(device: MetalDevice*, target: void*, slot: usize, canvas: Canvas
                     metal_void(encoder, metal_sel("endEncoding"))
                     error(failure.code, failure.message)
                 break
-        metal_encode(encoder, state, pipeline, geometry_pipeline, metal_required(buffer), metal_required(masks), canvas, width, height)
+        # Mesh pipelines are built before encoding, so encoding cannot fail.
+        for draw in canvas.draws[..<canvas.draw_count]:
+            if let mesh = draw.mesh:
+                discard(metal_mesh_pipeline(device, state, mesh.kind, slot) catch failure:
+                    metal_void(encoder, metal_sel("endEncoding"))
+                    error(failure.code, failure.message))
+        metal_encode(encoder, state, pipeline, geometry_pipeline, metal_required(buffer), metal_required(masks), canvas, width, height, slot)
     metal_void(encoder, metal_sel("endEncoding"))
     return command
 
-func metal_encode(encoder: void*, drawing: MetalDrawing*, pipeline: void*, geometry_pipeline: void*, buffer: void*, masks: void*, canvas: Canvas, width: u64, height: u64):
+func metal_encode(encoder: void*, drawing: MetalDrawing*, pipeline: void*, geometry_pipeline: void*, buffer: void*, masks: void*, canvas: Canvas, width: u64, height: u64, slot: usize):
     metal_bind_buffer(encoder, metal_sel("setVertexBuffer:offset:atIndex:"), buffer, 0, 0)
     metal_bind_buffer(encoder, metal_sel("setFragmentBuffer:offset:atIndex:"), masks, 0, 5)
     for draw in canvas.draws[..<canvas.draw_count]:
@@ -248,6 +270,12 @@ func metal_encode(encoder: void*, drawing: MetalDrawing*, pipeline: void*, geome
         metal_object(encoder, metal_sel("setDepthStencilState:"), drawing.depth_on if draw.depth else drawing.depth_off)
         # Always reset between draws: neither wires nor UI inherit fill bias.
         metal_depth_bias(encoder,metal_sel("setDepthBias:slopeScale:clamp:"),0.0,draw.depth_slope,0.0)
+        if let mesh = draw.mesh:
+            let mesh_pipeline = metal_required(drawing.mesh_pipelines[(usize)(u8)mesh.kind * metal_slot_count + slot])
+            metal_encode_mesh(encoder, drawing, mesh, mesh_pipeline, draw.count)
+            # Later ordinary draws expect the canvas vertices at 0.
+            metal_bind_buffer(encoder, metal_sel("setVertexBuffer:offset:atIndex:"), buffer, 0, 0)
+            continue
         var selected = pipeline
         if let custom = draw.pipeline:
             selected = custom.native

@@ -1,0 +1,140 @@
+#==============================================================================================
+#
+#   mesh - Vulkan buffers and mesh pipelines
+#
+#   DESCRIPTION:
+#       Buffers are device-local storage filled by copies from the upload ring (or a staging
+#       buffer of their own when larger), each followed by a barrier that makes the bytes
+#       visible to the vertex and fragment stages of every later submission. Mesh draws use
+#       their own descriptor layout: storage buffers 8..14 and the parameter block at 15.
+#
+#==============================================================================================
+
+struct VulkanBuffer:
+    var buffer: u64
+    var memory: u64
+    var bytes: u64
+    var last_use: u64
+
+func vulkan_buffer_create(device: VulkanDevice*, data: const u8[]) -> VulkanBuffer*!:
+    try vulkan_drawing(device)
+    let state = try new VulkanBuffer(bytes = (u64)data.length) in memory.heap
+    errdefer vulkan_buffer_release((void*)device, (void*)state)
+    var info = VkBufferCreateInfo(sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, size = state.bytes, usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT)
+    try vulkan_check(vkCreateBuffer(device.device, &info, none, &state.buffer), "a Vulkan buffer could not be created")
+    var requirements: VkMemoryRequirements
+    vkGetBufferMemoryRequirements(device.device, state.buffer, &requirements)
+    state.memory = try vulkan_memory(device, requirements, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+    try vulkan_check(vkBindBufferMemory(device.device, state.buffer, state.memory, 0), "Vulkan buffer memory could not be bound")
+    try vulkan_buffer_upload(device, state, 0, data)
+    return state
+
+## Copy `data` to `offset` on the queue: submissions before this one read the
+## old bytes, later ones the new.
+func vulkan_buffer_upload(device: VulkanDevice*, state: VulkanBuffer*, offset: usize, data: const u8[]) -> !:
+    try vulkan_drawing(device)
+    var source: u64 = 0
+    var source_offset: u64 = 0
+    var ring: VulkanRingSlot*? = none
+    var staging = VulkanStaging()
+    errdefer vulkan_staging_destroy(device, staging)
+    if (u64)data.length <= vulkan_upload_slot_bytes:
+        let room = try vulkan_upload_room(device, (u64)data.length)
+        let base = room.mapped else trap("a mapped Vulkan ring slot lost its mapping")
+        memory.copy(u8[]((u8*)base + (usize)room.used, data.length), data, data.length)
+        source = room.buffer
+        source_offset = room.used
+        room.used += (u64)data.length
+        ring = room
+    else:
+        staging = try vulkan_staging(device, data.length, VK_BUFFER_USAGE_TRANSFER_SRC_BIT)
+        var mapped: void*? = none
+        try vulkan_check(vkMapMemory(device.device, staging.block, 0, (u64)data.length, 0, &mapped), "Vulkan staging memory could not be mapped")
+        let destination = mapped else error(failed, "Vulkan returned an empty memory mapping")
+        memory.copy(u8[]((u8*)destination, data.length), data, data.length)
+        vkUnmapMemory(device.device, staging.block)
+        source = staging.buffer
+    let slot = try vulkan_begin(device)
+    var region = VkBufferCopy(srcOffset = source_offset, dstOffset = (u64)offset, size = (u64)data.length)
+    vkCmdCopyBuffer(slot.command, source, state.buffer, 1, &region)
+    var barrier = VkMemoryBarrier(sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, dstAccessMask = VK_ACCESS_SHADER_READ_BIT)
+    vkCmdPipelineBarrier(slot.command, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 1, (void*)&barrier, 0, none, 0, none)
+    if staging.buffer != 0:
+        try vulkan_retire(slot, VulkanRetired(kind = vulkan_retired_buffer, handle = staging.buffer, allocation = VulkanAllocation(memory = staging.block)))
+        staging = VulkanStaging()
+    let serial = try vulkan_end(device, slot)
+    state.last_use = serial
+    if let used = ring: used.serial = serial
+
+## Release once every submission that read the buffer has completed.
+func vulkan_buffer_release(raw_device: void*, raw_state: void*):
+    let device = (VulkanDevice*)raw_device
+    let state = (VulkanBuffer*)raw_state
+    let item = VulkanRetired(kind = vulkan_retired_buffer, handle = state.buffer, allocation = VulkanAllocation(memory = state.memory))
+    let serial = state.last_use
+    free(state) in memory.heap
+    vulkan_poll(device)
+    if serial <= device.completed:
+        vulkan_retired_free(device, item)
+        return
+    vulkan_retire(&device.slots[(usize)(serial % (u64)vulkan_slot_limit)], item) catch failure:
+        vulkan_wait(device, serial) catch waited: discard(waited)
+        vulkan_retired_free(device, item)
+
+# mark: Mesh pipelines ========================================================================
+
+## The mesh descriptor layout, pipeline layout and placeholder buffer, made once.
+func vulkan_mesh_ready(device: VulkanDevice*) -> !:
+    if device.mesh_layout != 0:
+        return
+    var bindings: VkDescriptorSetLayoutBinding[8]
+    for index in 0..<(usize)8:
+        bindings[index] = VkDescriptorSetLayoutBinding(binding = (u32)index + 8, descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, descriptorCount = 1,
+                                                       stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT)
+    var descriptor_info = VkDescriptorSetLayoutCreateInfo(sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, bindingCount = 8, pBindings = &bindings[0])
+    try vulkan_check(vkCreateDescriptorSetLayout(device.device, &descriptor_info, none, &device.mesh_layout), "the Vulkan mesh layout could not be created")
+    var layout_info = VkPipelineLayoutCreateInfo(sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, setLayoutCount = 1, pSetLayouts = &device.mesh_layout)
+    try vulkan_check(vkCreatePipelineLayout(device.device, &layout_info, none, &device.mesh_pipeline_layout), "the Vulkan mesh pipeline layout could not be created")
+    var zeros: u8[16]
+    device.mesh_placeholder = try vulkan_buffer_create(device, zeros)
+
+func vulkan_mesh_destroy(device: VulkanDevice*):
+    if let placeholder = device.mesh_placeholder:
+        device.mesh_placeholder = none
+        vulkan_buffer_release((void*)device, (void*)placeholder)
+    if device.mesh_pipeline_layout != 0: vkDestroyPipelineLayout(device.device, device.mesh_pipeline_layout, none)
+    if device.mesh_layout != 0: vkDestroyDescriptorSetLayout(device.device, device.mesh_layout, none)
+    device.mesh_pipeline_layout = 0
+    device.mesh_layout = 0
+
+## The pipeline for `kind` in `formats`' passes, built on first use.
+func vulkan_mesh_pipeline(device: VulkanDevice*, formats: VulkanFormatState*, kind: MeshKind) -> u64!:
+    try vulkan_mesh_ready(device)
+    let index = (usize)(u8)kind
+    if formats.mesh[index] != 0:
+        return formats.mesh[index]
+    let vertex: const u32[] = mesh_wire_vert_words[..<mesh_wire_vert_words.length] if kind == MeshKind.wires else mesh_vert_words[..<mesh_vert_words.length]
+    let fragment: const u32[] = mesh_id_frag_words[..<mesh_id_frag_words.length] if kind == MeshKind.ids else mesh_frag_words[..<mesh_frag_words.length]
+    formats.mesh[index] = try vulkan_stage_pipeline(device, formats.pass_texture, vertex, fragment, device.mesh_pipeline_layout, Blend.replace if kind == MeshKind.ids else Blend.over)
+    return formats.mesh[index]
+
+## Point `set` at the mesh draw's buffers and at its parameters in `upload`.
+func vulkan_mesh_descriptors(device: VulkanDevice*, set: u64, draw: const MeshDraw*, upload: u64, parameters: u64) -> !:
+    let placeholder = device.mesh_placeholder else trap("the Vulkan mesh placeholder is missing")
+    var infos: VkDescriptorBufferInfo[8]
+    var writes: VkWriteDescriptorSet[8]
+    for index in 0..<(usize)7:
+        var native = placeholder
+        if let state = draw.buffers[index]: native = (VulkanBuffer*)state.native
+        infos[index] = VkDescriptorBufferInfo(buffer = native.buffer, range = native.bytes)
+    infos[7] = VkDescriptorBufferInfo(buffer = upload, offset = parameters, range = (u64)(mesh_parameter_count * 4))
+    for index in 0..<(usize)8:
+        writes[index] = VkWriteDescriptorSet(sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, dstSet = set, dstBinding = (u32)index + 8, descriptorCount = 1,
+                                             descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, pBufferInfo = &infos[index])
+    vkUpdateDescriptorSets(device.device, 8, &writes[0], 0, none)
+
+## Record that submission `serial` reads the draw's buffers.
+func vulkan_mesh_used(draw: const MeshDraw*, serial: u64):
+    if serial == 0: return
+    for buffer in draw.buffers:
+        if let state = buffer: ((VulkanBuffer*)state.native).last_use = serial

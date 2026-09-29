@@ -47,6 +47,41 @@ The same GLSL vertex source generates SPIR-V and MSL; no scene/CAD logic lives
 here. macOS pixel/lifetime tests and cross-target compilation are covered;
 Vulkan runtime verification requires Windows/Linux hardware.
 
+## Buffers and mesh draws (Base API)
+
+`Buffer.create(device, bytes)` uploads device storage (4 bytes to 128 MiB, a
+multiple of four); `buffer.upload(offset, bytes)` rewrites part of it. The copy
+is ordered on the device's queue: draws recorded before it read the old bytes,
+later ones the new, and nothing waits for work in flight (Metal blits from a
+staging copy; Vulkan copies from the upload ring, then a barrier makes the
+bytes visible to the vertex and fragment stages). Recorded draws retain their
+buffers until the frame finishes, so destroying an owner after recording is
+safe.
+
+`draw_mesh(target, buffers, vertices, parameters, kind, slope_bias)` draws an
+indexed mesh by vertex pulling from up to seven buffers (`MeshBuffers`,
+bindings 8..14 of `shaders/mesh.glsl`) with one 480-byte parameter block
+(binding 15; `mesh_parameter_count` floats at the `mesh_*` offsets):
+
+| Buffer | Contents |
+| --- | --- |
+| `triangles` | Surfaces and ids: 3 corner ids per triangle. Wires: 2 point ids per edge. |
+| `corners` | The point of each corner (u32). |
+| `positions` | x, y, z per point (f32). |
+| `normals`, `colors` | 3 floats per element of the domain `mode.y` / `mode.z` names (0 point, 1 corner, 2 face, 3 detail; -1 none). |
+| `faces` | The face of each triangle (u32). |
+| `flags` | Bits per face; flagged faces take the `accent` color. |
+
+`MeshKind.surface` shades per `Shading`: `lit` (Lambert per vertex from the
+ambient sum and up to four directional lights), `flat` (the triangle's normal),
+`zebra` (reflected stripes of a cylinder or plane around `zebra_axis`,
+antialiased with `fwidth`), `isophote` (lines of equal N · axis), `normals` and
+`unlit`. `MeshKind.wires` expands point pairs into constant-pixel-width lines.
+`MeshKind.ids` writes `id base + face + 1` little-endian into an `rgba8_linear`
+target for picking; zero is nothing. Shading is a parameter, so changing it
+re-uploads no buffer. tests/programs/gpu/mesh_pixels.lucb checks pixels on
+Metal and, through tests/programs/vulkan, on Vulkan hosts.
+
 ## Run the example
 
 ```sh
@@ -189,6 +224,7 @@ The files under `src/luce_gpu/gpu/` share one standard module scope:
 | `module.lucb` | Portable values, errors, validation, and thread policy. |
 | `device.lucb`, `surface.lucb`, `frame.lucb`, `texture.lucb`, `shader.lucb` | Public ownership, device references, window leases, textures, shaders, pipelines, and API contracts. |
 | `shaders/`, `shaders.lucb` | The vertex stage (Vulkan) and built-in fill fragment in GLSL, and the module `tools/embed_shaders.py` generates from them for both backends. |
+| `mesh.lucb`, `mesh_shaders.lucb`, `metal/mesh.lucb`, `vulkan/mesh.lucb` | Buffers and mesh draws: the portable API, the embedded mesh stages (`shaders/mesh*.vert`, `mesh.frag`, `mesh_id.frag`), and each backend's buffers, pipelines and bindings. |
 | `params.lucb`, `canvas.lucb`, `mask.lucb` | The recorded command list and the 48-byte per-draw parameters both shaders read. |
 | `backend.lucb` | Backend selection and device dispatch using opaque device payloads. |
 | `presentation.lucb`, `resources.lucb` | Surface and texture dispatch using opaque payloads; a device alone never reaches them. |

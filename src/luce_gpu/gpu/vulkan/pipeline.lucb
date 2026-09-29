@@ -39,6 +39,9 @@ func vulkan_format_state(device: VulkanDevice*, pixel_format: u32) -> VulkanForm
 func vulkan_format_state_destroy(device: VulkanDevice*, state: VulkanFormatState*):
     if state.overlay != 0: vkDestroyPipeline(device.device, state.overlay, none)
     if state.depth_test != 0: vkDestroyPipeline(device.device, state.depth_test, none)
+    if state.geometry != 0: vkDestroyPipeline(device.device, state.geometry, none)
+    for pipeline in state.mesh:
+        if pipeline != 0: vkDestroyPipeline(device.device, pipeline, none)
     if state.pass_present != 0: vkDestroyRenderPass(device.device, state.pass_present, none)
     if state.pass_texture != 0: vkDestroyRenderPass(device.device, state.pass_texture, none)
     *state = VulkanFormatState()
@@ -84,6 +87,20 @@ func vulkan_pipelines(device: VulkanDevice*, state: VulkanFormatState*) -> !:
 func vulkan_build_pipeline(device: VulkanDevice*, pass: u64, fragment: u64, blend: Blend, depth: bool, geometry: bool = false) -> u64!:
     let vertex_shader = (try vulkan_shader(device, geometry_vert_words)) if geometry else (try vulkan_shader(device, quad_vert_words))
     defer vkDestroyShaderModule(device.device, vertex_shader, none)
+    return try vulkan_graphics_pipeline(device, pass, vertex_shader, fragment, device.layout, blend, depth, not geometry)
+
+## A depth-tested pipeline of the vertex stage `vertex` pulling from storage
+## buffers and the fragment stage `fragment`, laid out by `layout`.
+func vulkan_stage_pipeline(device: VulkanDevice*, pass: u64, vertex: const u32[], fragment: const u32[], layout: u64, blend: Blend) -> u64!:
+    let vertex_shader = try vulkan_shader(device, vertex)
+    defer vkDestroyShaderModule(device.device, vertex_shader, none)
+    let fragment_shader = try vulkan_shader(device, fragment)
+    defer vkDestroyShaderModule(device.device, fragment_shader, none)
+    return try vulkan_graphics_pipeline(device, pass, vertex_shader, fragment_shader, layout, blend, true, false)
+
+## `vertex_input`: the quad stage's 32-byte vertices at binding 0; otherwise
+## the vertex stage pulls from storage buffers and takes no vertex input.
+func vulkan_graphics_pipeline(device: VulkanDevice*, pass: u64, vertex_shader: u64, fragment: u64, layout: u64, blend: Blend, depth: bool, vertex_input: bool) -> u64!:
     var stages: VkPipelineShaderStageCreateInfo[2] = [
         VkPipelineShaderStageCreateInfo(sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, stage = VK_SHADER_STAGE_VERTEX_BIT, module = vertex_shader, pName = "main"),
         VkPipelineShaderStageCreateInfo(sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, stage = VK_SHADER_STAGE_FRAGMENT_BIT, module = fragment, pName = "main")]
@@ -95,7 +112,7 @@ func vulkan_build_pipeline(device: VulkanDevice*, pass: u64, fragment: u64, blen
                                                            vertexBindingDescriptionCount = 1, pVertexBindingDescriptions = &binding,
                                                            vertexAttributeDescriptionCount = 2, pVertexAttributeDescriptions = &attributes[0])
     var assembly = VkPipelineInputAssemblyStateCreateInfo(sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO, topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
-    if geometry:
+    if not vertex_input:
         vertex_info.vertexBindingDescriptionCount = 0
         vertex_info.vertexAttributeDescriptionCount = 0
     var viewport_info = VkPipelineViewportStateCreateInfo(sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, viewportCount = 1, scissorCount = 1)
@@ -114,7 +131,7 @@ func vulkan_build_pipeline(device: VulkanDevice*, pass: u64, fragment: u64, blen
                                                      stageCount = 2, pStages = &stages[0], pVertexInputState = &vertex_info, pInputAssemblyState = &assembly,
                                                      pViewportState = &viewport_info, pRasterizationState = &raster, pMultisampleState = &multisample,
                                                      pDepthStencilState = &depth_info, pColorBlendState = &blend_info, pDynamicState = &dynamic_info,
-                                                     layout = device.layout, renderPass = pass, basePipelineIndex = -1)
+                                                     layout = layout, renderPass = pass, basePipelineIndex = -1)
     var pipeline: u64 = 0
     try vulkan_check(vkCreateGraphicsPipelines(device.device, 0, 1, &pipeline_info, none, &pipeline), "a Vulkan pipeline could not be created")
     return pipeline

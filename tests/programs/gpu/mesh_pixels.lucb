@@ -1,0 +1,108 @@
+## Portable mesh-draw pixels, shared by Metal and Vulkan tests: vertex pulling
+## from several buffers, a partial upload that moves a mesh, Lambert lighting in
+## the shader, constant-width wires from point pairs, and face ids for picking.
+import gpu
+import memory
+
+let width: u32 = 256
+let height: u32 = 192
+
+func bytes_of[T](values: const T[]) -> const u8[]:
+    return u8[]((u8*)values.data, values.length * sizeof(T))
+
+## A parameter block with identity transforms: positions are clip coordinates.
+func parameters(shading: gpu.Shading, tint: gpu.Color, lit: bool) -> f32[120]:
+    var block: f32[120]
+    for at in 0..<(usize)4:
+        block[gpu.mesh_clip + at * 5] = 1.0
+        block[gpu.mesh_world + at * 5] = 1.0
+        block[gpu.mesh_normal_matrix + at * 5] = 1.0
+    block[gpu.mesh_tint] = (f32)tint.red
+    block[gpu.mesh_tint + 1] = (f32)tint.green
+    block[gpu.mesh_tint + 2] = (f32)tint.blue
+    block[gpu.mesh_tint + 3] = 1.0 if lit else 0.0
+    block[gpu.mesh_eye + 2] = 5.0
+    block[gpu.mesh_mode] = (f32)(u8)shading
+    block[gpu.mesh_mode + 1] = -1.0
+    block[gpu.mesh_mode + 2] = -1.0
+    return block
+
+func draw(target: gpu.Texture*, buffers: const gpu.MeshBuffers*, vertices: usize, block: const f32[], kind: gpu.MeshKind, image: u8[]) -> !:
+    let frame = try target.frame()
+    defer frame.release()
+    let view = try frame.value().target()
+    defer view.release()
+    try gpu.draw_mesh(try view.get(), buffers, vertices, block, kind)
+    discard(try frame.value().present(gpu.Color(0.0, 0.0, 0.0, 1.0)))
+    try target.read(image)
+
+func pixel(image: const u8[], x: u32, y: u32) -> u8[4]:
+    let at = (usize)((y * width + x) * 4)
+    return [image[at], image[at + 1], image[at + 2], image[at + 3]]
+
+func near(value: u8, expected: u8) -> bool:
+    return value + 2 >= expected and value <= expected + 2
+
+pub func pixels(device: gpu.Device) -> !:
+    var target = try gpu.Texture.create(device, width, height, gpu.Format.rgba8_linear)
+    defer target.destroy()
+    let image = try alloc u8[(usize)(width * height * 4)] in memory.heap
+    defer free(image) in memory.heap
+    # A quad over the left half, then over the right half after an upload.
+    let left: f32[12] = [-1.0, -1.0, 0.5, 0.0, -1.0, 0.5, 0.0, 1.0, 0.5, -1.0, 1.0, 0.5]
+    let right: f32[12] = [0.0, -1.0, 0.5, 1.0, -1.0, 0.5, 1.0, 1.0, 0.5, 0.0, 1.0, 0.5]
+    let triangles: u32[6] = [0, 1, 2, 0, 2, 3]
+    let corners: u32[4] = [0, 1, 2, 3]
+    let faces: u32[2] = [0, 0]
+    let edges: u32[2] = [0, 3]
+    var buffers = gpu.MeshBuffers()
+    buffers.triangles = try gpu.Buffer.create(device, bytes_of[u32](triangles))
+    defer buffers.triangles.destroy()
+    buffers.corners = try gpu.Buffer.create(device, bytes_of[u32](corners))
+    defer buffers.corners.destroy()
+    buffers.positions = try gpu.Buffer.create(device, bytes_of[f32](left))
+    defer buffers.positions.destroy()
+    buffers.faces = try gpu.Buffer.create(device, bytes_of[u32](faces))
+    defer buffers.faces.destroy()
+    let red = parameters(gpu.Shading.unlit, gpu.Color(1.0, 0.0, 0.0), false)
+    try draw(&target, &buffers, 6, red, gpu.MeshKind.surface, image)
+    assert(pixel(image, 64, 96)[0] == 255 and pixel(image, 192, 96)[0] == 0)
+    # Rewrite part of the positions: the redraw shows the moved quad.
+    try buffers.positions.upload(0, bytes_of[f32](right))
+    try draw(&target, &buffers, 6, red, gpu.MeshKind.surface, image)
+    assert(pixel(image, 64, 96)[0] == 0 and pixel(image, 192, 96)[0] == 255)
+    # Lambert in the shader: ambient 0.2 plus 0.5 from a light facing the quad.
+    var lit = parameters(gpu.Shading.lit, gpu.Color(1.0, 1.0, 1.0), true)
+    for channel in 0..<(usize)3: lit[gpu.mesh_ambient + channel] = 0.2
+    lit[gpu.mesh_light_direction + 2] = 1.0
+    lit[gpu.mesh_light_direction + 3] = 1.0
+    for channel in 0..<(usize)3: lit[gpu.mesh_light_color + channel] = 0.5
+    try draw(&target, &buffers, 6, lit, gpu.MeshKind.surface, image)
+    let shaded = pixel(image, 192, 96)
+    assert(near(shaded[0], 178) and near(shaded[1], 178) and near(shaded[2], 178))
+    # Face ids: base 41, face 0, plus one.
+    var ids = parameters(gpu.Shading.unlit, gpu.Color(1.0, 1.0, 1.0), false)
+    ids[gpu.mesh_mode + 3] = f32.bits((u32)41)
+    try draw(&target, &buffers, 6, ids, gpu.MeshKind.ids, image)
+    let id = pixel(image, 192, 96)
+    assert(id[0] == 42 and id[1] == 0 and id[2] == 0 and id[3] == 0)
+    assert(pixel(image, 64, 96)[0] == 0)
+    # A wire between two points of the moved quad: its left side at x = 0.
+    var wires = gpu.MeshBuffers()
+    wires.triangles = try gpu.Buffer.create(device, bytes_of[u32](edges))
+    defer wires.triangles.destroy()
+    wires.positions = buffers.positions
+    var green = parameters(gpu.Shading.unlit, gpu.Color(0.0, 1.0, 0.0), false)
+    green[gpu.mesh_line] = 3.0
+    try draw(&target, &wires, 6, green, gpu.MeshKind.wires, image)
+    assert(pixel(image, 128, 96)[1] == 255 and pixel(image, 192, 96)[1] == 0)
+    # Rejected: a parameter block of the wrong size.
+    var rejected = false
+    let frame = try target.frame()
+    defer frame.release()
+    let view = try frame.value().target()
+    defer view.release()
+    gpu.draw_mesh(try view.get(), &buffers, 6, red[..<100], gpu.MeshKind.surface) catch failure:
+        assert(failure.code == gpu.invalid_geometry)
+        rejected = true
+    assert(rejected)

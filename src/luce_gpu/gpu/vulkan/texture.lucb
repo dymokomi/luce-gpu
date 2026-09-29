@@ -74,6 +74,7 @@ func vulkan_sampler(device: VulkanDevice*, filter: u32) -> u64!:
 func vulkan_drawing_destroy(device: VulkanDevice*):
     discard(vkDeviceWaitIdle(device.device))
     vulkan_idle(device)
+    vulkan_mesh_destroy(device)
     if let placeholder = device.placeholder:
         device.placeholder = none
         vulkan_texture_destroy(device, placeholder)
@@ -84,6 +85,8 @@ func vulkan_drawing_destroy(device: VulkanDevice*):
         if state.overlay != 0: vkDestroyPipeline(device.device, state.overlay, none)
         if state.depth_test != 0: vkDestroyPipeline(device.device, state.depth_test, none)
         if state.geometry != 0: vkDestroyPipeline(device.device, state.geometry, none)
+        for pipeline in state.mesh:
+            if pipeline != 0: vkDestroyPipeline(device.device, pipeline, none)
         if state.pass_present != 0: vkDestroyRenderPass(device.device, state.pass_present, none)
         if state.pass_texture != 0: vkDestroyRenderPass(device.device, state.pass_texture, none)
     device.format_count = 0

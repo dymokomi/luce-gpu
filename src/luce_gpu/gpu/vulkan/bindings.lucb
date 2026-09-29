@@ -874,3 +874,19 @@ extern struct VkXlibSurfaceCreateInfoKHR:
     window: u64
 
 let VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR: u32 = 1000004000
+
+# mark: Buffer copies ==========================================================================
+
+let VK_PIPELINE_STAGE_VERTEX_SHADER_BIT: u32 = 8
+let VK_STRUCTURE_TYPE_MEMORY_BARRIER: u32 = 46
+
+extern struct VkBufferCopy:
+    srcOffset: u64
+    dstOffset: u64
+    size: u64
+
+extern struct VkMemoryBarrier:
+    sType: u32
+    pNext: void*?
+    srcAccessMask: u32
+    dstAccessMask: u32

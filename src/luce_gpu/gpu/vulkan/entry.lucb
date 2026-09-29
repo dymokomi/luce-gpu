@@ -98,6 +98,7 @@ struct VulkanFunctions:
     var vkCmdPipelineBarrier: (func(u64, u32, u32, u32, u32, void*?, u32, void*?, u32, VkImageMemoryBarrier*?) -> unit)?
     var vkCmdCopyBufferToImage: (func(u64, u64, u64, u32, u32, VkBufferImageCopy*?) -> unit)?
     var vkCmdCopyImageToBuffer: (func(u64, u64, u32, u64, u32, VkBufferImageCopy*?) -> unit)?
+    var vkCmdCopyBuffer: (func(u64, u64, u64, u32, VkBufferCopy*?) -> unit)?
     var vkCreateXlibSurfaceKHR: (func(u64, VkXlibSurfaceCreateInfoKHR*?, void*?, u64*?) -> i32)?
 
 var vulkan_functions: VulkanFunctions*? = none
@@ -270,6 +271,8 @@ func vulkan_load() -> !:
         table.vkCmdCopyBufferToImage = (func(u64, u64, u64, u32, u32, VkBufferImageCopy*?) -> unit)found
     if let found = vulkan_symbol(library, "vkCmdCopyImageToBuffer"):
         table.vkCmdCopyImageToBuffer = (func(u64, u64, u32, u64, u32, VkBufferImageCopy*?) -> unit)found
+    if let found = vulkan_symbol(library, "vkCmdCopyBuffer"):
+        table.vkCmdCopyBuffer = (func(u64, u64, u64, u32, VkBufferCopy*?) -> unit)found
     if let found = vulkan_symbol(library, "vkCreateXlibSurfaceKHR"):
         table.vkCreateXlibSurfaceKHR = (func(u64, VkXlibSurfaceCreateInfoKHR*?, void*?, u64*?) -> i32)found
     if let found = vulkan_symbol(library, "vkGetPhysicalDeviceProperties"):
@@ -615,6 +618,10 @@ func vkCmdCopyBufferToImage(commandBuffer: u64, srcBuffer: u64, dstImage: u64, d
 func vkCmdCopyImageToBuffer(commandBuffer: u64, srcImage: u64, srcImageLayout: u32, dstBuffer: u64, regionCount: u32, pRegions: VkBufferImageCopy*?):
     let call = vulkan_entry().vkCmdCopyImageToBuffer else trap("the Vulkan loader lacks vkCmdCopyImageToBuffer")
     call(commandBuffer, srcImage, srcImageLayout, dstBuffer, regionCount, pRegions)
+
+func vkCmdCopyBuffer(commandBuffer: u64, srcBuffer: u64, dstBuffer: u64, regionCount: u32, pRegions: VkBufferCopy*?):
+    let call = vulkan_entry().vkCmdCopyBuffer else trap("the Vulkan loader lacks vkCmdCopyBuffer")
+    call(commandBuffer, srcBuffer, dstBuffer, regionCount, pRegions)
 
 func vkCreateXlibSurfaceKHR(instance: u64, pCreateInfo: VkXlibSurfaceCreateInfoKHR*?, pAllocator: void*?, pSurface: u64*?) -> i32:
     let call = vulkan_entry().vkCreateXlibSurfaceKHR else trap("the Vulkan loader lacks vkCreateXlibSurfaceKHR")

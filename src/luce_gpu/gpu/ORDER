@@ -2,6 +2,8 @@ module.lucb
 device.lucb
 geometry.lucb
 geometry_shaders.lucb
+mesh.lucb
+mesh_shaders.lucb
 params.lucb
 canvas.lucb
 mask.lucb
@@ -19,6 +21,7 @@ metal/objc.lucb
 metal/device.lucb
 metal/drawing.lucb
 metal/geometry.lucb
+metal/mesh.lucb
 metal/texture.lucb
 metal/transfer.lucb
 metal/surface.lucb
@@ -29,6 +32,7 @@ vulkan/presentation/windows.lucb
 vulkan/presentation/x11.lucb
 vulkan/device.lucb
 vulkan/geometry.lucb
+vulkan/mesh.lucb
 vulkan/texture.lucb
 vulkan/transfer.lucb
 vulkan/shader.lucb

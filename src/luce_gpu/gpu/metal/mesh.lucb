@@ -1,0 +1,62 @@
+#==============================================================================================
+#
+#   mesh - Metal buffers and mesh pipelines
+#
+#   DESCRIPTION:
+#       Buffers live in shared memory and are rewritten by a blit from a staging copy, so a
+#       frame still reading the old contents finishes with them. Mesh pipelines pair the mesh
+#       vertex stages with the mesh fragment (surfaces, wires) or the id fragment (picking).
+#
+#==============================================================================================
+
+func metal_buffer_create(device: MetalDevice*, data: const u8[]) -> void*!:
+    return metal_buffer(metal_required(device.device), metal_sel("newBufferWithBytes:length:options:"), data.data, (u64)data.length, 0) else error(out_of_memory, "could not allocate a GPU buffer")
+
+## Stage `data` and blit it in, ordered after every draw already committed.
+func metal_buffer_upload(device: MetalDevice*, native: void*, offset: usize, data: const u8[]) -> !:
+    let pool = objc_autoreleasePoolPush()
+    defer objc_autoreleasePoolPop(pool)
+    let staging = metal_buffer(metal_required(device.device), metal_sel("newBufferWithBytes:length:options:"), data.data, (u64)data.length, 0) else error(out_of_memory, "could not stage a GPU buffer upload")
+    defer metal_void(staging, metal_sel("release"))
+    let command = metal_ptr(metal_required(device.queue), metal_sel("commandBuffer")) else error(failed, "could not create a Metal command buffer")
+    let blit = metal_ptr(command, metal_sel("blitCommandEncoder")) else error(failed, "could not create a Metal blit encoder")
+    metal_copy_buffer(blit, metal_sel("copyFromBuffer:sourceOffset:toBuffer:destinationOffset:size:"), staging, 0, native, (u64)offset, (u64)data.length)
+    metal_void(blit, metal_sel("endEncoding"))
+    metal_submit(command)
+
+func metal_buffer_release(device: void*, native: void*):
+    discard(device)
+    metal_void(native, metal_sel("release"))
+
+## The mesh pipeline of `kind` for color attachments of `slot`, built on first use.
+func metal_mesh_pipeline(device: MetalDevice*, drawing: MetalDrawing*, kind: MeshKind, slot: usize) -> void*!:
+    let index = (usize)(u8)kind * metal_slot_count + slot
+    if let pipeline = drawing.mesh_pipelines[index]: return pipeline
+    let native = metal_required(device.device)
+    if drawing.mesh_library == none:
+        drawing.mesh_library = try metal_compile(native, mesh_vert_msl)
+        drawing.mesh_wire_library = try metal_compile(native, mesh_wire_vert_msl)
+        drawing.mesh_fragment_library = try metal_compile(native, mesh_frag_msl)
+        drawing.mesh_id_library = try metal_compile(native, mesh_id_frag_msl)
+        var zeros: u8[16]
+        drawing.mesh_placeholder = metal_buffer(native, metal_sel("newBufferWithBytes:length:options:"), &zeros[0], 16, 0) else error(out_of_memory, "could not allocate a GPU buffer")
+    let vertex_library = metal_required(drawing.mesh_wire_library if kind == MeshKind.wires else drawing.mesh_library)
+    let fragment_library = metal_required(drawing.mesh_id_library if kind == MeshKind.ids else drawing.mesh_fragment_library)
+    let pipeline = try metal_stage_pipeline(device, vertex_library, "luce_geometry", fragment_library, Blend.replace if kind == MeshKind.ids else Blend.over, slot)
+    drawing.mesh_pipelines[index] = pipeline
+    return pipeline
+
+## One draw of the mesh `draw`: its buffers at 8..14, its parameters at 15.
+func metal_encode_mesh(encoder: void*, drawing: MetalDrawing*, draw: const MeshDraw*, pipeline: void*, count: usize):
+    let placeholder = metal_required(drawing.mesh_placeholder)
+    for index in 0..<(usize)7:
+        var buffer = placeholder
+        if let state = draw.buffers[index]: buffer = state.native
+        metal_bind_buffer(encoder, metal_sel("setVertexBuffer:offset:atIndex:"), buffer, 0, (u64)index + 8)
+    var parameters = draw.parameters
+    metal_inline_bytes(encoder, metal_sel("setVertexBytes:length:atIndex:"), &parameters, (u64)(mesh_parameter_count * 4), 15)
+    metal_inline_bytes(encoder, metal_sel("setFragmentBytes:length:atIndex:"), &parameters, (u64)(mesh_parameter_count * 4), 15)
+    metal_object(encoder, metal_sel("setRenderPipelineState:"), pipeline)
+    metal_draw(encoder, metal_sel("drawPrimitives:vertexStart:vertexCount:"), 3, 0, (u64)count)
+
+extern func metal_copy_buffer as "objc_msgSend"(object: void*, selector: void*, source: void*, source_offset: u64, destination: void*, destination_offset: u64, size: u64)
