@@ -90,7 +90,7 @@ pub struct MeshBuffers:
     pub var flags: Buffer
 
 ## Parameter block size in f32 values; the layout is mesh.glsl's `Parameters`.
-pub let mesh_parameter_count: usize = 120
+pub let mesh_parameter_count: usize = 124
 
 ## Parameter offsets, in f32 values, into the block `draw_mesh` takes.
 pub let mesh_clip: usize = 0
@@ -108,6 +108,9 @@ pub let mesh_zebra_dark: usize = 104
 pub let mesh_zebra_light: usize = 108
 pub let mesh_line: usize = 112
 pub let mesh_accent: usize = 116
+## Curvature shading: x the value (0 mean, 1 Gaussian, 2 k1, 3 k2, 4 the
+## larger |k|), y the value the colour map spans.
+pub let mesh_curvature: usize = 120
 
 ## Shading modes (the block's mode.x).
 pub enum Shading as u8:
@@ -117,11 +120,14 @@ pub enum Shading as u8:
     isophote = 3
     normals = 4
     unlit = 5
+    ## A diverging colour map of principal curvatures (k1, k2) the colors
+    ## buffer carries: blue below zero, green at zero, red above.
+    curvature = 6
 
 ## A recorded mesh draw: retained buffers and its parameter block.
 struct MeshDraw:
     var buffers: BufferState*?[7]
-    var parameters: f32[120]
+    var parameters: f32[124]
     var kind: MeshKind
 
 func release_mesh_draw(draw: MeshDraw*):

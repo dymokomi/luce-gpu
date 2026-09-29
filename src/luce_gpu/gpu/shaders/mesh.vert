@@ -45,11 +45,15 @@ void main() {
     wn = wl > 1e-30 ? wn / wl : vec3(0.0);
     vec3 base = vec3(1.0);
     int color_domain = int(p.mode.z);
-    if (color_domain >= 0) base = clamp(color_at(element(color_domain, point, corner, face)), 0.0, 1.0);
+    if (color_domain >= 0) {
+        base = color_at(element(color_domain, point, corner, face));
+        // Curvature mode carries (k1, k2) unclamped for the fragment stage.
+        if (shading != shade_curvature) base = clamp(base, 0.0, 1.0);
+    }
     float accent = 0.0;
     if (p.accent.w > 0.0 && ((face_flags[face / 32u] >> (face % 32u)) & 1u) != 0u)
         accent = p.accent.w;
-    vertex_color = vec4(p.tint.rgb * base, accent);
+    vertex_color = vec4(shading == shade_curvature ? base : p.tint.rgb * base, accent);
     world_normal = wn;
     world_position = (p.world * vec4(local, 1.0)).xyz;
     face_id = face;

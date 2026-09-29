@@ -24,6 +24,7 @@ layout(std430, binding = 15) readonly buffer Parameters {
     vec4 zebra_light;        // rgb
     vec4 line;               // x wire width in pixels; y, z logical viewport size; w depth bias
     vec4 accent;             // rgb selection highlight; w > 0: flagged faces take it
+    vec4 curvature;          // x value kind; y the value the colour map spans
 } p;
 
 // Shading modes (mode.x).
@@ -33,6 +34,7 @@ const int shade_zebra = 2;
 const int shade_isophote = 3;
 const int shade_normals = 4;
 const int shade_unlit = 5;
+const int shade_curvature = 6;
 
 vec3 point_at(uint point) {
     return vec3(positions[point * 3u], positions[point * 3u + 1u], positions[point * 3u + 2u]);

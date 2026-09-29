@@ -47,6 +47,18 @@ void main() {
         fragment_color = vec4(mix(min(vec3(1.0), base * light), p.accent.rgb, vertex_color.a), 1.0);
         return;
     }
+    if (shading == shade_curvature) {
+        float k1 = base.x;
+        float k2 = base.y;
+        int kind = int(p.curvature.x);
+        float value = kind == 0 ? 0.5 * (k1 + k2) : (kind == 1 ? k1 * k2 : (kind == 2 ? k1 : (kind == 3 ? k2 : max(abs(k1), abs(k2)))));
+        float t = clamp(value / max(p.curvature.y, 1e-20), -1.0, 1.0);
+        vec3 zero = vec3(0.25, 0.75, 0.3);
+        vec3 color = t < 0.0 ? mix(zero, vec3(0.15, 0.3, 0.95), -t) : mix(zero, vec3(0.95, 0.2, 0.15), t);
+        if (p.light_direction[0].w > 0.5) color *= 0.8 + 0.2 * max(0.0, dot(n, p.light_direction[0].xyz));
+        fragment_color = vec4(mix(color, p.accent.rgb, vertex_color.a), 1.0);
+        return;
+    }
     if (shading == shade_normals) {
         fragment_color = vec4(n * 0.5 + 0.5, 1.0);
         return;

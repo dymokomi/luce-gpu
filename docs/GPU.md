@@ -77,8 +77,9 @@ ambient sum and up to four directional lights, on the side facing the eye, so
 inside-out and open meshes light on both sides), `flat` (the triangle's
 normal), `zebra` (reflected stripes of a cylinder or plane around
 `zebra_axis`, antialiased with `fwidth` and fading to their mean before they
-alias), `isophote` (lines of equal N · axis), `normals` and
-`unlit`. `MeshKind.wires` expands point pairs into constant-pixel-width lines.
+alias), `isophote` (lines of equal N · axis), `normals`, `unlit` and
+`curvature` (a blue-green-red map of a value of the principal curvatures the
+colors buffer carries unclamped, over `mesh_curvature`'s range). `MeshKind.wires` expands point pairs into constant-pixel-width lines.
 `MeshKind.ids` writes `id base + face + 1` little-endian into an `rgba8_linear`
 target for picking; zero is nothing. Shading is a parameter, so changing it
 re-uploads no buffer. tests/programs/gpu/mesh_pixels.lucb checks pixels on

@@ -11,8 +11,8 @@ func bytes_of[T](values: const T[]) -> const u8[]:
     return u8[]((u8*)values.data, values.length * sizeof(T))
 
 ## A parameter block with identity transforms: positions are clip coordinates.
-func parameters(shading: gpu.Shading, tint: gpu.Color, lit: bool) -> f32[120]:
-    var block: f32[120]
+func parameters(shading: gpu.Shading, tint: gpu.Color, lit: bool) -> f32[124]:
+    var block: f32[124]
     for at in 0..<(usize)4:
         block[gpu.mesh_clip + at * 5] = 1.0
         block[gpu.mesh_world + at * 5] = 1.0
