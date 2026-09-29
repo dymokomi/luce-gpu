@@ -90,7 +90,14 @@ pub struct MeshBuffers:
     pub var flags: Buffer
 
 ## Parameter block size in f32 values; the layout is mesh.glsl's `Parameters`.
+## The block only grows at its end: a new parameter is appended, and its
+## default, zero, leaves its feature off. draw_mesh takes any block from
+## `mesh_base_parameter_count` values up to this size and fills the values
+## a shorter block leaves out with zeros, so a caller written against an
+## older layout draws as it did.
 pub let mesh_parameter_count: usize = 124
+## The block's first layout, through `mesh_accent`.
+pub let mesh_base_parameter_count: usize = 120
 
 ## Parameter offsets, in f32 values, into the block `draw_mesh` takes.
 pub let mesh_clip: usize = 0
@@ -109,7 +116,8 @@ pub let mesh_zebra_light: usize = 108
 pub let mesh_line: usize = 112
 pub let mesh_accent: usize = 116
 ## Curvature shading: x the value (0 mean, 1 Gaussian, 2 k1, 3 k2, 4 the
-## larger |k|), y the value the colour map spans.
+## larger |k|), y the value the color map spans (only read by the curvature
+## shading).
 pub let mesh_curvature: usize = 120
 
 ## Shading modes (the block's mode.x).
@@ -136,12 +144,13 @@ func release_mesh_draw(draw: MeshDraw*):
     free(draw) in memory.heap
 
 ## Record `vertices` mesh vertices (3 per triangle, 6 per wire edge) into
-## `target`, depth tested. `parameters` is the block of `mesh_parameter_count`
-## values; draw_mesh fills its viewport size and clip-space y sign. slope_bias
+## `target`, depth tested. `parameters` is the block, `mesh_base_parameter_count`
+## to `mesh_parameter_count` values (see mesh_parameter_count); draw_mesh
+## fills its viewport size and clip-space y sign. slope_bias
 ## pushes surfaces back for a coplanar wire overlay, in logical pixels.
 pub func draw_mesh(target: const RenderTarget*, buffers: const MeshBuffers*, vertices: usize, parameters: const f32[], kind: MeshKind, slope_bias: f64 = 0.0) -> !:
     try target.frame.check()
-    if parameters.length != mesh_parameter_count or vertices == 0 or vertices % (6 if kind == MeshKind.wires else 3) != 0:
+    if parameters.length < mesh_base_parameter_count or parameters.length > mesh_parameter_count or vertices == 0 or vertices % (6 if kind == MeshKind.wires else 3) != 0:
         error(invalid_geometry, "a mesh draw needs its parameter block and whole triangles or edges")
     if not (slope_bias >= 0.0 and slope_bias <= 32.0) or (kind == MeshKind.wires and slope_bias != 0.0):
         error(invalid_geometry, "slope bias requires surfaces and a finite factor in 0..32")
@@ -162,7 +171,9 @@ pub func draw_mesh(target: const RenderTarget*, buffers: const MeshBuffers*, ver
     let depth_slope = slope_bias * math.max(scale_x, scale_y)
     let region = Viewport(target.rectangle.x * scale_x, target.rectangle.y * scale_y, size.pixel_width, size.pixel_height)
     var draw = try new MeshDraw(kind = kind) in memory.heap
-    memory.copy(draw.parameters[..<mesh_parameter_count], parameters, mesh_parameter_count)
+    memory.copy(draw.parameters[..<parameters.length], parameters, parameters.length)
+    # Parameters an older, shorter block leaves out are off.
+    for index in parameters.length..<mesh_parameter_count: draw.parameters[index] = 0.0
     draw.parameters[mesh_line + 1] = (f32)size.width
     draw.parameters[mesh_line + 2] = (f32)size.height
     draw.parameters[mesh_eye + 3] = -1.0 if device.backend == Backend.vulkan else 1.0

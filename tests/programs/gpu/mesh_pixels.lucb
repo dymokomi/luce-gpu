@@ -96,13 +96,28 @@ pub func pixels(device: gpu.Device) -> !:
     green[gpu.mesh_line] = 3.0
     try draw(&target, &wires, 6, green, gpu.MeshKind.wires, image)
     assert(pixel(image, 128, 96)[1] == 255 and pixel(image, 192, 96)[1] == 0)
-    # Rejected: a parameter block of the wrong size.
-    var rejected = false
+    # A block of the first layout (no curvature values) draws as a full
+    # block with curvature off does.
+    var full = parameters(gpu.Shading.lit, gpu.Color(1.0, 1.0, 1.0), true)
+    for at in 0..<gpu.mesh_parameter_count: full[at] = lit[at]
+    full[gpu.mesh_curvature] = 0.0
+    full[gpu.mesh_curvature + 1] = 0.0
+    try draw(&target, &buffers, 6, full, gpu.MeshKind.surface, image)
+    let whole = pixel(image, 192, 96)
+    try draw(&target, &buffers, 6, lit[..<gpu.mesh_base_parameter_count], gpu.MeshKind.surface, image)
+    let first = pixel(image, 192, 96)
+    assert(near(whole[0], 178) and first[0] == whole[0] and first[1] == whole[1] and first[2] == whole[2])
+    # Rejected: blocks shorter than the first layout or longer than the current one.
     let frame = try target.frame()
     defer frame.release()
     let view = try frame.value().target()
     defer view.release()
-    gpu.draw_mesh(try view.get(), &buffers, 6, red[..<100], gpu.MeshKind.surface) catch failure:
-        assert(failure.code == gpu.invalid_geometry)
-        rejected = true
-    assert(rejected)
+    var longer: f32[125]
+    for at in 0..<gpu.mesh_parameter_count: longer[at] = red[at]
+    for size in [(usize)100, gpu.mesh_base_parameter_count - 1, (usize)125]:
+        var rejected = false
+        let block = longer[..<size] if size == 125 else red[..<size]
+        gpu.draw_mesh(try view.get(), &buffers, 6, block, gpu.MeshKind.surface) catch failure:
+            assert(failure.code == gpu.invalid_geometry)
+            rejected = true
+        assert(rejected)

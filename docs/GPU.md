@@ -60,8 +60,17 @@ safe.
 
 `draw_mesh(target, buffers, vertices, parameters, kind, slope_bias)` draws an
 indexed mesh by vertex pulling from up to seven buffers (`MeshBuffers`,
-bindings 8..14 of `shaders/mesh.glsl`) with one 480-byte parameter block
-(binding 15; `mesh_parameter_count` floats at the `mesh_*` offsets):
+bindings 8..14 of `shaders/mesh.glsl`) with one parameter block (binding 15;
+`mesh_parameter_count` floats, 496 bytes, at the `mesh_*` offsets).
+
+The block only grows at its end. A new parameter is appended after the last
+one, and its default, zero, leaves its feature off (`mesh_curvature`, added
+after the first layout, is read only by the curvature shading). `draw_mesh`
+takes any block from `mesh_base_parameter_count` (120, the first layout,
+through `mesh_accent`) to `mesh_parameter_count` floats and fills what a
+shorter block leaves out with zeros, so a caller written against an older
+layout keeps drawing as it did. Shorter or longer blocks are rejected
+(`invalid_geometry`).
 
 | Buffer | Contents |
 | --- | --- |
