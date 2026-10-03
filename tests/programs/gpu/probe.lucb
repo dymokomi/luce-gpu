@@ -1,4 +1,4 @@
-import gpu
+import luce_gpu.gpu
 import frames
 import ownership
 import drawing
@@ -10,7 +10,7 @@ import allocation
 import memory
 import native
 import thread
-import window
+import luce_window.window
 
 func worker(context: void*?):
     let rejected = (bool*)(context else trap("missing test context"))

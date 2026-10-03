@@ -11,7 +11,7 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--compiler', required=True, type=Path)
 parser.add_argument('--headers', required=True, type=Path, help='directory containing vulkan/vulkan.h')
 args = parser.parse_args()
-bindings = (ROOT / 'src/luce_gpu/gpu/vulkan/bindings.lucb').read_text(encoding='utf-8')
+bindings = (ROOT / 'src/gpu/vulkan/bindings.lucb').read_text(encoding='utf-8')
 native = ['#define VK_USE_PLATFORM_WIN32_KHR', '#include <windows.h>',
           '#include <vulkan/vulkan.h>', '#include <stdio.h>', '#include <stddef.h>', 'int main(void) {']
 test_bindings = re.sub(r'^extern func .*\n', '', bindings, flags=re.MULTILINE)

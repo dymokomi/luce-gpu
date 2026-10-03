@@ -1,7 +1,7 @@
-import gpu
-import input
+import luce_gpu.gpu
+import luce_window.input
 import thread
-import window
+import luce_window.window
 
 ## Native GPU presentation with no platform-specific application code. Escape or
 ## the title-bar close button exits. Later increments add portable shaders/drawing

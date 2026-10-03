@@ -162,7 +162,7 @@ def main():
              '',
              '# mark: Vulkan bindings =======================================================================',
              '']
-    authored = ROOT / 'src/luce_gpu/gpu/vulkan'
+    authored = ROOT / 'src/gpu/vulkan'
     constants = set()
     for source in authored.rglob('*.lucb'):
         if source.name not in ('bindings.lucb', 'shaders.lucb'):
@@ -192,7 +192,7 @@ def main():
             constant = tag.get('values')
             lines += [f'let {constant}: u32 = {values[constant]}', '']
     lines += functions
-    output = ROOT / 'src/luce_gpu/gpu/vulkan/bindings.lucb'
+    output = ROOT / 'src/gpu/vulkan/bindings.lucb'
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_bytes(('\n'.join(lines) + '\n').encode("utf-8"))
     print(f'wrote {output.relative_to(ROOT)} ({len(needed)} structures, {len(functions)} functions)')

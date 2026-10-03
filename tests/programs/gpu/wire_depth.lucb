@@ -1,6 +1,6 @@
 ## Actual GPU pixels: sloping coplanar wires, occluders and draw-state reset.
-import gpu
-import window
+import luce_gpu.gpu
+import luce_window.window
 import native
 from depth_slope import plane, segment
 

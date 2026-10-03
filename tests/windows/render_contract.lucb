@@ -1,5 +1,5 @@
-import gpu
-import window
+import luce_gpu.gpu
+import luce_window.window
 import thread
 
 pub func main(arguments: str[]) -> i32!:

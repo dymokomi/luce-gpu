@@ -1,4 +1,4 @@
-import gpu
+import luce_gpu.gpu
 import memory
 import shaders
 

@@ -20,7 +20,7 @@ env = dict(os.environ, LUCE_BASE=compiler)
 def run(command, **kwargs):
     subprocess.run([str(part) for part in command], check=True, env=env, cwd=ROOT, timeout=900, **kwargs)
 
-source = ROOT / "src" / PACKAGE.replace("-", "_")
+source = ROOT / "src"
 targets = sorted(p for p in source.iterdir() if p.suffix == ".lucb" or (p / "ORDER").exists())
 # tests/unit exercise POSIX hosts (child processes through sh, rooted paths); Windows has
 # its own contracts under tests/windows

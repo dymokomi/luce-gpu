@@ -106,8 +106,8 @@ Escape or the close button exits. The complete event loop is in the example.
 The graphics setup itself is:
 
 ```luce
-import gpu
-import window
+import luce_gpu.gpu
+import luce_window.window
 
 var device = try gpu.Device.open()
 defer device.destroy()
@@ -229,7 +229,7 @@ continue to return `unsupported` until that backend is implemented.
 
 ## Backend boundary
 
-The files under `src/luce_gpu/gpu/` share one standard module scope:
+The files under `src/gpu/` share one standard module scope:
 
 | Files | Responsibility |
 | --- | --- |

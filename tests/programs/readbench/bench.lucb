@@ -1,7 +1,7 @@
 ## Readback and upload timings, phase by phase: for profiling a device's
 ## transfers (LINUX, WINDOWS). Not a check: build and run it by hand.
 ##   luc build   (in this directory), then run build/readbench
-import gpu
+import luce_gpu.gpu
 import memory
 import time
 
