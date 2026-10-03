@@ -1,8 +1,8 @@
 ## Frame/view scopes share one contract across independent UI/3D drawing code.
-import luce_gpu.gpu
+from luce_gpu import gpu
 import interop
 import ownership
-import luce_window.window
+from luce_window import window
 import native
 import memory
 import allocation

@@ -106,8 +106,8 @@ Escape or the close button exits. The complete event loop is in the example.
 The graphics setup itself is:
 
 ```luce
-import luce_gpu.gpu
-import luce_window.window
+from luce_gpu import gpu
+from luce_window import window
 
 var device = try gpu.Device.open()
 defer device.destroy()

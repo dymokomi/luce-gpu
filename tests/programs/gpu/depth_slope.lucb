@@ -1,5 +1,5 @@
 ## Portable offscreen depth-slope regression, shared by Metal and Vulkan tests.
-import luce_gpu.gpu
+from luce_gpu import gpu
 import memory
 
 let matrix: f32[16] = [1.0,0.0,0.0,0.0,0.0,1.0,0.0,0.0,0.0,0.0,1.0,0.0,0.0,0.0,0.0,1.0]

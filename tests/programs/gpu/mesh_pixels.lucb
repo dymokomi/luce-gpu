@@ -1,7 +1,7 @@
 ## Portable mesh-draw pixels, shared by Metal and Vulkan tests: vertex pulling
 ## from several buffers, a partial upload that moves a mesh, Lambert lighting in
 ## the shader, constant-width wires from point pairs, and face ids for picking.
-import luce_gpu.gpu
+from luce_gpu import gpu
 import memory
 
 let width: u32 = 256

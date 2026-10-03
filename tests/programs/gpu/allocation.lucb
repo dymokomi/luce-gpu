@@ -1,11 +1,11 @@
 ## Count Base-owned allocations and refuse each construction stage in turn.
 ## Native Objective-C allocations are covered by Metal validation and the native
 ## ownership review; this allocator specifically proves Base storage unwinding.
-import luce_gpu.gpu
+from luce_gpu import gpu
 import interop
 import ownership
 import memory
-import luce_window.window
+from luce_window import window
 
 pub func restore(heap: memory.Allocator):
     memory.heap = heap

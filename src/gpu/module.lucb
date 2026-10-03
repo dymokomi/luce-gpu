@@ -10,12 +10,12 @@
 
 import c
 import memory
-import luce_std.math32
+from luce_std import math32
 import platform
-import luce_window.window
+from luce_window import window
 import interop
 import ownership
-import luce_std.math
+from luce_std import math
 import thread
 
 # mark: Errors ================================================================================
