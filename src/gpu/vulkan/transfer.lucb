@@ -84,10 +84,22 @@ func vulkan_read_acquire(device: VulkanDevice*) -> ReadSlot!:
     error(failed, "every Vulkan readback slot is held; finish a read batch first")
 
 ## Record every copy of a batch into readback slot `index` and submit them as one.
+## Copies whose spans overlap (tiles side by side in one strip: disjoint bytes,
+## interleaved rows) are writes to the same range as far as Vulkan's hazard rules
+## go, so a transfer-to-transfer barrier on the slot separates such a copy from
+## the earlier ones it overlaps. Packed batches never overlap and get none.
 func vulkan_read_submit(device: VulkanDevice*, index: usize, entries: const ReadEntry[]) -> ReadTicket!:
     let ring = &device.reads[index]
     let slot = try vulkan_begin(device)
-    for entry in entries:
+    # The copies recorded since the last barrier start here.
+    var since: usize = 0
+    for position in 0..<entries.length:
+        let entry = entries[position]
+        for earlier in since..<position:
+            if read_spans_overlap(entries[earlier], entry):
+                vulkan_ring_write_barrier(slot.command, ring.buffer)
+                since = position
+                break
         let texture = (VulkanTexture*)entry.texture.native
         vulkan_transition(slot.command, texture, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL)
         var copy = vulkan_copy_region(entry.region)
@@ -102,6 +114,13 @@ func vulkan_read_submit(device: VulkanDevice*, index: usize, entries: const Read
         ((VulkanTexture*)entry.texture.native).last_use = serial
     ring.serial = serial
     return ReadTicket(serial = serial)
+
+## Order earlier transfer writes to `buffer` before later ones.
+func vulkan_ring_write_barrier(command: u64, buffer: u64):
+    var barrier = VkBufferMemoryBarrier(sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER, srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+                                        dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                                        dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, buffer = buffer, offset = 0, size = VK_WHOLE_SIZE)
+    vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, none, 1, (void*)&barrier, 0, none)
 
 ## Give readback slot `index` back. Work still in flight on it is waited for
 ## by the next batch that takes the slot.

@@ -879,6 +879,8 @@ let VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR: u32 = 1000004000
 
 let VK_PIPELINE_STAGE_VERTEX_SHADER_BIT: u32 = 8
 let VK_STRUCTURE_TYPE_MEMORY_BARRIER: u32 = 46
+let VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER: u32 = 44
+let VK_WHOLE_SIZE: u64 = 18446744073709551615
 
 extern struct VkBufferCopy:
     srcOffset: u64
@@ -890,3 +892,14 @@ extern struct VkMemoryBarrier:
     pNext: void*?
     srcAccessMask: u32
     dstAccessMask: u32
+
+extern struct VkBufferMemoryBarrier:
+    sType: u32
+    pNext: void*?
+    srcAccessMask: u32
+    dstAccessMask: u32
+    srcQueueFamilyIndex: u32
+    dstQueueFamilyIndex: u32
+    buffer: u64
+    offset: u64
+    size: u64

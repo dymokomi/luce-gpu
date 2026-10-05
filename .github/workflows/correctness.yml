@@ -43,6 +43,11 @@ jobs:
           mkdir -p "$RUNNER_TEMP/luce-bin"
           ln -s "$(command -v clang)" "$RUNNER_TEMP/luce-bin/cc"
           echo "$RUNNER_TEMP/luce-bin" >> "$GITHUB_PATH"
+      # Lavapipe gives the runner a Vulkan device, so the Vulkan batching check runs under
+      # the Khronos validation layer with synchronization validation.
+      - name: Software Vulkan device and validation layers (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers vulkan-validationlayers
       - name: Build the compiler
         working-directory: luce-base
         run: ./build.sh

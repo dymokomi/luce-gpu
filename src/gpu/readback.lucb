@@ -89,7 +89,7 @@ pub struct ReadBatch:
         let row = (usize)(row_texels if row_texels > 0 else region.width)
         if row < (usize)region.width or offset % texel != 0:
             error(invalid_geometry, "a read's rows are at least its width apart, at an offset of whole texels")
-        let span = ((usize)region.height - 1) * row * texel + (usize)region.width * texel
+        let span = read_span(region, row_texels, texel)
         if offset > self.slot.capacity or span > self.slot.capacity - offset:
             error(invalid_pixels, "a read must fit the batch")
         if self.count == self.entries.length:
@@ -190,6 +190,20 @@ pub struct ReadBatch:
         for index in 0..<self.count:
             release_texture(self.entries[index].texture)
         self.count = 0
+
+## The bytes a read of `region` covers from its offset: whole rows `row_texels`
+## apart (0: tightly packed), the last one only as wide as the region. Reads
+## side by side in one strip interleave their rows, so their spans overlap even
+## though their bytes do not.
+func read_span(region: Region, row_texels: u32, texel: usize) -> usize:
+    let row = (usize)(row_texels if row_texels > 0 else region.width)
+    return ((usize)region.height - 1) * row * texel + (usize)region.width * texel
+
+## Whether the spans of two recorded reads share any byte of the slot.
+func read_spans_overlap(first: ReadEntry, second: ReadEntry) -> bool:
+    let first_end = first.offset + read_span(first.region, first.row_texels, texel_bytes(first.texture.format))
+    let second_end = second.offset + read_span(second.region, second.row_texels, texel_bytes(second.texture.format))
+    return first.offset < second_end and second.offset < first_end
 
 func align_read(offset: usize) -> usize:
     return (offset + read_alignment - 1) // read_alignment * read_alignment
