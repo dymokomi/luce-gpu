@@ -1,4 +1,4 @@
-import gpu
+from luce_gpu import gpu
 import memory
 import thread
 import depth_slope
