@@ -21,7 +21,7 @@ pub struct Shader:
 
     ## Compile a fragment program from its SPIR-V words and its Metal source.
     ## Each backend uses its own form and ignores the other.
-    pub func create(device: Device, spirv: const u32[], msl: c.str) -> Shader!:
+    pub static func create(device: Device, spirv: const u32[], msl: c.str) -> Shader!:
         let device_state = try device.checked()
         if spirv.length < 5 or spirv[0] != 0x07230203:
             error(invalid_shader, "SPIR-V words must begin with the SPIR-V magic number")
@@ -66,7 +66,7 @@ pub struct Pipeline:
 
     ## Build a pipeline drawing `shader` with `blend` into targets of `format`,
     ## or into presentation surfaces when `format` is `none`.
-    pub func create(device: Device, shader: Shader, blend: Blend, pixel_format: Format? = none) -> Pipeline!:
+    pub static func create(device: Device, shader: Shader, blend: Blend, pixel_format: Format? = none) -> Pipeline!:
         let device_state = try device.checked()
         let shader_state = try shader.checked()
         if shader_state.device != device_state:

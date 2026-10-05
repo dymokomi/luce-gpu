@@ -52,7 +52,7 @@ pub struct ReadBatch:
     var phase: u8
 
     ## A batch holding a free slot of `device`'s readback ring.
-    pub func begin(device: Device) -> ReadBatch!:
+    pub static func begin(device: Device) -> ReadBatch!:
         return try read_batch_open(try device.checked())
 
     ## The bytes a batch can hold.

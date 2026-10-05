@@ -37,7 +37,7 @@ pub struct UploadBatch:
     var submissions: usize
 
     ## A batch for `device`'s textures.
-    pub func begin(device: Device) -> UploadBatch!:
+    pub static func begin(device: Device) -> UploadBatch!:
         try check_thread()
         return UploadBatch(device = try device.checked())
 

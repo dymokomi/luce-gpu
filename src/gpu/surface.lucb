@@ -15,7 +15,7 @@ pub struct Surface:
     var state: SurfaceState*?
 
     ## Open a surface presenting `device` onto `target`'s window.
-    pub func open(device: Device, target: window.Window) -> Surface!:
+    pub static func open(device: Device, target: window.Window) -> Surface!:
         let device_state = try device.checked()
         var host = try target.acquire_presentation()
         errdefer host.destroy()

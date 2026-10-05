@@ -17,7 +17,7 @@ pub struct Texture:
 
     ## Allocate an uninitialised `width` by `height` texture of `format`, each
     ## dimension in 1..16384.
-    pub func create(device: Device, width: u32, height: u32, pixel_format: Format) -> Texture!:
+    pub static func create(device: Device, width: u32, height: u32, pixel_format: Format) -> Texture!:
         let device_state = try device.checked()
         if width == 0 or height == 0 or width > 16384 or height > 16384:
             error(invalid_geometry, "texture dimensions must be in 1..16384")

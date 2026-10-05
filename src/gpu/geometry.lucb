@@ -4,7 +4,7 @@ pub struct Geometry:
     var state: GeometryState*?
 
     ## Upload once. The caller may release its CPU vertices immediately.
-    pub func create(device: Device, vertices: const Vertex[], lines: bool = false) -> Geometry!:
+    pub static func create(device: Device, vertices: const Vertex[], lines: bool = false) -> Geometry!:
         let owner = try device.checked()
         if vertices.length == 0 or vertices.length > 4194304 or (not lines and vertices.length % 3 != 0):
             error(invalid_geometry, "invalid retained geometry count")
@@ -52,7 +52,7 @@ pub func draw_geometry(target: const RenderTarget*, geometry: Geometry, matrix: 
     let state = geometry.state else error(closed, "retained geometry is closed")
     if target.frame.device != state.device: error(invalid_geometry, "retained geometry belongs to another device")
     if matrix.length != 16 or not (width > 0.0 and width <= 32.0) or not math.is_finite(bias): error(invalid_geometry, "invalid geometry drawing parameters")
-    if not (slope_bias >= 0.0 and slope_bias <= 32.0) or (state.lines and slope_bias != 0.0): error(invalid_geometry,"slope bias requires triangle geometry and a finite factor in 0..32")
+    if not (slope_bias >= 0.0 and slope_bias <= 32.0) or (state.lines and slope_bias != 0.0): error(invalid_geometry, "slope bias requires triangle geometry and a finite factor in 0..32")
     for value in matrix:
         if not math.is_finite((f64)value): error(invalid_geometry, "nonfinite geometry matrix")
     try check_color(color)
@@ -72,8 +72,8 @@ pub func draw_geometry(target: const RenderTarget*, geometry: Geometry, matrix: 
     values[22] = (f32)size.height
     values[23] = -1.0 if state.device.backend == Backend.vulkan else 1.0
     values[24] = (f32)bias
-    let depth_slope = slope_bias * math.max(scale_x,scale_y)
-    if depth_slope > 256.0: error(invalid_geometry,"backing depth slope factor exceeds 256")
+    let depth_slope = slope_bias * math.max(scale_x, scale_y)
+    if depth_slope > 256.0: error(invalid_geometry, "backing depth slope factor exceeds 256")
     try target.frame.canvas.retained(state, target.clipping, region, values, (f32)depth_slope)
 
 func backend_geometry_create(device: DeviceState*, vertices: const Vertex[]) -> void*!:
