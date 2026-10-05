@@ -136,12 +136,12 @@ func vulkan_device_open() -> VulkanDevice*!:
     try vulkan_check(vkEnumeratePhysicalDevices(state.instance, &count, none), "Vulkan devices could not be enumerated")
     if count == 0:
         error(unavailable, "no Vulkan device is available")
-    let devices = try alloc u64[(usize)count]
+    let devices = try new u64[(usize)count] ---
     defer free(devices)
     try vulkan_check(vkEnumeratePhysicalDevices(state.instance, &count, devices.data), "Vulkan devices changed during enumeration")
     # a discrete GPU first, then an integrated one, then anything else: on a laptop with
     # both, drawing belongs on the one built for it
-    let order = try alloc u64[(usize)count]
+    let order = try new u64[(usize)count] ---
     defer free(order)
     var ordered: usize
     for rank in 0..<3:
@@ -153,7 +153,7 @@ func vulkan_device_open() -> VulkanDevice*!:
         let physical = order[index]
         var families: u32 = 0
         vkGetPhysicalDeviceQueueFamilyProperties(physical, &families, none)
-        let properties = try alloc VkQueueFamilyProperties[(usize)families]
+        let properties = try new VkQueueFamilyProperties[(usize)families] ---
         defer free(properties)
         vkGetPhysicalDeviceQueueFamilyProperties(physical, &families, properties.data)
         for family in 0..<(usize)families:
@@ -210,7 +210,7 @@ func vulkan_memory_pages(device: VulkanDevice*) -> usize:
 
 func vulkan_device_destroy(state: VulkanDevice*):
     if state.device != 0:
-        discard(vkDeviceWaitIdle(state.device))
+        _ = vkDeviceWaitIdle(state.device)
         vulkan_drawing_destroy(state)
         # Textures still open when the device goes release their pages with it.
         while let page = state.pages:
@@ -277,7 +277,7 @@ func vulkan_page_create(device: VulkanDevice*, type_index: u32, size: u64) -> Vu
     errdefer vkFreeMemory(device.device, memory_block, none)
     let page = try new VulkanPage(memory = memory_block, size = size, type_index = type_index) in memory.heap
     errdefer free(page) in memory.heap
-    page.ranges = try alloc VulkanRange[8] in memory.heap
+    page.ranges = try new VulkanRange[8] --- in memory.heap
     page.ranges[0] = VulkanRange(offset = 0, size = size)
     page.range_count = 1
     page.next = device.pages
@@ -308,7 +308,7 @@ func vulkan_page_destroy(device: VulkanDevice*, page: VulkanPage*):
 ## growing the list to that before taking leaves room for every later release.
 func vulkan_page_take(page: VulkanPage*, size: u64, alignment: u64) -> u64?!:
     if page.ranges.length < page.live + 2:
-        let grown = try alloc VulkanRange[(page.live + 2) * 2] in memory.heap
+        let grown = try new VulkanRange[(page.live + 2) * 2] --- in memory.heap
         memory.copy(grown, page.ranges, page.range_count)
         free(page.ranges) in memory.heap
         page.ranges = grown
@@ -389,11 +389,11 @@ func vulkan_slots_create(device: VulkanDevice*) -> !:
         try vulkan_check(vkAllocateCommandBuffers(device.device, &command_info, &slot.command), "a Vulkan command buffer could not be allocated")
         var fence_info = VkFenceCreateInfo(sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO)
         try vulkan_check(vkCreateFence(device.device, &fence_info, none, &slot.fence), "a Vulkan fence could not be created")
-        slot.retired = try alloc VulkanRetired[8] in memory.heap
+        slot.retired = try new VulkanRetired[8] --- in memory.heap
 
 ## Wait for the device, free everything held, and destroy the ring.
 func vulkan_slots_destroy(device: VulkanDevice*):
-    discard(vkDeviceWaitIdle(device.device))
+    _ = vkDeviceWaitIdle(device.device)
     vulkan_retire_through(device, device.submitted)
     for index in 0..<vulkan_slot_limit:
         let slot = &device.slots[index]
@@ -406,7 +406,7 @@ func vulkan_slots_destroy(device: VulkanDevice*):
 ## Queue `item` for release when `slot`'s submission completes.
 func vulkan_retire(slot: VulkanSlot*, item: VulkanRetired) -> !:
     if slot.retired_count == slot.retired.length:
-        let grown = try alloc VulkanRetired[slot.retired.length * 2 + 8] in memory.heap
+        let grown = try new VulkanRetired[slot.retired.length * 2 + 8] --- in memory.heap
         memory.copy(grown, slot.retired, slot.retired_count)
         if slot.retired.length > 0: free(slot.retired) in memory.heap
         slot.retired = grown
@@ -419,9 +419,9 @@ func vulkan_retire_latest(device: VulkanDevice*, item: VulkanRetired):
     if device.submitted > device.completed:
         let slot = &device.slots[(usize)(device.submitted % (u64)vulkan_slot_limit)]
         vulkan_retire(slot, item) catch failure:
-            discard(failure)
+            _ = failure
             # Out of host memory: fall back to waiting rather than leaking or racing.
-            discard(vkDeviceWaitIdle(device.device))
+            _ = vkDeviceWaitIdle(device.device)
             vulkan_retire_through(device, device.submitted)
             vulkan_retired_free(device, item)
         return
@@ -488,7 +488,7 @@ func vulkan_begin(device: VulkanDevice*) -> VulkanSlot*!:
 
 ## After a failed submission: drain the device and free what the slot held.
 func vulkan_abandon(device: VulkanDevice*, slot: VulkanSlot*):
-    discard(vkDeviceWaitIdle(device.device))
+    _ = vkDeviceWaitIdle(device.device)
     vulkan_retire_through(device, device.submitted)
     vulkan_slot_free(device, slot)
 

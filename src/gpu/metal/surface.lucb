@@ -90,7 +90,7 @@ func metal_surface_destroy(state: MetalSurface*, host: window.Presentation):
     let pool = objc_autoreleasePoolPush()
     defer objc_autoreleasePoolPop(pool)
     metal_surface_wait(state) catch failure:
-        discard(failure)
+        _ = failure
     # Window closure may already have detached its callbacks. Its lease still
     # keeps the native host alive until our pending work and layer are released.
     metal_detach(state, host)
@@ -100,7 +100,7 @@ func metal_surface_destroy(state: MetalSurface*, host: window.Presentation):
 
 func metal_detach(state: MetalSurface*, host: window.Presentation):
     let view = host.macos_view() catch failure:
-        discard(failure)
+        _ = failure
         return
     if let layer = state.layer:
         if metal_ptr(view, metal_sel("layer")) == layer:

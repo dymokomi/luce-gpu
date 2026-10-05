@@ -22,7 +22,7 @@ pub func segment(horizontal: bool, offset: f32, sx: f32, sy: f32, behind: f32) -
 pub func pixels(device: gpu.Device) -> !:
     var target = try gpu.Texture.create(device,256,192,gpu.Format.rgba8_linear)
     defer target.destroy()
-    let bytes = try alloc u8[256*192*4] in memory.heap
+    let bytes = try new u8[256*192*4] --- in memory.heap
     defer free(bytes) in memory.heap
     for retained in [false,true]:
         for horizontal in [false,true]:
@@ -45,7 +45,7 @@ pub func pixels(device: gpu.Device) -> !:
                 else: try native.triangles(plane(sx,sy),true,footprint)
                 try gpu.draw_geometry(native,front,matrix,gpu.Color(green = 1.0),4.0)
                 try gpu.draw_geometry(native,back,matrix,gpu.Color(blue = 1.0),4.0)
-                discard(try frame.value().present())
+                _ = try frame.value().present()
                 try target.read(bytes)
                 for station in (usize)2..<(usize)7:
                     let along: usize = (256 if horizontal else 192)*station//8
@@ -62,7 +62,7 @@ pub func pixels(device: gpu.Device) -> !:
                 try gpu.draw_geometry(try next_view.get(),fill,matrix,slope_bias = footprint)
                 try gpu.draw_geometry(try next_view.get(),fill,matrix)
                 try gpu.draw_geometry(try next_view.get(),close_back,matrix,gpu.Color(green = 1.0),1.0)
-                discard(try next.value().present())
+                _ = try next.value().present()
                 try target.read(bytes)
                 check(bytes,128,96,false)
 

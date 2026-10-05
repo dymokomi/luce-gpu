@@ -37,14 +37,14 @@ pub struct UploadBatch:
     var submissions: usize
 
     ## A batch for `device`'s textures.
-    pub static func begin(device: Device) -> UploadBatch!:
+    pub func begin(device: Device) -> UploadBatch!:
         try check_thread()
         return UploadBatch(device = try device.checked())
 
     ## Stage tightly packed, top-down `pixels` for `region` of `texture` (the
     ## whole texture by default); `pixels` may be reused at once. The texture
     ## stays alive until the batch is submitted.
-    pub mutating func add(texture: Texture, pixels: const u8[], region: Region? = none) -> !:
+    pub func add(texture: Texture, pixels: const u8[], region: Region? = none) -> !:
         try check_thread()
         let device = self.device else error(closed, "the upload batch is finished")
         let state = try texture.checked()
@@ -80,7 +80,7 @@ pub struct UploadBatch:
 
     ## Send every staged copy as one submission, without waiting; the batch
     ## records again afterwards.
-    pub mutating func submit() -> !:
+    pub func submit() -> !:
         try check_thread()
         let device = self.device else error(closed, "the upload batch is finished")
         if self.count == 0:
@@ -91,7 +91,7 @@ pub struct UploadBatch:
         self.submissions += 1
 
     ## Drop anything unsent and let the batch go.
-    pub mutating func finish():
+    pub func finish():
         self.release_textures()
         if self.entries.length > 0:
             free(self.entries) in memory.heap
@@ -104,9 +104,9 @@ pub struct UploadBatch:
         self.used = 0
         self.device = none
 
-    mutating func record(state: TextureState*, area: Region, offset: usize, ring: usize) -> !:
+    func record(state: TextureState*, area: Region, offset: usize, ring: usize) -> !:
         if self.count == self.entries.length:
-            let grown = try alloc UploadEntry[self.entries.length * 2 + 64] in memory.heap
+            let grown = try new UploadEntry[self.entries.length * 2 + 64] --- in memory.heap
             memory.copy(grown, self.entries, self.count)
             if self.entries.length > 0:
                 free(self.entries) in memory.heap
@@ -115,20 +115,20 @@ pub struct UploadBatch:
         self.entries[self.count] = UploadEntry(texture = state, region = area, offset = offset, ring = ring)
         self.count += 1
 
-    mutating func grow(bytes: usize) -> !:
+    func grow(bytes: usize) -> !:
         if bytes <= self.staging.length:
             return
         var capacity = self.staging.length * 2 if self.staging.length > 0 else (usize)1 << 20
         while capacity < bytes:
             capacity *= 2
-        let grown = try alloc u8[capacity] in memory.heap
+        let grown = try new u8[capacity] --- in memory.heap
         if self.used > 0:
             memory.copy(grown[..<self.used], self.staging[..<self.used], self.used)
         if self.staging.length > 0:
             free(self.staging) in memory.heap
         self.staging = grown
 
-    mutating func release_textures():
+    func release_textures():
         for index in 0..<self.count:
             release_texture(self.entries[index].texture)
         self.count = 0

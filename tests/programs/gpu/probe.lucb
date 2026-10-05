@@ -37,10 +37,10 @@ func contracts() -> !:
     assert(rejected)
     device.destroy()
     rejected = false
-    discard(device.backend() catch failure:
+    _ = device.backend() catch failure:
         assert(failure.code == gpu.closed)
         rejected = true
-        recover gpu.Backend.automatic)
+        recover gpu.Backend.automatic
     assert(rejected)
     var surface: gpu.Surface
     rejected = false
@@ -58,7 +58,7 @@ func contracts() -> !:
 func pump(target: window.Window*) -> !:
     var count: usize = 0
     while let event = try target.poll():
-        discard(event)
+        _ = event
         count += 1
         assert(count < 4096)
 
@@ -104,10 +104,10 @@ func gui() -> !:
     var invalid: gpu.Color[5] = [gpu.Color(red = -0.1), gpu.Color(green = 1.1), gpu.Color(blue = f64.bits(9221120237041090560)), gpu.Color(red = f64.bits(9218868437227405312)), gpu.Color(green = f64.bits(18442240474082181120))]
     for color in invalid:
         rejected = false
-        discard(surface.clear_present(color) catch failure:
+        _ = surface.clear_present(color) catch failure:
             assert(failure.code == gpu.invalid_color)
             rejected = true
-            recover gpu.PresentResult.skipped)
+            recover gpu.PresentResult.skipped
         assert(rejected)
     try first.show()
     try frame(&surface, &first, "GPU first", gpu.Color(red = 0.25, green = 0.5, blue = 0.75), 137, 188, 225)
@@ -118,20 +118,20 @@ func gui() -> !:
     native.resize_for_test("GPU first", 20000.0, 32.0)
     assert((try first.size()).pixel_width > 16384.0)
     rejected = false
-    discard(surface.clear_present() catch failure:
+    _ = surface.clear_present() catch failure:
         assert(failure.code == gpu.surface_too_large)
         rejected = true
-        recover gpu.PresentResult.skipped)
+        recover gpu.PresentResult.skipped
     assert(rejected)
     try first.resize(127, 81)
     native.large_backing_height("GPU first")
     defer native.restore_backing()
     assert((try first.size()).pixel_height > 16384.0)
     rejected = false
-    discard(surface.clear_present() catch failure:
+    _ = surface.clear_present() catch failure:
         assert(failure.code == gpu.surface_too_large)
         rejected = true
-        recover gpu.PresentResult.skipped)
+        recover gpu.PresentResult.skipped
     assert(rejected)
     native.restore_backing()
     try first.resize(127, 81)
@@ -154,10 +154,10 @@ func gui() -> !:
     assert((try surface.clear_present()) == gpu.PresentResult.submitted)
     first.destroy()
     rejected = false
-    discard(surface.clear_present() catch failure:
+    _ = surface.clear_present() catch failure:
         assert(failure.code == window.closed)
         rejected = true
-        recover gpu.PresentResult.skipped)
+        recover gpu.PresentResult.skipped
     assert(rejected)
     try surface.wait_idle()
     surface.destroy()
@@ -180,10 +180,10 @@ func gui() -> !:
     assert(try lease.visible())
     second.destroy()
     rejected = false
-    discard(lease.size() catch failure:
+    _ = lease.size() catch failure:
         assert(failure.code == window.closed)
         rejected = true
-        recover window.Size())
+        recover window.Size()
     assert(rejected)
     lease.destroy()
     lease.destroy()

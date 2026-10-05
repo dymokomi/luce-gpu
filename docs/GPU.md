@@ -116,7 +116,7 @@ defer target.destroy()
 var surface = try gpu.Surface.open(device, target)
 defer surface.destroy()
 try target.show()
-discard(try surface.clear_present(gpu.Color(red = 0.025, green = 0.06, blue = 0.15)))
+_ = try surface.clear_present(gpu.Color(red = 0.025, green = 0.06, blue = 0.15))
 try surface.wait_idle()
 ```
 
@@ -196,7 +196,7 @@ defer target.release()
 let widget = try target.value().region(gpu.Rect(x = 20.0, y = 20.0, width = 200.0, height = 150.0))
 defer widget.release()
 try widget.value().triangles(vertices, true)
-discard(try frame.value().present())
+_ = try frame.value().present()
 ```
 
 Rectangles use logical points. The frame snapshots logical and backing extents;

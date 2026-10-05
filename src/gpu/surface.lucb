@@ -15,7 +15,7 @@ pub struct Surface:
     var state: SurfaceState*?
 
     ## Open a surface presenting `device` onto `target`'s window.
-    pub static func open(device: Device, target: window.Window) -> Surface!:
+    pub func open(device: Device, target: window.Window) -> Surface!:
         let device_state = try device.checked()
         var host = try target.acquire_presentation()
         errdefer host.destroy()
@@ -40,7 +40,7 @@ pub struct Surface:
         let state = try self.checked()
         try check_color(color)
         # Test window liveness even if no previous command is pending.
-        discard(try state.host.size())
+        _ = try state.host.size()
         if state.active_frame:
             error(frame_in_use, "finish the active frame before presenting")
         return try backend_clear_present(state.device, state.host, state.native, color)
@@ -51,7 +51,7 @@ pub struct Surface:
     pub func render(canvas: Canvas, color: Color = Color()) -> PresentResult!:
         let state = try self.checked()
         try check_color(color)
-        discard(try state.host.size())
+        _ = try state.host.size()
         if state.active_frame:
             error(frame_in_use, "finish the active frame before presenting")
         try check_canvas_device(canvas, state.device)
@@ -87,7 +87,7 @@ pub struct Surface:
 
     ## Idempotent on this value. Drain pending work and release all resources.
     ## Cleanup cannot return an execution error; call wait_idle to observe it.
-    pub mutating func destroy():
+    pub func destroy():
         let state = self.state else return
         require_thread()
         self.state = none

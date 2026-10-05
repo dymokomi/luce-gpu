@@ -8,7 +8,7 @@ let width: u32 = 256
 let height: u32 = 192
 
 func bytes_of[T](values: const T[]) -> const u8[]:
-    return u8[]((u8*)values.data, values.length * sizeof(T))
+    return u8[]((u8*)values.data, values.length * memory.size_of(T))
 
 ## A parameter block with identity transforms: positions are clip coordinates.
 func parameters(shading: gpu.Shading, tint: gpu.Color, lit: bool) -> f32[124]:
@@ -33,7 +33,7 @@ func draw(target: gpu.Texture*, buffers: const gpu.MeshBuffers*, vertices: usize
     let view = try frame.value().target()
     defer view.release()
     try gpu.draw_mesh(try view.get(), buffers, vertices, block, kind)
-    discard(try frame.value().present(gpu.Color(0.0, 0.0, 0.0, 1.0)))
+    _ = try frame.value().present(gpu.Color(0.0, 0.0, 0.0, 1.0))
     try target.read(image)
 
 func pixel(image: const u8[], x: u32, y: u32) -> u8[4]:
@@ -46,7 +46,7 @@ func near(value: u8, expected: u8) -> bool:
 pub func pixels(device: gpu.Device) -> !:
     var target = try gpu.Texture.create(device, width, height, gpu.Format.rgba8_linear)
     defer target.destroy()
-    let image = try alloc u8[(usize)(width * height * 4)] in memory.heap
+    let image = try new u8[(usize)(width * height * 4)] --- in memory.heap
     defer free(image) in memory.heap
     # A quad over the left half, then over the right half after an upload.
     let left: f32[12] = [-1.0, -1.0, 0.5, 0.0, -1.0, 0.5, 0.0, 1.0, 0.5, -1.0, 1.0, 0.5]

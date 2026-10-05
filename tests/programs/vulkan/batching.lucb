@@ -9,7 +9,7 @@ import mesh_pixels
 ## uses them is in flight stay valid until it completes, and pooled memory pages
 ## are all released again.
 pub func main(arguments: str[]) -> i32!:
-    discard(arguments)
+    _ = arguments
     var device = gpu.Device.open() catch failure:
         if failure.code == gpu.unavailable:
             print("skip no Vulkan device")
@@ -52,7 +52,7 @@ func ordering(device: gpu.Device) -> !:
         # The copy that samples `previous` may still be in flight.
         previous.destroy()
         previous = next
-        discard(step)
+        _ = step
     var result: u8[64]
     try previous.read(result)
     for index in 0..<(usize)16:
@@ -63,7 +63,7 @@ func ordering(device: gpu.Device) -> !:
 ## ones and destroyed while their passes may be in flight.
 func stress(device: gpu.Device, count: usize, window: usize) -> !:
     let baseline = try device.memory_pages()
-    let live = try alloc gpu.Texture[window] in memory.heap
+    let live = try new gpu.Texture[window] --- in memory.heap
     defer free(live) in memory.heap
     var peak: usize = 0
     for index in 0..<count:

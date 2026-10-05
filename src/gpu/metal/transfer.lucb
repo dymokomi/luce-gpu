@@ -84,7 +84,7 @@ func metal_read_ready(ticket: ReadTicket) -> bool:
 func metal_read_release(device: MetalDevice*, index: usize, ticket: ReadTicket, pending: bool):
     if pending:
         metal_read_wait(ticket) catch failure:
-            discard(failure)
+            _ = failure
     device.reads[index].busy = false
 
 func metal_rings_destroy(device: MetalDevice*):

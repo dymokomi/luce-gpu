@@ -11,20 +11,20 @@ func milliseconds(first: u64, last: u64) -> f64:
 func fill(texture: gpu.Texture*, color: gpu.Color) -> !:
     let frame = try texture.frame()
     defer frame.release()
-    discard(try frame.value().present(color))
+    _ = try frame.value().present(color)
 
 pub func main(arguments: str[]) -> i32!:
-    discard(arguments)
+    _ = arguments
     var device = try gpu.Device.open()
     defer device.destroy()
     let count: usize = 64
-    var tiles = try alloc gpu.Texture[count] in memory.heap
+    var tiles = try new gpu.Texture[count] --- in memory.heap
     defer free(tiles) in memory.heap
     for index in 0..<count:
         tiles[index] = try gpu.Texture.create(device, 256, 256, gpu.Format.rgba16_float)
         try fill(&tiles[index], gpu.Color((f64)index / 64.0, 0.5, 0.25, 1.0))
     let tile_bytes: usize = 256 * 256 * 8
-    let out = try alloc u8[count * tile_bytes] in memory.heap
+    let out = try new u8[count * tile_bytes] --- in memory.heap
     defer free(out) in memory.heap
     for round in 0..<(usize)3:
         # The first batch makes and maps the ring's slot: the one allocation.

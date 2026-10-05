@@ -47,7 +47,7 @@ func vulkan_upload(device: VulkanDevice*, canvas: Canvas) -> VulkanUpload!:
     if canvas.draw_count == 0:
         return upload
     try vulkan_drawing(device)
-    let vertex_bytes = canvas_max(1, canvas.vertex_count) * sizeof(Vertex)
+    let vertex_bytes = canvas_max(1, canvas.vertex_count) * memory.size_of(Vertex)
     let mask_bytes = canvas_max(1, canvas.coverage_count) * 4
     let vertex_offset = vulkan_vertex_offset(canvas)
     let parameter_offset = (vertex_offset + vertex_bytes + 255) // 256 * 256
@@ -89,8 +89,8 @@ func vulkan_upload(device: VulkanDevice*, canvas: Canvas) -> VulkanUpload!:
         VkDescriptorPoolSize(descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, descriptorCount = count * (u32)image_limit)]
     var pool_info = VkDescriptorPoolCreateInfo(sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, maxSets = count + (u32)meshes, poolSizeCount = 2, pPoolSizes = &pool_sizes[0])
     try vulkan_check(vkCreateDescriptorPool(device.device, &pool_info, none, &upload.descriptor_pool), "Vulkan draw descriptors could not be created")
-    upload.descriptors = try alloc u64[canvas.draw_count] in memory.heap
-    let layouts = try alloc u64[canvas.draw_count] in memory.heap
+    upload.descriptors = try new u64[canvas.draw_count] --- in memory.heap
+    let layouts = try new u64[canvas.draw_count] --- in memory.heap
     defer free(layouts) in memory.heap
     for index in 0..<canvas.draw_count:
         layouts[index] = device.descriptor_layout
@@ -122,7 +122,7 @@ func vulkan_upload(device: VulkanDevice*, canvas: Canvas) -> VulkanUpload!:
         writes[6] = VkWriteDescriptorSet(sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, dstSet = upload.descriptors[index], dstBinding = 7, descriptorCount = 1, descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, pBufferInfo = &parameter_info)
         vkUpdateDescriptorSets(device.device, 7, &writes[0], 0, none)
     if meshes > 0:
-        upload.mesh_descriptors = try alloc u64[canvas.draw_count] in memory.heap
+        upload.mesh_descriptors = try new u64[canvas.draw_count] --- in memory.heap
         placed = 0
         for index in 0..<canvas.draw_count:
             upload.mesh_descriptors[index] = 0
@@ -148,7 +148,7 @@ func vulkan_encode(device: VulkanDevice*, command: u64, formats: VulkanFormatSta
     for index in 0..<canvas.draw_count:
         if let mesh = canvas.draws[index].mesh:
             vulkan_mesh_used(mesh, serial)
-            discard(try vulkan_mesh_pipeline(device, formats, mesh.kind))
+            _ = try vulkan_mesh_pipeline(device, formats, mesh.kind)
         if let geometry = canvas.draws[index].geometry:
             if serial != 0: ((VulkanGeometry*)geometry.native).last_use = serial
             if formats.geometry == 0:
@@ -208,7 +208,7 @@ func vulkan_encode(device: VulkanDevice*, command: u64, formats: VulkanFormatSta
     vkCmdEndRenderPass(command)
 
 func vulkan_drain(device: VulkanDevice*):
-    discard(vkDeviceWaitIdle(device.device))
+    _ = vkDeviceWaitIdle(device.device)
     vulkan_idle(device)
 
 func vulkan_poison(state: VulkanSurface*):

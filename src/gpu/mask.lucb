@@ -23,7 +23,7 @@ func canvas_mask(canvas: Canvas*, pixels: const u8[], width: u32, height: u32,
     let needed = canvas.coverage_count + words
     if needed > canvas.coverage.length:
         let capacity = canvas_max(needed, canvas_min(4194304, canvas_max(1024, canvas.coverage.length * 2)))
-        let grown = try alloc u32[capacity] in memory.heap
+        let grown = try new u32[capacity] --- in memory.heap
         if canvas.coverage_count > 0:
             memory.copy(grown, canvas.coverage, canvas.coverage_count)
         if canvas.coverage.length > 0:

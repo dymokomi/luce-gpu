@@ -52,7 +52,7 @@ pub struct ReadBatch:
     var phase: u8
 
     ## A batch holding a free slot of `device`'s readback ring.
-    pub static func begin(device: Device) -> ReadBatch!:
+    pub func begin(device: Device) -> ReadBatch!:
         return try read_batch_open(try device.checked())
 
     ## The bytes a batch can hold.
@@ -66,7 +66,7 @@ pub struct ReadBatch:
 
     ## `bytes` of the slot for the caller's copies, at an aligned offset; none
     ## when they do not fit.
-    pub mutating func reserve(bytes: usize) -> usize?!:
+    pub func reserve(bytes: usize) -> usize?!:
         try self.recording()
         let offset = align_read(self.used)
         if bytes > self.slot.capacity or offset > self.slot.capacity - bytes:
@@ -77,7 +77,7 @@ pub struct ReadBatch:
     ## Record a copy of `region` of `texture` into the slot at `offset`, its
     ## rows `row_texels` texels apart (0: tightly packed). The texture stays
     ## alive until the batch is submitted; the bytes must lie in a reservation.
-    pub mutating func copy(texture: Texture, region: Region, offset: usize, row_texels: u32 = 0) -> !:
+    pub func copy(texture: Texture, region: Region, offset: usize, row_texels: u32 = 0) -> !:
         try self.recording()
         let state = try texture.checked()
         let device = self.device else error(closed, "the read batch is finished")
@@ -93,7 +93,7 @@ pub struct ReadBatch:
         if offset > self.slot.capacity or span > self.slot.capacity - offset:
             error(invalid_pixels, "a read must fit the batch")
         if self.count == self.entries.length:
-            let grown = try alloc ReadEntry[self.entries.length * 2 + 64] in memory.heap
+            let grown = try new ReadEntry[self.entries.length * 2 + 64] --- in memory.heap
             memory.copy(grown, self.entries, self.count)
             if self.entries.length > 0:
                 free(self.entries) in memory.heap
@@ -104,7 +104,7 @@ pub struct ReadBatch:
 
     ## Reserve room for `region` of `texture`, tightly packed, and record its
     ## copy there: its offset, or none when the batch is full.
-    pub mutating func add(texture: Texture, region: Region) -> usize?!:
+    pub func add(texture: Texture, region: Region) -> usize?!:
         let state = try texture.checked()
         let offset = (try self.reserve((usize)region.width * (usize)region.height * texel_bytes(state.format))) else return none
         try self.copy(texture, region, offset)
@@ -115,7 +115,7 @@ pub struct ReadBatch:
         return self.count
 
     ## Submit every recorded copy as one submission, without waiting.
-    pub mutating func submit() -> !:
+    pub func submit() -> !:
         try self.recording()
         let device = self.device else error(closed, "the read batch is finished")
         defer self.release_textures()
@@ -123,7 +123,7 @@ pub struct ReadBatch:
         self.phase = 1
 
     ## Wait for the submitted copies; after this, `bytes` reads them.
-    pub mutating func wait() -> !:
+    pub func wait() -> !:
         if self.phase == 2:
             return
         if self.phase != 1:
@@ -138,7 +138,7 @@ pub struct ReadBatch:
     ## are (the batch is then complete, as after `wait`), false while the GPU
     ## is still on them. What keeps an input path from ever stopping on the
     ## GPU: poll once a frame instead of waiting.
-    pub mutating func ready() -> bool!:
+    pub func ready() -> bool!:
         if self.phase == 2:
             return true
         if self.phase != 1:
@@ -159,7 +159,7 @@ pub struct ReadBatch:
         return u8[](data + offset, length)
 
     ## Record again into the same slot; a submitted batch is waited for first.
-    pub mutating func reset() -> !:
+    pub func reset() -> !:
         if self.phase == 1:
             try self.wait()
         self.release_textures()
@@ -167,7 +167,7 @@ pub struct ReadBatch:
         self.phase = 0
 
     ## Give the slot back to the ring (waiting for a submitted batch).
-    pub mutating func finish():
+    pub func finish():
         let device = self.device else return
         self.device = none
         self.release_textures()
@@ -186,7 +186,7 @@ pub struct ReadBatch:
         if self.phase != 0:
             error(invalid_geometry, "a submitted read batch records again after reset")
 
-    mutating func release_textures():
+    func release_textures():
         for index in 0..<self.count:
             release_texture(self.entries[index].texture)
         self.count = 0

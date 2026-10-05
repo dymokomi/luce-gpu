@@ -80,7 +80,7 @@ pub func pixels() -> !:
     assert(not hidden_target.is_valid())
     try host.show()
     while (try host.poll()) != none:
-        discard(0)
+        _ = 0
     let size = try surface.size()
     let frame = try surface.frame()
     defer frame.release()
@@ -111,9 +111,9 @@ pub func pixels() -> !:
     defer invalid.release()
     let invalid_target = try invalid.value().target()
     defer invalid_target.release()
-    discard(invalid.value().present(gpu.Color(red = 2.0)) catch failure:
+    _ = invalid.value().present(gpu.Color(red = 2.0)) catch failure:
         assert(failure.code == gpu.invalid_color)
-        recover gpu.PresentResult.skipped)
+        recover gpu.PresentResult.skipped
     assert(not invalid_target.is_valid())
     let resized = try surface.frame()
     defer resized.release()
@@ -125,9 +125,9 @@ pub func pixels() -> !:
         assert(failure.code == gpu.frame_resized)
         refused = true
     assert(refused)
-    discard(resized.value().present() catch failure:
+    _ = resized.value().present() catch failure:
         assert(failure.code == gpu.frame_resized)
-        recover gpu.PresentResult.skipped)
+        recover gpu.PresentResult.skipped
     assert(not stale.is_valid())
     let closing = try surface.frame()
     defer closing.release()
@@ -147,9 +147,9 @@ pub func pixels() -> !:
     let final = try again.frame()
     defer final.release()
     host.destroy()
-    discard(final.value().present() catch failure:
+    _ = final.value().present() catch failure:
         assert(failure.code == window.closed)
-        recover gpu.PresentResult.skipped)
+        recover gpu.PresentResult.skipped
     final.value().close()
 
 ## Refuse each ownership/view/command allocation, then prove the same operation
@@ -196,4 +196,4 @@ pub func wrong_thread() -> !:
 
 func read_target(context: void*?):
     let target = (interop.View[gpu.RenderTarget]*)(context else trap("missing target"))
-    discard(target.value())
+    _ = target.value()

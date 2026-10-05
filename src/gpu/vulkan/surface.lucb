@@ -75,7 +75,7 @@ func vulkan_swapchain(device: VulkanDevice*, state: VulkanSurface*, width: u32, 
         error(unavailable, "the Vulkan surface cannot provide opaque color attachments")
     var count: u32 = 0
     try vulkan_check(vkGetPhysicalDeviceSurfaceFormatsKHR(device.physical, state.surface, &count, none), "Vulkan surface formats are unavailable")
-    let formats = try alloc VkSurfaceFormatKHR[(usize)count]
+    let formats = try new VkSurfaceFormatKHR[(usize)count] ---
     defer free(formats)
     try vulkan_check(vkGetPhysicalDeviceSurfaceFormatsKHR(device.physical, state.surface, &count, formats.data), "Vulkan surface formats changed")
     var pixel_format: u32 = 0
@@ -104,10 +104,10 @@ func vulkan_swapchain(device: VulkanDevice*, state: VulkanSurface*, width: u32, 
     let depth_view = state.depth_view
     count = 0
     try vulkan_check(vkGetSwapchainImagesKHR(device.device, state.swapchain, &count, none), "Vulkan swapchain images are unavailable")
-    let images = try alloc u64[(usize)count]
+    let images = try new u64[(usize)count] ---
     defer free(images)
     try vulkan_check(vkGetSwapchainImagesKHR(device.device, state.swapchain, &count, images.data), "Vulkan swapchain images changed")
-    state.images = try alloc VulkanImage[(usize)count] in memory.heap
+    state.images = try new VulkanImage[(usize)count] --- in memory.heap
     for index in 0..<(usize)count:
         state.images[index].image = images[index]
         state.images[index].view = try vulkan_image_view(device, images[index], pixel_format, VK_IMAGE_ASPECT_COLOR_BIT)
@@ -136,7 +136,7 @@ func vulkan_swapchain_destroy(device: VulkanDevice*, state: VulkanSurface*):
     state.dirty = true
 
 func vulkan_surface_destroy(device: VulkanDevice*, state: VulkanSurface*):
-    discard(vkDeviceWaitIdle(device.device))
+    _ = vkDeviceWaitIdle(device.device)
     vulkan_swapchain_destroy(device, state)
     if state.acquired != 0: vkDestroySemaphore(device.device, state.acquired, none)
     if state.pool != 0: vkDestroyCommandPool(device.device, state.pool, none)

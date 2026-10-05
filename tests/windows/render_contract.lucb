@@ -21,7 +21,7 @@ pub func main(arguments: str[]) -> i32!:
     var submitted: usize = 0
     let frames: usize = 600 if arguments.length > 1 else 60
     for frame in 0..<frames:
-        while let event = try target.poll(): discard(event)
+        while let event = try target.poll(): _ = event
         if frame == 30:
             try target.resize(720, 480)
         let result = try surface.render(canvas, gpu.Color(red = 0.03, green = 0.04, blue = 0.06))

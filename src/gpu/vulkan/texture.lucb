@@ -72,7 +72,7 @@ func vulkan_sampler(device: VulkanDevice*, filter: u32) -> u64!:
     return sampler
 
 func vulkan_drawing_destroy(device: VulkanDevice*):
-    discard(vkDeviceWaitIdle(device.device))
+    _ = vkDeviceWaitIdle(device.device)
     vulkan_idle(device)
     vulkan_mesh_destroy(device)
     if let placeholder = device.placeholder:
@@ -191,10 +191,10 @@ func vulkan_texture_destroy(device: VulkanDevice*, state: VulkanTexture*):
         vulkan_retired_free(device, item)
         return
     vulkan_retire(&device.slots[(usize)(last_use % (u64)vulkan_slot_limit)], item) catch failure:
-        discard(failure)
+        _ = failure
         # Out of host memory: wait rather than leak or free an image in use.
         vulkan_wait(device, last_use) catch waited:
-            discard(waited)
+            _ = waited
         vulkan_retired_free(device, item)
 
 ## Record a layout transition of the whole image, with the broadest matching

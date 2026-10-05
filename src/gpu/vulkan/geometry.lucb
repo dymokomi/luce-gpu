@@ -6,7 +6,7 @@ struct VulkanGeometry:
     var last_use: u64
 
 func vulkan_geometry_create(device: VulkanDevice*, vertices: const Vertex[]) -> VulkanGeometry*!:
-    let state = try new VulkanGeometry(bytes = (u64)(vertices.length * sizeof(Vertex))) in memory.heap
+    let state = try new VulkanGeometry(bytes = (u64)(vertices.length * memory.size_of(Vertex))) in memory.heap
     errdefer vulkan_geometry_release((void*)device, (void*)state)
     var info = VkBufferCreateInfo(sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, size = state.bytes, usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT)
     try vulkan_check(vkCreateBuffer(device.device, &info, none, &state.buffer), "retained geometry buffer allocation failed")
@@ -31,5 +31,5 @@ func vulkan_geometry_release(raw_device: void*, raw_state: void*):
         vulkan_retired_free(device, item)
         return
     vulkan_retire(&device.slots[(usize)(serial % (u64)vulkan_slot_limit)], item) catch failure:
-        vulkan_wait(device, serial) catch waited: discard(waited)
+        vulkan_wait(device, serial) catch waited: _ = waited
         vulkan_retired_free(device, item)

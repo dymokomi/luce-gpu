@@ -110,10 +110,10 @@ pub func pixels(device: gpu.Device) -> !:
     let inside = try loop.value().target()
     defer inside.release()
     try gpu.draw_image(inside.value(), source, gpu.Rect(width = 2.0, height = 2.0))
-    discard(loop.value().present() catch failure:
+    _ = loop.value().present() catch failure:
         assert(failure.code == gpu.invalid_geometry)
         rejected = true
-        recover gpu.PresentResult.skipped)
+        recover gpu.PresentResult.skipped
     assert(rejected)
     rejected = false
     let again = source.frame() catch failure:
@@ -124,10 +124,10 @@ pub func pixels(device: gpu.Device) -> !:
     # The failed present closed the loop frame, so the texture is free again.
     assert(not rejected)
     rejected = false
-    discard(gpu.Texture.create(device, 0, 4, gpu.Format.r8) catch failure:
+    _ = gpu.Texture.create(device, 0, 4, gpu.Format.r8) catch failure:
         assert(failure.code == gpu.invalid_geometry)
         rejected = true
-        recover gpu.Texture())
+        recover gpu.Texture()
     assert(rejected)
 
     # A destroyed handle refuses, while a draw recorded from it keeps drawing.
@@ -141,10 +141,10 @@ pub func pixels(device: gpu.Device) -> !:
     try gpu.draw_image(full.value(), doomed, gpu.Rect(width = 4.0, height = 4.0))
     doomed.destroy()
     rejected = false
-    discard(doomed.width() catch failure:
+    _ = doomed.width() catch failure:
         assert(failure.code == gpu.closed)
         rejected = true
-        recover 0)
+        recover 0
     assert(rejected)
     assert((try third.value().present()) == gpu.PresentResult.submitted)
     try target.read(result)
@@ -209,25 +209,25 @@ pub func programs(device: gpu.Device) -> !:
     defer area.release()
     try gpu.shade(area.value(), over, gpu.Rect(width = 2.0, height = 2.0))
     var rejected = false
-    discard(wrong.value().present() catch failure:
+    _ = wrong.value().present() catch failure:
         assert(failure.code == gpu.wrong_target)
         rejected = true
-        recover gpu.PresentResult.skipped)
+        recover gpu.PresentResult.skipped
     assert(rejected)
     # Bad SPIR-V and a closed shader are refused.
     rejected = false
-    discard(gpu.Shader.create(device, [(u32)1, (u32)2, (u32)3, (u32)4, (u32)5], shaders.tint_frag_msl) catch failure:
+    _ = gpu.Shader.create(device, [(u32)1, (u32)2, (u32)3, (u32)4, (u32)5], shaders.tint_frag_msl) catch failure:
         assert(failure.code == gpu.invalid_shader)
         rejected = true
-        recover gpu.Shader())
+        recover gpu.Shader()
     assert(rejected)
     var closed = try gpu.Shader.create(device, shaders.tint_frag_words, shaders.tint_frag_msl)
     closed.destroy()
     rejected = false
-    discard(gpu.Pipeline.create(device, closed, gpu.Blend.over) catch failure:
+    _ = gpu.Pipeline.create(device, closed, gpu.Blend.over) catch failure:
         assert(failure.code == gpu.closed)
         rejected = true
-        recover gpu.Pipeline())
+        recover gpu.Pipeline()
     assert(rejected)
 
 ## A read batch: copies of many regions at chosen offsets and row pitches, one
@@ -238,7 +238,7 @@ pub func batches(device: gpu.Device) -> !:
     var left = try gpu.Texture.create(device, 256, 256, gpu.Format.rgba8_linear)
     var right = try gpu.Texture.create(device, 256, 256, gpu.Format.rgba8_linear)
     defer right.destroy()
-    let texels = try alloc u8[256 * 256 * 4] in memory.heap
+    let texels = try new u8[256 * 256 * 4] --- in memory.heap
     defer free(texels) in memory.heap
     for side in 0..<(usize)2:
         for y in 0..<(usize)256:
@@ -294,7 +294,7 @@ pub func batches(device: gpu.Device) -> !:
     var third = try gpu.ReadBatch.begin(device)
     var refused = false
     var fourth = gpu.ReadBatch.begin(device) catch failure:
-        discard(failure)
+        _ = failure
         refused = true
         recover gpu.ReadBatch()
     assert(refused)
@@ -304,7 +304,7 @@ pub func batches(device: gpu.Device) -> !:
     # A read larger than a slot comes back whole, a slot's worth of rows at a time.
     var large = try gpu.Texture.create(device, 4096, 4096, gpu.Format.rgba8_linear)
     defer large.destroy()
-    let whole = try alloc u8[4096 * 4096 * 4] in memory.heap
+    let whole = try new u8[4096 * 4096 * 4] --- in memory.heap
     defer free(whole) in memory.heap
     for row in 0..<(usize)4096:
         for column in 0..<(usize)4096:
@@ -314,7 +314,7 @@ pub func batches(device: gpu.Device) -> !:
             whole[at + 2] = 7
             whole[at + 3] = 255
     try large.upload(whole)
-    let back = try alloc u8[4096 * 4096 * 4] in memory.heap
+    let back = try new u8[4096 * 4096 * 4] --- in memory.heap
     defer free(back) in memory.heap
     try large.read(back)
     for row in [(usize)0, 1000, 2048, 4095]:
@@ -325,9 +325,9 @@ pub func batches(device: gpu.Device) -> !:
 ## Whether the batch refuses to show its bytes (before it has been waited for).
 func refuses_bytes(batch: gpu.ReadBatch*) -> bool:
     let view = batch.bytes(0, 4) catch failure:
-        discard(failure)
+        _ = failure
         return true
-    discard(view)
+    _ = view
     return false
 
 ## Upload batches: many regions of many textures in one submission, in the
@@ -337,7 +337,7 @@ pub func upload_batches(device: gpu.Device) -> !:
     defer first.destroy()
     var second = try gpu.Texture.create(device, 256, 256, gpu.Format.rgba8_linear)
     defer second.destroy()
-    let rows = try alloc u8[256 * 256 * 4] in memory.heap
+    let rows = try new u8[256 * 256 * 4] --- in memory.heap
     defer free(rows) in memory.heap
     var batch = try gpu.UploadBatch.begin(device)
     defer batch.finish()
@@ -367,7 +367,7 @@ pub func upload_batches(device: gpu.Device) -> !:
     var many: gpu.Texture[48] = ---
     for index in 0..<(usize)48:
         many[index] = try gpu.Texture.create(device, 256, 256, gpu.Format.rgba16_float)
-    let cell = try alloc u8[256 * 256 * 8] in memory.heap
+    let cell = try new u8[256 * 256 * 8] --- in memory.heap
     defer free(cell) in memory.heap
     for index in 0..<(usize)48:
         for at in 0..<cell.length:

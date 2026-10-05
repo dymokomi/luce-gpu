@@ -1,6 +1,6 @@
 ## Immutable Metal buffer. Command buffers retain bound resources until complete.
 func metal_geometry_create(device: MetalDevice*, vertices: const Vertex[]) -> void*!:
-    return metal_buffer(metal_required(device.device), metal_sel("newBufferWithBytes:length:options:"), vertices.data, (u64)(vertices.length * sizeof(Vertex)), 0) else error(failed, "could not upload retained geometry")
+    return metal_buffer(metal_required(device.device), metal_sel("newBufferWithBytes:length:options:"), vertices.data, (u64)(vertices.length * memory.size_of(Vertex)), 0) else error(failed, "could not upload retained geometry")
 
 func metal_geometry_release(device: void*, native: void*):
     metal_void(native, metal_sel("release"))

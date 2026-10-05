@@ -7,7 +7,7 @@ from luce_window import window
 ## the title-bar close button exits. Later increments add portable shaders/drawing
 ## on this same device/surface boundary.
 pub func main(arguments: str[]) -> i32!:
-    discard(arguments)
+    _ = arguments
     var device = try gpu.Device.open()
     defer device.destroy()
     var target = try window.Window.open(window.Options(title = "Luce — GPU surface"))
@@ -26,9 +26,9 @@ pub func main(arguments: str[]) -> i32!:
                     if event.key == input.Key.escape:
                         try target.request_close()
                 _:
-                    discard(event)
+                    _ = event
         if running:
-            discard(try surface.clear_present(gpu.Color(red = 0.025, green = 0.06, blue = 0.15)))
+            _ = try surface.clear_present(gpu.Color(red = 0.025, green = 0.06, blue = 0.15))
             thread.sleep(8)
     try surface.wait_idle()
     return 0

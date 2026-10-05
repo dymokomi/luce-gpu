@@ -11,7 +11,7 @@
 
 func vulkan_shader(device: VulkanDevice*, spirv: const u32[]) -> u64!:
     # Vulkan takes a mutable pointer; the words are copied so embedded constants can be passed.
-    let words = try alloc u32[spirv.length]
+    let words = try new u32[spirv.length] ---
     defer free(words)
     memory.copy(words, spirv, spirv.length)
     var info = VkShaderModuleCreateInfo(sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, codeSize = words.length * 4, pCode = words.data)

@@ -78,7 +78,7 @@ func vulkan_buffer_release(raw_device: void*, raw_state: void*):
         vulkan_retired_free(device, item)
         return
     vulkan_retire(&device.slots[(usize)(serial % (u64)vulkan_slot_limit)], item) catch failure:
-        vulkan_wait(device, serial) catch waited: discard(waited)
+        vulkan_wait(device, serial) catch waited: _ = waited
         vulkan_retired_free(device, item)
 
 # mark: Mesh pipelines ========================================================================

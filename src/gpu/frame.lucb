@@ -52,7 +52,7 @@ struct FrameState:
         if let context = self.presentation:
             try (self.validate else trap("frame presentation has no validator"))(context, self.size)
 
-    mutating func close():
+    func close():
         self.ended = true
         if self.counted:
             self.counted = false
@@ -105,7 +105,7 @@ pub struct Frame:
 
     ## End the scope on success or failure. A frame records the extent acquired at
     ## its start; resize requires a new frame instead of stretching stale commands.
-    pub mutating func present(color: Color = Color()) -> PresentResult!:
+    pub func present(color: Color = Color()) -> PresentResult!:
         let state = (try self.state_value()).value()
         defer self.close()
         try state.check()
@@ -117,7 +117,7 @@ pub struct Frame:
         return try submit(context, state.canvas, color)
 
     ## End the recording scope, releasing its resources.
-    pub mutating func close():
+    pub func close():
         if let lease = self.lease:
             self.lease = none
             lease.invalidate()

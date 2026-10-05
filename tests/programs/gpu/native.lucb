@@ -108,7 +108,7 @@ func backing_rect(object: void*, selector: void*, rect: GpuProbeRect) -> GpuProb
 
 pub func restore_backing():
     if let method = backing_method:
-        discard(method_setImplementation(method, backing_original else trap("missing backing conversion")))
+        _ = method_setImplementation(method, backing_original else trap("missing backing conversion"))
     backing_method = none
     backing_original = none
     backing_view = none
@@ -127,7 +127,7 @@ func next_drawable(object: void*, selector: void*) -> void*?:
 
 pub func end():
     if let method = replaced:
-        discard(method_setImplementation(method, original else trap("missing original implementation")))
+        _ = method_setImplementation(method, original else trap("missing original implementation"))
     replaced = none
     original = none
     if let drawable = captured:

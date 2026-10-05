@@ -247,9 +247,9 @@ func metal_pass(device: MetalDevice*, target: void*, slot: usize, canvas: Canvas
         # Mesh pipelines are built before encoding, so encoding cannot fail.
         for draw in canvas.draws[..<canvas.draw_count]:
             if let mesh = draw.mesh:
-                discard(metal_mesh_pipeline(device, state, mesh.kind, slot) catch failure:
+                _ = metal_mesh_pipeline(device, state, mesh.kind, slot) catch failure:
                     metal_void(encoder, metal_sel("endEncoding"))
-                    error(failure.code, failure.message))
+                    error(failure.code, failure.message)
         metal_encode(encoder, state, pipeline, geometry_pipeline, metal_required(buffer), metal_required(masks), canvas, width, height, slot)
     metal_void(encoder, metal_sel("endEncoding"))
     return command

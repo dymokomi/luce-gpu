@@ -54,7 +54,7 @@ func vulkan_texture_release(device: void*, native: void*):
         vulkan_texture_destroy((VulkanDevice*)device, (VulkanTexture*)native)
 
 func metal_texture_release(device: void*, native: void*):
-    discard(device)
+    _ = device
     if platform.macos and platform.arm64:
         metal_texture_destroy((MetalTexture*)native)
 
@@ -101,11 +101,11 @@ func vulkan_pipeline_release(device: void*, native: void*):
         vulkan_pipeline_destroy((VulkanDevice*)device, (VulkanPipeline*)native)
 
 func metal_shader_release(device: void*, native: void*):
-    discard(device)
+    _ = device
     if platform.macos and platform.arm64:
         metal_shader_destroy(native)
 
 func metal_pipeline_release(device: void*, native: void*):
-    discard(device)
+    _ = device
     if platform.macos and platform.arm64:
         metal_pipeline_destroy(native)

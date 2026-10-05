@@ -15,7 +15,7 @@ pub struct Device:
     var state: DeviceState*?
 
     ## Open a device on the selected backend, probing the hardware.
-    pub static func open(backend: Backend = Backend.automatic) -> Device!:
+    pub func open(backend: Backend = Backend.automatic) -> Device!:
         try check_thread()
         let selected = try select_backend(backend)
         let native = try backend_device_open(selected)
@@ -57,7 +57,7 @@ pub struct Device:
         return self.state != none and self.state == other.state
 
     ## Release the device on the main thread; open surfaces keep it alive until they close.
-    pub mutating func destroy():
+    pub func destroy():
         let state = self.state else return
         require_thread()
         self.state = none

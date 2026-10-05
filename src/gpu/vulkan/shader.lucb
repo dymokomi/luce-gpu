@@ -31,7 +31,7 @@ func vulkan_shader_create(device: VulkanDevice*, spirv: const u32[]) -> VulkanSh
     return state
 
 func vulkan_shader_destroy(device: VulkanDevice*, state: VulkanShader*):
-    discard(vkDeviceWaitIdle(device.device))
+    _ = vkDeviceWaitIdle(device.device)
     if state.module != 0: vkDestroyShaderModule(device.device, state.module, none)
     free(state) in memory.heap
 
@@ -40,11 +40,11 @@ func vulkan_pipeline_create(device: VulkanDevice*, shader: VulkanShader*, blend:
     errdefer vulkan_pipeline_destroy(device, state)
     # A texture target's format is known now; build eagerly so failures surface at creation.
     if let target = pixel_format:
-        discard(try vulkan_pipeline_for(device, state, vulkan_native_format(target)))
+        _ = try vulkan_pipeline_for(device, state, vulkan_native_format(target))
     return state
 
 func vulkan_pipeline_destroy(device: VulkanDevice*, state: VulkanPipeline*):
-    discard(vkDeviceWaitIdle(device.device))
+    _ = vkDeviceWaitIdle(device.device)
     for entry in state.entries[..<state.count]:
         if entry.pipeline != 0: vkDestroyPipeline(device.device, entry.pipeline, none)
     free(state) in memory.heap

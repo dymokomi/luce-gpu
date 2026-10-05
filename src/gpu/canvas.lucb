@@ -87,7 +87,7 @@ pub struct Canvas:
 
     ## Opt in to a larger bounded frame; this changes no allocation until append.
     ## The default UI budget and the draw-count limit remain unchanged.
-    pub mutating func allow_vertices(count: usize) -> !:
+    pub func allow_vertices(count: usize) -> !:
         if count > 8388608:
             error(command_limit, "canvas vertex budget cannot exceed 8388608")
         self.vertex_budget = canvas_max(self.vertex_budget, count)
@@ -97,7 +97,7 @@ pub struct Canvas:
         return self.vertex_count
 
     ## Discard every recorded triangle, keeping the storage.
-    pub mutating func clear():
+    pub func clear():
         self.release_textures()
         self.vertex_count = 0
         self.draw_count = 0
@@ -115,11 +115,11 @@ pub struct Canvas:
             if let mesh = draw.mesh:
                 release_mesh_draw(mesh)
 
-    mutating func retained(geometry: GeometryState*, clip: Clip, viewport: Viewport, uniforms: f32[28], depth_slope: f32 = 0.0) -> !:
+    func retained(geometry: GeometryState*, clip: Clip, viewport: Viewport, uniforms: f32[28], depth_slope: f32 = 0.0) -> !:
         if clip.width == 0 or clip.height == 0: return
         if self.draw_count == 4096: error(command_limit, "canvas exceeds 4096 draws")
         if self.draw_count == self.draws.length:
-            let grown = try alloc Draw[canvas_max(16, self.draws.length * 2)] in memory.heap
+            let grown = try new Draw[canvas_max(16, self.draws.length * 2)] --- in memory.heap
             if self.draw_count > 0: memory.copy(grown, self.draws, self.draw_count)
             if self.draws.length > 0: free(self.draws) in memory.heap
             self.draws = grown
@@ -129,13 +129,13 @@ pub struct Canvas:
 
     ## A mesh draw of `count` vertices; the canvas takes `mesh` and releases it
     ## when cleared. On failure the caller still owns it.
-    mutating func mesh(mesh: MeshDraw*, clip: Clip, viewport: Viewport, count: usize, depth_slope: f32) -> !:
+    func mesh(mesh: MeshDraw*, clip: Clip, viewport: Viewport, count: usize, depth_slope: f32) -> !:
         if clip.width == 0 or clip.height == 0:
             release_mesh_draw(mesh)
             return
         if self.draw_count == 4096: error(command_limit, "canvas exceeds 4096 draws")
         if self.draw_count == self.draws.length:
-            let grown = try alloc Draw[canvas_max(16, self.draws.length * 2)] in memory.heap
+            let grown = try new Draw[canvas_max(16, self.draws.length * 2)] --- in memory.heap
             if self.draw_count > 0: memory.copy(grown, self.draws, self.draw_count)
             if self.draws.length > 0: free(self.draws) in memory.heap
             self.draws = grown
@@ -147,7 +147,7 @@ pub struct Canvas:
     ## starts with depth 1.0. No culling, multisampling, or texture sampling yet.
     ## slope_bias is a nonnegative raster depth-slope factor in backing pixels;
     ## zero is ordinary depth. It moves fills away for coplanar wire overlays.
-    pub mutating func triangles(vertices: const Vertex[], clip: Clip, depth: bool = false, viewport: Viewport? = none, slope_bias: f64 = 0.0) -> !:
+    pub func triangles(vertices: const Vertex[], clip: Clip, depth: bool = false, viewport: Viewport? = none, slope_bias: f64 = 0.0) -> !:
         if not (slope_bias >= 0.0 and slope_bias <= 256.0) or (not depth and slope_bias != 0.0):
             error(invalid_geometry, "depth slope bias requires depth testing and a finite factor in 0..256")
         if vertices.length % 3 != 0:
@@ -168,7 +168,7 @@ pub struct Canvas:
         let needed = self.vertex_count + vertices.length
         if needed > self.vertices.length:
             let capacity = canvas_max(needed, canvas_min(budget, canvas_max(256, self.vertices.length * 2)))
-            let grown = try alloc Vertex[capacity] in memory.heap
+            let grown = try new Vertex[capacity] --- in memory.heap
             if self.vertex_count > 0:
                 memory.copy(grown, self.vertices, self.vertex_count)
             if self.vertices.length > 0:
@@ -176,7 +176,7 @@ pub struct Canvas:
             self.vertices = grown
         if self.draw_count == self.draws.length:
             let capacity = canvas_max(16, self.draws.length * 2)
-            let grown = try alloc Draw[capacity] in memory.heap
+            let grown = try new Draw[capacity] --- in memory.heap
             if self.draw_count > 0:
                 memory.copy(grown, self.draws, self.draw_count)
             if self.draws.length > 0:
@@ -190,7 +190,7 @@ pub struct Canvas:
     ## Draw `source` of `texture` onto `rectangle`, given in backing pixels of the
     ## target, modulated by `opacity`. The texture stays retained until the canvas
     ## is cleared or destroyed, so destroying the handle meanwhile is safe.
-    mutating func image(texture: TextureState*, source: Region, rectangle: Rect, opacity: f64, filter: Filter,
+    func image(texture: TextureState*, source: Region, rectangle: Rect, opacity: f64, filter: Filter,
                         clip: Clip, target_width: f64, target_height: f64, mode: u32 = draw_sampled) -> !:
         # Widths compared before subtracting: a released texture is 0 wide.
         if source.width == 0 or source.height == 0 or source.width > texture.width or source.height > texture.height or source.x > texture.width - source.width or source.y > texture.height - source.height:
@@ -210,7 +210,7 @@ pub struct Canvas:
     ## the push-constant block, `images` to bindings 1.., `color` is the vertex
     ## color every fragment starts from. Pipeline and images stay retained
     ## until the canvas is cleared or destroyed.
-    mutating func shade(pipeline: PipelineState*, rectangle: Rect, color: Color, uniforms: const u8[], images: TextureState*?[],
+    func shade(pipeline: PipelineState*, rectangle: Rect, color: Color, uniforms: const u8[], images: TextureState*?[],
                         filter: Filter, clip: Clip, target_width: f64, target_height: f64) -> !:
         if uniforms.length > uniform_limit:
             error(invalid_geometry, "a draw carries at most 128 uniform bytes")
@@ -234,7 +234,7 @@ pub struct Canvas:
         pipeline.references += 1
 
     ## Release the recorded storage.
-    pub mutating func destroy():
+    pub func destroy():
         self.release_textures()
         if self.coverage.length > 0:
             free(self.coverage) in memory.heap

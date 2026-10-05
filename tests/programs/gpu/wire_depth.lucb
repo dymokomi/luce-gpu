@@ -14,7 +14,7 @@ pub func pixels() -> !:
     var surface = try gpu.Surface.open(device,target)
     defer surface.destroy()
     try target.show()
-    while (try target.poll()) != none: discard(0)
+    while (try target.poll()) != none: _ = 0
     let size = try surface.size()
     let width = (u64)size.pixel_width
     let height = (u64)size.pixel_height
@@ -42,7 +42,7 @@ pub func pixels() -> !:
                 try gpu.draw_geometry(native_target,front,matrix,gpu.Color(green = 1.0),4.0)
                 try gpu.draw_geometry(native_target,back,matrix,gpu.Color(blue = 1.0),4.0)
                 native.begin("GPU wire depth")
-                discard(try frame.value().present())
+                _ = try frame.value().present()
                 try surface.wait_idle()
                 for station in (u64)2..<(u64)7:
                     let along = (width if horizontal else height)*station//8
@@ -66,7 +66,7 @@ pub func pixels() -> !:
                 try gpu.draw_geometry(try next_view.get(),fill,matrix)
                 try gpu.draw_geometry(try next_view.get(),close_back,matrix,gpu.Color(green = 1.0),1.0)
                 native.begin("GPU wire depth")
-                discard(try next.value().present())
+                _ = try next.value().present()
                 try surface.wait_idle()
                 native.pixel(width//2,height//2,255,0,0)
                 native.end()

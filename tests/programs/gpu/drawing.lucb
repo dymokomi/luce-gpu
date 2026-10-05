@@ -71,7 +71,7 @@ pub func contracts() -> !:
     assert(tracker.live == 0)
 
     # Dense 3D is explicit: the default cap still rejects the same workload.
-    let dense = try alloc gpu.Vertex[1048578] in memory.heap
+    let dense = try new gpu.Vertex[1048578] --- in memory.heap
     for index in 0..<dense.length:
         dense[index] = gpu.Vertex(red = 1.0)
     rejected = false
@@ -100,7 +100,7 @@ pub func pixels() -> !:
     defer surface.destroy()
     try target.show()
     while (try target.poll()) != none:
-        discard(0)
+        _ = 0
     let size = try surface.size()
     let width = (u32)size.pixel_width
     let height = (u32)size.pixel_height
@@ -129,7 +129,7 @@ pub func pixels() -> !:
     # Recreate depth storage after resize and verify commands survive CPU reuse.
     try target.resize(80, 48)
     while (try target.poll()) != none:
-        discard(0)
+        _ = 0
     canvas.clear()
     try canvas.triangles(full(gpu.Vertex(green = 1.0)), gpu.Clip(width = 10000, height = 10000))
     native.begin("GPU triangles")
@@ -163,7 +163,7 @@ pub func pixels() -> !:
     retained.destroy()
     wire.destroy()
     native.begin("GPU triangles")
-    discard(try frame.value().present())
+    _ = try frame.value().present()
     try surface.wait_idle()
     native.pixel((u64)resized.pixel_width // 2, (u64)resized.pixel_height // 2, 0, 255, 0)
     native.pixel((u64)resized.pixel_width // 2, 0, 255, 0, 0)

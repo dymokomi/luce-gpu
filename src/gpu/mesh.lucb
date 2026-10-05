@@ -22,7 +22,7 @@ pub struct Buffer:
     var state: BufferState*?
 
     ## A buffer holding `data` (at least 4 bytes, at most `buffer_limit`).
-    pub static func create(device: Device, data: const u8[]) -> Buffer!:
+    pub func create(device: Device, data: const u8[]) -> Buffer!:
         let owner = try device.checked()
         if data.length < 4 or data.length > buffer_limit or data.length % 4 != 0:
             error(invalid_geometry, "a GPU buffer holds 4 to 134217728 bytes, a multiple of four")
@@ -50,7 +50,7 @@ pub struct Buffer:
     pub func is_open() -> bool:
         return self.state != none
 
-    pub mutating func destroy():
+    pub func destroy():
         if let state = self.state:
             require_thread()
             self.state = none

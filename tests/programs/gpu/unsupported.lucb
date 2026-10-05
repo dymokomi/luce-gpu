@@ -2,7 +2,7 @@ from luce_gpu import gpu
 from luce_window import window
 
 pub func main(arguments: str[]) -> i32!:
-    discard(arguments)
+    _ = arguments
     assert(not gpu.supported())
     assert(not gpu.supported(gpu.Backend.metal))
     assert(not gpu.supported(gpu.Backend.vulkan))

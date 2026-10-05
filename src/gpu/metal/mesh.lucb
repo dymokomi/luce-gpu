@@ -25,7 +25,7 @@ func metal_buffer_upload(device: MetalDevice*, native: void*, offset: usize, dat
     metal_submit(command)
 
 func metal_buffer_release(device: void*, native: void*):
-    discard(device)
+    _ = device
     metal_void(native, metal_sel("release"))
 
 ## The mesh pipeline of `kind` for color attachments of `slot`, built on first use.

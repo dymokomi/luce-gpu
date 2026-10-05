@@ -20,13 +20,16 @@ test_bindings = re.sub(r'^extern func .*\n', '', bindings, flags=re.MULTILINE)
 test_bindings = re.sub(r'\bVk\w+\b', lambda match: 'Oracle' + match[0], test_bindings)
 # Standard modules may use intrinsic names as fields; ordinary test modules may not.
 test_bindings = re.sub(r'^    (\w+):', r'    vk_\1:', test_bindings, flags=re.MULTILINE)
-base = ['import c', test_bindings, 'pub func main(arguments: str[]) -> i32:']
+base = ['import c', 'import memory', test_bindings, 'pub func main(arguments: str[]) -> i32:']
 structures = re.findall(r'extern struct (\w+):\n((?:    [^\n]+\n)+)', bindings)
 for name, body in structures:
     expressions = [f'sizeof({name})', f'alignof({name})']
     expressions += [f'offsetof({name}, {field})' for field in re.findall(r'    (\w+):', body)]
     base_expressions = [re.sub(r'\bVk\w+\b', lambda match: 'Oracle' + match[0],
                              re.sub(r', (\w+)\)', r', vk_\1)', item)) for item in expressions]
+    # Base reaches the layout queries through its memory module (base.md §16.6)
+    base_expressions = ['memory.' + item.replace('sizeof(', 'size_of(').replace('alignof(', 'align_of(').replace('offsetof(', 'offset_of(')
+                        for item in base_expressions]
     base.append('    print(f"' + name + ' ' + ' '.join('{' + item + '}' for item in base_expressions) + '")')
     native.append('printf("' + name + ' ' + ' '.join(['%zu'] * len(expressions)) + '\\n", ' +
                   ', '.join(item.replace('alignof(', '_Alignof(').replace('offsetof(VkDescriptorPoolSize, descriptorType)', 'offsetof(VkDescriptorPoolSize, type)') for item in expressions) + ');')

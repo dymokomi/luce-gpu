@@ -98,7 +98,7 @@ def main():
         # Importing portable GPU values must not link any native graphics library.
         (work / 'package.prisma').write_text('#prisma 4.0\ndef package "gpu_values" {\n' + DEPENDENCY + '}\n')
         values = work / 'values.lucb'
-        values.write_text('from luce_gpu import gpu\npub func main(arguments: str[]) -> i32:\n    discard(arguments)\n    let color = gpu.Color(red = 0.5)\n    assert(color.red == 0.5 and color.green == 0.0)\n    return 0\n')
+        values.write_text('from luce_gpu import gpu\npub func main(arguments: str[]) -> i32:\n    _ = arguments\n    let color = gpu.Color(red = 0.5)\n    assert(color.red == 0.5 and color.green == 0.0)\n    return 0\n')
         for name, flags in [('native', ['--native']), ('c', ['--backend=c'])]:
             binary = work / ('values-' + name)
             run([str(COMPILER), 'build', str(values), *flags, '-o', str(binary)])
@@ -120,7 +120,7 @@ def main():
             # Device ownership does not initialize/link a window system.
             (work / 'package.prisma').write_text('#prisma 4.0\ndef package "gpu_device" {\n' + DEPENDENCY + '}\n')
             device = work / 'device.lucb'
-            device.write_text('from luce_gpu import gpu\npub func main(arguments: str[]) -> i32!:\n    discard(arguments)\n    var device = gpu.Device.open() catch failure:\n        if failure.code == gpu.unavailable:\n            return 0\n        error(failure.code, failure.message)\n    device.destroy()\n    return 0\n')
+            device.write_text('from luce_gpu import gpu\npub func main(arguments: str[]) -> i32!:\n    _ = arguments\n    var device = gpu.Device.open() catch failure:\n        if failure.code == gpu.unavailable:\n            return 0\n        error(failure.code, failure.message)\n    device.destroy()\n    return 0\n')
             for name, flags in [('native', ['--native']), ('c', ['--backend=c'])]:
                 binary = work / ('device-' + name)
                 run([str(COMPILER), 'build', str(device), *flags, '-o', str(binary)])
