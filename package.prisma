@@ -1,7 +1,7 @@
 #prisma 4.0
 def package "luce-gpu" {
     str owner = "dymokomi"
-    str version = "0.4.1"
+    str version = "0.5.0"
     str kind = "package"
     str language = "luce-base"
     str description = "GPU devices, textures, shaders and frames for Luce: Metal on macOS and Vulkan on Windows and Linux, presenting to luce-window windows."
@@ -10,13 +10,13 @@ def package "luce-gpu" {
 
     def dependency "luce-std" {
         str owner = "dymokomi"
-        str version = "^0.5.0"
+        str version = "^0.6.0"
         str path = "../luce-std"
     }
 
     def dependency "luce-window" {
         str owner = "dymokomi"
-        str version = "^0.4.0"
+        str version = "^0.6.0"
         str path = "../luce-window"
     }
 

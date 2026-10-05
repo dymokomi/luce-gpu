@@ -14,7 +14,7 @@ def package "readbench" {
 
     def dependency "luce-window" {
         str owner = "dymokomi"
-        str version = "^0.4.0"
+        str version = "^0.6.0"
         str path = "../../../../luce-window"
     }
 }
