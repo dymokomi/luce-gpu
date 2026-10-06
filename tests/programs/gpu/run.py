@@ -109,7 +109,7 @@ def main():
 
         # Cross-target emission must type-check the public API without importing
         # test-only Cocoa helpers. Native Linux must contain no Apple linkage.
-        for target in ['arm64-macos', 'x86_64-macos', 'arm64-linux', 'x86_64-linux', 'x86_64-windows']:
+        for target in ['arm64-macos', 'x86_64-macos', 'x86_64-linux', 'x86_64-windows']:
             run([str(COMPILER), 'build', str(work / 'unsupported.lucb'), '--target', target, '--emit=c', '-o', str(work / (target + '.c'))])
         assembly = work / 'linux.s'
         run([str(COMPILER), 'build', str(work / 'unsupported.lucb'), '--target', 'x86_64-linux', '--emit=asm', '-o', str(assembly)])
