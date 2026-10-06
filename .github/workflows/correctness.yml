@@ -17,27 +17,16 @@ jobs:
       - uses: actions/checkout@v7
         with:
           path: luce-gpu
-      - name: Read compiler and dependency pins
-        id: pins
-        run: |
-          echo "base=$(cat luce-gpu/bootstrap/BASE)" >> "$GITHUB_OUTPUT"
-          echo "std=$(cat luce-gpu/bootstrap/STD)" >> "$GITHUB_OUTPUT"
-          echo "window=$(cat luce-gpu/bootstrap/WINDOW)" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v7
         with:
           repository: dymokomi/luce-base
-          ref: ${{ steps.pins.outputs.base }}
           path: luce-base
-      - uses: actions/checkout@v7
-        with:
-          repository: dymokomi/luce-std
-          ref: ${{ steps.pins.outputs.std }}
-          path: luce-std
-      - uses: actions/checkout@v7
-        with:
-          repository: dymokomi/luce-window
-          ref: ${{ steps.pins.outputs.window }}
-          path: luce-window
+      # every dependency at main, beside this checkout (luce-base docs/CI.md)
+      - name: Check out dependencies at main
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          python3 luce-base/tools/checkout_main.py luce-gpu
       - name: Select Clang
         run: |
           mkdir -p "$RUNNER_TEMP/luce-bin"
