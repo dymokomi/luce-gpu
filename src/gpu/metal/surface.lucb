@@ -82,13 +82,15 @@ func metal_render(device: MetalDevice*, host: window.Presentation, state: MetalS
     # would exhaust CAMetalLayer's small pool even if commands had completed.
     let drawable = metal_ptr(layer, metal_sel("nextDrawable")) else return PresentResult.skipped
     let texture = metal_ptr(drawable, metal_sel("texture")) else error(failed, "Metal returned a drawable without a texture")
-    let command = try metal_pass(device, texture, metal_encoded_slot if state.encoded else 0, canvas, Color(color.red, color.green, color.blue, 1.0), (u64)size.pixel_width, (u64)size.pixel_height)
+    # The frame's pass joins the passes, uploads and copies encoded since the
+    # last commit, and the frame commits them all as one submission.
+    let command = try metal_open(device)
+    try metal_pass(device, command, texture, metal_encoded_slot if state.encoded else 0, canvas, Color(color.red, color.green, color.blue, 1.0), (u64)size.pixel_width, (u64)size.pixel_height)
     metal_object(command, metal_sel("presentDrawable:"), drawable)
     # Default command buffers retain referenced resources through completion.
     # Our +1 keeps status queryable after this call's autorelease pool is drained.
     state.pending = metal_ptr(command, metal_sel("retain"))
-    metal_void(command, metal_sel("commit"))
-    metal_record(device, command)
+    metal_flush(device)
     return PresentResult.submitted
 
 func metal_surface_destroy(state: MetalSurface*, host: window.Presentation):

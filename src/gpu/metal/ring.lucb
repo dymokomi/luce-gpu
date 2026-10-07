@@ -1,0 +1,97 @@
+#==============================================================================================
+#
+#   ring - The Metal upload ring
+#
+#   DESCRIPTION:
+#       Per-draw data (a pass's vertices, coverage words and instances) and staged uploads are
+#       written into large shared buffers made once and kept, instead of a buffer of their own
+#       each: the driver otherwise grows its pools by 8 MiB a time with every short-lived
+#       buffer and keeps them. A chunk is filled front to back by the open command buffer's
+#       work and recorded as used by its serial; once that submission has finished the chunk
+#       is filled again from the front. A frame needing more adds a chunk (a larger one for a
+#       single large request), and committing trims chunks no work is using beyond a few.
+#
+#==============================================================================================
+
+## One shared buffer of the ring.
+struct MetalChunk:
+    var buffer: void*?
+    var contents: u8*
+    var size: u64
+    var used: u64
+    ## The newest submission whose work reads the chunk.
+    var serial: u64
+    var next: MetalChunk*?
+
+## A region of a chunk: the buffer, its offset, and where the CPU writes it.
+struct MetalSpan:
+    var buffer: void*
+    var offset: u64
+    var data: u8*
+
+let metal_chunk_bytes: u64 = 8u64 << 20
+## Free chunks of the standard size kept for the next frames.
+let metal_spare_chunks: usize = 2
+## Offsets every span starts at: Metal's strictest buffer binding alignment.
+let metal_span_alignment: u64 = 256
+
+## Room for `bytes` in the ring, for work of the open command buffer.
+func metal_ring_take(device: MetalDevice*, bytes: u64) -> MetalSpan!:
+    let serial = device.open_serial
+    let wanted = bytes if bytes > 0 else 4
+    if let chunk = device.ring_current:
+        if let span = metal_chunk_take(chunk, wanted, serial): return span
+    # A chunk whose work has finished, large enough.
+    var cursor = device.ring
+    while let chunk = cursor:
+        cursor = chunk.next
+        if chunk.size >= wanted and chunk.serial != serial and metal_submission_done(device, chunk.serial):
+            chunk.used = 0
+            device.ring_current = chunk
+            return (metal_chunk_take(chunk, wanted, serial)) else trap("an emptied chunk lost its room")
+    let size = metal_chunk_bytes if wanted <= metal_chunk_bytes else (wanted + metal_chunk_bytes - 1) // metal_chunk_bytes * metal_chunk_bytes
+    let buffer = metal_new_buffer(metal_required(device.device), metal_sel("newBufferWithLength:options:"), size, metal_storage_shared) else error(out_of_memory, "could not allocate GPU upload memory")
+    errdefer metal_void(buffer, metal_sel("release"))
+    let contents = metal_ptr(buffer, metal_sel("contents")) else error(failed, "Metal shared buffer storage is inaccessible")
+    let chunk = try new MetalChunk(buffer = buffer, contents = (u8*)contents, size = size, next = device.ring) in memory.heap
+    device.ring = chunk
+    device.ring_current = chunk
+    return (metal_chunk_take(chunk, wanted, serial)) else trap("a fresh chunk lost its room")
+
+func metal_chunk_take(chunk: MetalChunk*, bytes: u64, serial: u64) -> MetalSpan?:
+    let start = (chunk.used + metal_span_alignment - 1) // metal_span_alignment * metal_span_alignment
+    if start + bytes > chunk.size: return none
+    chunk.used = start + bytes
+    chunk.serial = serial
+    return MetalSpan(buffer = metal_required(chunk.buffer), offset = start, data = chunk.contents + (usize)start)
+
+## Copy `data` into the ring for the open command buffer's work.
+func metal_ring_stage(device: MetalDevice*, data: const u8[]) -> MetalSpan!:
+    let span = try metal_ring_take(device, (u64)data.length)
+    if data.length > 0: memory.copy(u8[](span.data, data.length), data, data.length)
+    return span
+
+## Release chunks no submitted work uses, beyond a few standard ones kept for
+## the next frames (a large chunk made for one big frame goes first).
+func metal_ring_trim(device: MetalDevice*):
+    var kept: usize = 0
+    var previous: MetalChunk*? = none
+    var cursor = device.ring
+    while let chunk = cursor:
+        cursor = chunk.next
+        let idle = chunk != device.ring_current and metal_submission_done(device, chunk.serial)
+        if idle and (chunk.size != metal_chunk_bytes or kept >= metal_spare_chunks):
+            if let before = previous: before.next = chunk.next
+            else: device.ring = chunk.next
+            metal_void(metal_required(chunk.buffer), metal_sel("release"))
+            free(chunk) in memory.heap
+            continue
+        if idle: kept += 1
+        previous = chunk
+
+func metal_ring_destroy(device: MetalDevice*):
+    while let chunk = device.ring:
+        device.ring = chunk.next
+        metal_void(metal_required(chunk.buffer), metal_sel("release"))
+        free(chunk) in memory.heap
+    device.ring_current = none

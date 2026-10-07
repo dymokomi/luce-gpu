@@ -158,6 +158,8 @@ struct MetalEncoding:
 func metal_compute_submit(device: MetalDevice*, commands: const ComputeCommand[], stamps: usize, addressed: BufferState*[]) -> ComputeSubmitted!:
     let pool = objc_autoreleasePoolPush()
     defer objc_autoreleasePoolPop(pool)
+    # What was encoded before the pass runs before it.
+    metal_flush(device)
     var buffers = try new void*[stamps + 1] --- in memory.heap
     var count: usize = 0
     errdefer metal_release_buffers(buffers, count)

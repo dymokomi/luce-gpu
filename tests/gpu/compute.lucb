@@ -493,8 +493,9 @@ func frame_timing(device: gpu.Device, limits: gpu.Limits) -> !:
     defer kept.release()
     assert((try kept.value().present(gpu.Color(0.0, 0.0, 0.0, 0.0))) == gpu.PresentResult.submitted)
     let drawn = kept.value().submission()
-    # The copy took a serial of its own between the two frames.
-    assert(painted.serial > 0 and drawn.serial > painted.serial + 1)
+    # Texture frames and copies may share a submission (Metal commits them
+    # together); a later one is never numbered before an earlier one.
+    assert(painted.serial > 0 and drawn.serial >= painted.serial)
     try device.wait(drawn)
     assert((try device.done(painted)) and (try device.done(drawn)))
     if not limits.timestamps:

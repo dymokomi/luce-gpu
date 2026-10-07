@@ -30,11 +30,11 @@ func metal_buffer_allocate(device: MetalDevice*, bytes: usize, memory_kind: Memo
         let contents = metal_ptr(buffer, metal_sel("contents")) else error(failed, "Metal shared buffer storage is inaccessible")
         memory.set(u8[]((u8*)contents, bytes), 0)
         return buffer
-    let command = metal_ptr(metal_required(device.queue), metal_sel("commandBuffer")) else error(failed, "could not create a Metal command buffer")
+    let command = try metal_open(device)
     let blit = metal_ptr(command, metal_sel("blitCommandEncoder")) else error(failed, "could not create a Metal blit encoder")
     metal_fill_buffer(blit, metal_sel("fillBuffer:range:value:"), buffer, LuceGpuMetalRange(0, (u64)bytes), 0)
     metal_void(blit, metal_sel("endEncoding"))
-    metal_submit(device, command)
+    metal_encoded(device)
     return buffer
 
 ## A shared buffer's mapping.
@@ -42,17 +42,17 @@ func metal_buffer_contents(native: void*) -> u8*?:
     let contents = metal_ptr(native, metal_sel("contents")) else return none
     return (u8*)contents
 
-## Stage `data` and blit it in, ordered after every command already committed.
+## Stage `data` in the upload ring and blit it in, ordered after everything
+## encoded before.
 func metal_buffer_upload(device: MetalDevice*, native: void*, offset: usize, data: const u8[]) -> !:
     let pool = objc_autoreleasePoolPush()
     defer objc_autoreleasePoolPop(pool)
-    let staging = metal_buffer(metal_required(device.device), metal_sel("newBufferWithBytes:length:options:"), data.data, (u64)data.length, metal_storage_shared) else error(out_of_memory, "could not stage a GPU buffer upload")
-    defer metal_void(staging, metal_sel("release"))
-    let command = metal_ptr(metal_required(device.queue), metal_sel("commandBuffer")) else error(failed, "could not create a Metal command buffer")
+    let command = try metal_open(device)
+    let staged = try metal_ring_stage(device, data)
     let blit = metal_ptr(command, metal_sel("blitCommandEncoder")) else error(failed, "could not create a Metal blit encoder")
-    metal_copy_buffer(blit, metal_sel("copyFromBuffer:sourceOffset:toBuffer:destinationOffset:size:"), staging, 0, native, (u64)offset, (u64)data.length)
+    metal_copy_buffer(blit, metal_sel("copyFromBuffer:sourceOffset:toBuffer:destinationOffset:size:"), staged.buffer, staged.offset, native, (u64)offset, (u64)data.length)
     metal_void(blit, metal_sel("endEncoding"))
-    metal_submit(device, command)
+    metal_encoded(device)
 
 func metal_buffer_release(device: void*, native: void*):
     _ = device

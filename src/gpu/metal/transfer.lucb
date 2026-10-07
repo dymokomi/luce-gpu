@@ -46,7 +46,9 @@ func metal_read_submit(device: MetalDevice*, index: usize, entries: const ReadEn
     let pool = objc_autoreleasePoolPush()
     defer objc_autoreleasePoolPop(pool)
     let ring = &device.reads[index]
-    let command = metal_ptr(metal_required(device.queue), metal_sel("commandBuffer")) else error(failed, "could not create a Metal command buffer")
+    # The copies join the open command buffer, committed now: what they read was
+    # encoded before them.
+    let command = try metal_open(device)
     let blit = metal_ptr(command, metal_sel("blitCommandEncoder")) else error(failed, "could not create a Metal blit encoder")
     for entry in entries:
         if let buffer = entry.buffer:
@@ -64,8 +66,7 @@ func metal_read_submit(device: MetalDevice*, index: usize, entries: const ReadEn
     metal_void(blit, metal_sel("endEncoding"))
     # Kept past the pool: the wait needs it.
     metal_void(command, metal_sel("retain"))
-    metal_void(command, metal_sel("commit"))
-    metal_record(device, command)
+    metal_flush(device)
     return Ticket(command = command)
 
 ## Wait for a batch's command buffer and let it go, reporting execution failure.
@@ -99,20 +100,19 @@ func metal_rings_destroy(device: MetalDevice*):
             metal_void(buffer, metal_sel("release"))
         device.reads[index] = MetalRingSlot()
 
-## Blit every staged copy of an upload batch from one buffer holding `staged`,
-## in one command buffer, and commit it without waiting (it keeps the buffer).
+## Blit every staged copy of an upload batch from `staged`, copied into the
+## upload ring, in the open command buffer.
 func metal_upload_submit(device: MetalDevice*, entries: const UploadEntry[], staged: const u8[]) -> !:
     let pool = objc_autoreleasePoolPush()
     defer objc_autoreleasePoolPop(pool)
-    let staging = metal_buffer(metal_required(device.device), metal_sel("newBufferWithBytes:length:options:"), staged.data, (u64)staged.length, 0) else error(failed, "could not stage GPU texture data")
-    defer metal_void(staging, metal_sel("release"))
-    let command = metal_ptr(metal_required(device.queue), metal_sel("commandBuffer")) else error(failed, "could not create a Metal command buffer")
+    let command = try metal_open(device)
+    let staging = try metal_ring_stage(device, staged)
     let blit = metal_ptr(command, metal_sel("blitCommandEncoder")) else error(failed, "could not create a Metal blit encoder")
     for entry in entries:
         let texture = (MetalTexture*)entry.texture.native
         let row = (u64)entry.region.width * (u64)texel_bytes(texture.format)
         metal_copy_to_texture(blit, metal_sel("copyFromBuffer:sourceOffset:sourceBytesPerRow:sourceBytesPerImage:sourceSize:toTexture:destinationSlice:destinationLevel:destinationOrigin:"),
-                              staging, (u64)entry.offset, row, row * (u64)entry.region.height, LuceGpuMetalExtent((u64)entry.region.width, (u64)entry.region.height, 1),
+                              staging.buffer, staging.offset + (u64)entry.offset, row, row * (u64)entry.region.height, LuceGpuMetalExtent((u64)entry.region.width, (u64)entry.region.height, 1),
                               metal_required(texture.texture), 0, 0, LuceGpuMetalOrigin((u64)entry.region.x, (u64)entry.region.y, 0))
     metal_void(blit, metal_sel("endEncoding"))
-    metal_submit(device, command)
+    metal_encoded(device)

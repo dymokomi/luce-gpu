@@ -46,54 +46,53 @@ func metal_texture_destroy(state: MetalTexture*):
         metal_void(texture, metal_sel("release"))
     free(state) in memory.heap
 
-## `metal_submit(device, command)` (metal/submission.lucb) commits without waiting.
-## The queue runs command buffers in order and each keeps what it uses alive, so
-## later passes sampling this one's texture, and textures destroyed while it runs,
-## need no wait: only a readback waits.
+## Uploads, copies and passes are encoded into the device's open command buffer
+## (metal/submission.lucb), committed later without waiting. The queue runs work
+## in order and a command buffer keeps what it uses alive, so later passes
+## sampling this one's texture, and textures destroyed while it runs, need no
+## wait: only a readback waits.
 
 func metal_texture_upload(device: MetalDevice*, state: MetalTexture*, pixels: const u8[], region: Region) -> !:
     let pool = objc_autoreleasePoolPush()
     defer objc_autoreleasePoolPop(pool)
     let row = (u64)region.width * (u64)texel_bytes(state.format)
-    let staging = metal_buffer(metal_required(device.device), metal_sel("newBufferWithBytes:length:options:"), pixels.data, (u64)pixels.length, 0) else error(failed, "could not stage GPU texture data")
-    defer metal_void(staging, metal_sel("release"))
-    let command = metal_ptr(metal_required(device.queue), metal_sel("commandBuffer")) else error(failed, "could not create a Metal command buffer")
+    let command = try metal_open(device)
+    # The bytes are copied into the upload ring, so the caller may reuse them at once.
+    let staged = try metal_ring_stage(device, pixels)
     let blit = metal_ptr(command, metal_sel("blitCommandEncoder")) else error(failed, "could not create a Metal blit encoder")
     metal_copy_to_texture(blit, metal_sel("copyFromBuffer:sourceOffset:sourceBytesPerRow:sourceBytesPerImage:sourceSize:toTexture:destinationSlice:destinationLevel:destinationOrigin:"),
-                          staging, 0, row, row * (u64)region.height, LuceGpuMetalExtent((u64)region.width, (u64)region.height, 1),
+                          staged.buffer, staged.offset, row, row * (u64)region.height, LuceGpuMetalExtent((u64)region.width, (u64)region.height, 1),
                           metal_required(state.texture), 0, 0, LuceGpuMetalOrigin((u64)region.x, (u64)region.y, 0))
     metal_void(blit, metal_sel("endEncoding"))
-    # The bytes were copied into the staging buffer, which the command buffer keeps.
-    metal_submit(device, command)
+    metal_encoded(device)
 
 extern func metal_copy_texture as "objc_msgSend"(object: void*, selector: void*, source: void*, source_slice: u64, source_level: u64, origin: LuceGpuMetalOrigin,
                                                  size: LuceGpuMetalExtent, target: void*, target_slice: u64, target_level: u64, target_origin: LuceGpuMetalOrigin)
 
-## Blit `region` of `source` to (`x`, `y`) of `target` and commit without waiting.
+## Blit `region` of `source` to (`x`, `y`) of `target`.
 func metal_texture_copy(device: MetalDevice*, source: MetalTexture*, region: Region, target: MetalTexture*, x: u32, y: u32) -> !:
     let pool = objc_autoreleasePoolPush()
     defer objc_autoreleasePoolPop(pool)
-    let command = metal_ptr(metal_required(device.queue), metal_sel("commandBuffer")) else error(failed, "could not create a Metal command buffer")
+    let command = try metal_open(device)
     let blit = metal_ptr(command, metal_sel("blitCommandEncoder")) else error(failed, "could not create a Metal blit encoder")
     metal_copy_texture(blit, metal_sel("copyFromTexture:sourceSlice:sourceLevel:sourceOrigin:sourceSize:toTexture:destinationSlice:destinationLevel:destinationOrigin:"),
                        metal_required(source.texture), 0, 0, LuceGpuMetalOrigin((u64)region.x, (u64)region.y, 0), LuceGpuMetalExtent((u64)region.width, (u64)region.height, 1),
                        metal_required(target.texture), 0, 0, LuceGpuMetalOrigin((u64)x, (u64)y, 0))
     metal_void(blit, metal_sel("endEncoding"))
-    metal_submit(device, command)
+    metal_encoded(device)
 
-## Fill the levels after the first with a blit encoder's mipmap generation and
-## commit without waiting.
+## Fill the levels after the first with a blit encoder's mipmap generation.
 func metal_texture_mipmaps(device: MetalDevice*, state: MetalTexture*) -> !:
     let pool = objc_autoreleasePoolPush()
     defer objc_autoreleasePoolPop(pool)
-    let command = metal_ptr(metal_required(device.queue), metal_sel("commandBuffer")) else error(failed, "could not create a Metal command buffer")
+    let command = try metal_open(device)
     let blit = metal_ptr(command, metal_sel("blitCommandEncoder")) else error(failed, "could not create a Metal blit encoder")
     metal_object(blit, metal_sel("generateMipmapsForTexture:"), metal_required(state.texture))
     metal_void(blit, metal_sel("endEncoding"))
-    metal_submit(device, command)
+    metal_encoded(device)
 
 func metal_texture_render(device: MetalDevice*, state: MetalTexture*, canvas: Canvas, color: Color, keep: bool) -> !:
     let pool = objc_autoreleasePoolPush()
     defer objc_autoreleasePoolPop(pool)
-    let command = try metal_pass(device, metal_required(state.texture), metal_format_slot(state.format), canvas, color, (u64)state.width, (u64)state.height, keep)
-    metal_submit(device, command)
+    try metal_pass(device, try metal_open(device), metal_required(state.texture), metal_format_slot(state.format), canvas, color, (u64)state.width, (u64)state.height, keep)
+    metal_encoded(device)

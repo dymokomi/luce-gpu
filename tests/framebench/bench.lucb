@@ -1,0 +1,113 @@
+## Frame cost: CPU time per frame and the driver memory frames leave behind,
+## on a heavy scene (tiles drawn into textures, uploads, a window full of
+## triangles and images) or a blank one (a cleared window). For profiling the
+## drawing paths' allocations. Not a check: build and run it by hand.
+##   luc build (in this directory), then build/framebench heavy|tiles|draws|blank|idle [frames]
+## It prints "sampling" and then holds its memory for five seconds, so a
+## footprint (macOS `footprint`, Linux /proc/PID/status) can be taken.
+from luce_gpu import gpu
+from luce_window import window
+import memory
+import thread
+import time
+
+let tile_count: usize = 16
+let tile_size: u32 = 256
+
+func rectangle(vertices: gpu.Vertex[], at: usize, x: f32, y: f32, size: f32, shade: f32):
+    let corners: f32[12] = [x, y, x + size, y, x + size, y + size, x, y, x + size, y + size, x, y + size]
+    for index in 0..<(usize)6:
+        vertices[at + index] = gpu.Vertex(x = corners[index * 2], y = corners[index * 2 + 1], z = 0.0, red = shade, green = 1.0 - shade, blue = 0.5, alpha = 1.0)
+
+## A run of `count` small rectangles in clip space, varied by `seed`.
+func rectangles(vertices: gpu.Vertex[], count: usize, seed: usize):
+    for index in 0..<count:
+        let column = (f32)((index + seed) % 32)
+        let row = (f32)((index // 32 + seed) % 32)
+        rectangle(vertices, index * 6, -1.0 + column / 16.0, -1.0 + row / 16.0, 0.05, (f32)(index % 7) / 7.0)
+
+let invalid_count = ErrorCode.package(1)
+
+func parse_count(text: str) -> usize!:
+    var value: usize = 0
+    for byte in text.bytes:
+        if byte < 48 or byte > 57: error(invalid_count, "a frame count is a number")
+        value = value * 10 + (usize)(byte - 48)
+    return value
+
+pub func main(arguments: str[]) -> i32!:
+    let mode = arguments[1] if arguments.length > 1 else "heavy"
+    let heavy = mode == "heavy" or mode == "tiles" or mode == "draws"
+    # tiles: only the tile passes; draws: only the window's draws.
+    let tiles_on = mode == "heavy" or mode == "tiles"
+    let draws_on = mode == "heavy" or mode == "draws"
+    # idle: the window and its surface, no frames.
+    var frames: usize = 0 if arguments.length > 1 and arguments[1] == "idle" else 600
+    if arguments.length > 2:
+        frames = (try parse_count(arguments[2]))
+    var device = try gpu.Device.open()
+    defer device.destroy()
+    var host = try window.Window.open(window.Options(title = "framebench", width = 1024, height = 768))
+    defer host.destroy()
+    var surface = try gpu.Surface.open(device, host)
+    defer surface.destroy()
+    try host.show()
+    var tiles = try new gpu.Texture[tile_count] --- in memory.heap
+    defer free(tiles) in memory.heap
+    for index in 0..<tile_count:
+        tiles[index] = try gpu.Texture.create(device, tile_size, tile_size, gpu.Format.rgba8)
+    var picture = try gpu.Texture.create(device, 64, 64, gpu.Format.rgba8)
+    defer picture.destroy()
+    var pixels = try new u8[64 * 64 * 4] in memory.heap
+    defer free(pixels) in memory.heap
+    var vertices = try new gpu.Vertex[6 * 1024] --- in memory.heap
+    defer free(vertices) in memory.heap
+    var cpu: u64 = 0
+    var shown: usize = 0
+    var frame_index: usize = 0
+    while shown < frames and frame_index < frames * 4:
+        frame_index += 1
+        while (try host.poll()) != none:
+            _ = 0
+        let start = time.now()
+        if tiles_on:
+            # Tiles redrawn into their textures, each its own pass.
+            for index in 0..<tile_count:
+                let tile = try tiles[index].frame()
+                let root = try tile.value().target()
+                for run in 0..<(usize)8:
+                    rectangles(vertices, 128, frame_index + index + run)
+                    try root.value().triangles(vertices[..<6 * 128])
+                root.release()
+                _ = try tile.value().present(gpu.Color(0.1, 0.1, 0.1, 1.0))
+                tile.release()
+            # A picture uploaded every frame.
+            pixels[(frame_index * 4) % pixels.length] = (u8)(frame_index % 256)
+            try picture.upload(pixels)
+        let frame = try surface.frame()
+        let root = try frame.value().target()
+        let size = try root.value().size()
+        if draws_on:
+            for index in 0..<tile_count:
+                let x = (f64)(index % 4) * size.width / 4.0
+                let y = (f64)(index // 4) * size.height / 4.0
+                try gpu.draw_image(root.value(), tiles[index], gpu.Rect(x = x, y = y, width = size.width / 4.0, height = size.height / 4.0))
+            try gpu.draw_image(root.value(), picture, gpu.Rect(width = 64.0, height = 64.0))
+            rectangles(vertices, 1024, frame_index)
+            try root.value().triangles(vertices[..<6 * 1024])
+        root.release()
+        let result = try frame.value().present(gpu.Color(0.2, 0.2, 0.25))
+        frame.release()
+        cpu += time.now() - start
+        if result == gpu.PresentResult.submitted:
+            shown += 1
+        else:
+            thread.sleep(10)
+    try surface.wait_idle()
+    let held = try device.memory()
+    print(f"{mode}: {shown} frames, CPU {(f64)cpu / ((f64)(shown if shown > 0 else 1) * 1000.0)} us per frame, device allocated {held.used // 1048576} MiB\n")
+    print("sampling\n")
+    thread.sleep(5000)
+    for index in 0..<tile_count:
+        tiles[index].destroy()
+    return 0

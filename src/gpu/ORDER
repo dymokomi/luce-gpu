@@ -32,6 +32,7 @@ metal/buffer.lucb
 metal/compute.lucb
 metal/accel.lucb
 metal/submission.lucb
+metal/ring.lucb
 metal/texture.lucb
 metal/transfer.lucb
 metal/surface.lucb

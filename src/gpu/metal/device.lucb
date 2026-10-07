@@ -18,6 +18,13 @@ struct MetalDevice:
     # The newest submission's serial, and the ring of recent ones (metal/submission.lucb).
     var serial: u64
     var submissions: MetalSubmission[32]
+    # The open command buffer, its reserved serial and how many encodings it holds.
+    var open: void*?
+    var open_serial: u64
+    var open_uses: usize
+    # The upload ring (metal/ring.lucb).
+    var ring: MetalChunk*?
+    var ring_current: MetalChunk*?
 
 func metal_device_open() -> MetalDevice*!:
     let pool = objc_autoreleasePoolPush()
@@ -43,6 +50,7 @@ func metal_device_destroy(state: MetalDevice*):
     metal_rings_destroy(state)
     metal_compute_destroy(state)
     metal_submissions_destroy(state)
+    metal_ring_destroy(state)
     if let queue = state.queue:
         metal_void(queue, metal_sel("release"))
     if let device = state.device:

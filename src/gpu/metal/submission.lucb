@@ -3,8 +3,11 @@
 #   submission - Serials, completion and GPU times of Metal submissions
 #
 #   DESCRIPTION:
-#       Every command buffer luce-gpu commits on a device's queue (frames, uploads, copies, reads,
-#       compute passes) gets the next serial in a ring of the last `timed_submissions`. The ring
+#       Frames' passes, uploads, copies and reads are encoded into the device's open command
+#       buffer, committed once at a surface's present, a read, a compute pass, a wait on its
+#       submission or after `metal_open_limit` uses, so a frame of many passes is one
+#       submission. Every command buffer luce-gpu commits on a device's queue gets the next
+#       serial in a ring of the last `timed_submissions`. The ring
 #       retains a submission's command buffers only while they run: once they complete it keeps
 #       their GPU start and end times and whether they failed, and lets them go, so frames'
 #       drawables return to their layer at once. A submission leaving the ring is waited for
@@ -22,31 +25,58 @@ struct MetalSubmission:
     var end: u64
     var failed: bool
 
-## Commit `command` as the next submission, without waiting.
-func metal_submit(device: MetalDevice*, command: void*):
-    metal_void(command, metal_sel("commit"))
-    metal_record(device, command)
+## How many encodings (passes, uploads, copies) the open command buffer takes
+## before it is committed on its own: what bounds the latency and the upload
+## ring for a program that renders offscreen without presenting or reading.
+let metal_open_limit: usize = 64
 
-## Record `command`, committed, as the next submission.
-func metal_record(device: MetalDevice*, command: void*):
-    let buffers = new void*[1] --- in memory.heap catch failure:
-        # Out of host memory: the work runs; only its serial and time are lost.
-        _ = failure
-        device.serial += 1
-        return
+## The device's open command buffer, made when none is: everything encoded
+## into it is one submission, whose serial is reserved now.
+func metal_open(device: MetalDevice*) -> void*!:
+    if let command = device.open:
+        device.open_uses += 1
+        return command
+    let command = metal_ptr(metal_required(device.queue), metal_sel("commandBuffer")) else error(failed, "could not create a Metal command buffer")
+    # Kept past the caller's autorelease pool until it is committed.
     metal_void(command, metal_sel("retain"))
-    buffers[0] = command
-    _ = metal_record_all(device, buffers, 1)
+    device.open = command
+    device.open_uses = 1
+    device.serial += 1
+    device.open_serial = device.serial
+    return command
 
-## Record `buffers`, committed in order and retained, as the next submission;
-## the ring owns them from here. Its serial.
+## Commit the open command buffer once it has taken enough encodings.
+func metal_encoded(device: MetalDevice*):
+    if device.open_uses >= metal_open_limit: metal_flush(device)
+
+## Commit the open command buffer, if any, as its reserved submission.
+func metal_flush(device: MetalDevice*):
+    let command = device.open else return
+    device.open = none
+    device.open_uses = 0
+    metal_void(command, metal_sel("commit"))
+    let buffers = new void*[1] --- in memory.heap catch failure:
+        # Out of host memory: the work runs; only its time is lost.
+        _ = failure
+        metal_void(command, metal_sel("release"))
+        return
+    buffers[0] = command
+    metal_record_at(device, device.open_serial, buffers, 1)
+    metal_ring_trim(device)
+
+## Record `buffers`, committed in order and retained, as the next submission
+## (after the open command buffer, which is committed first); the ring owns
+## them from here. Its serial.
 func metal_record_all(device: MetalDevice*, buffers: void*[], count: usize) -> u64:
     device.serial += 1
-    let slot = &device.submissions[(usize)(device.serial % (u64)timed_submissions)]
-    metal_submission_finish(slot, true)
-    *slot = MetalSubmission(serial = device.serial, commands = buffers, count = count)
-    metal_submissions_harvest(device)
+    metal_record_at(device, device.serial, buffers, count)
     return device.serial
+
+func metal_record_at(device: MetalDevice*, serial: u64, buffers: void*[], count: usize):
+    let slot = &device.submissions[(usize)(serial % (u64)timed_submissions)]
+    metal_submission_finish(slot, true)
+    *slot = MetalSubmission(serial = serial, commands = buffers, count = count)
+    metal_submissions_harvest(device)
 
 func metal_release_buffers(buffers: void*[], count: usize):
     for index in 0..<count:
@@ -79,12 +109,15 @@ func metal_submissions_harvest(device: MetalDevice*):
         metal_submission_finish(&device.submissions[index], false)
 
 func metal_submissions_destroy(device: MetalDevice*):
+    metal_flush(device)
     for index in 0..<timed_submissions:
         metal_submission_finish(&device.submissions[index], true)
 
 ## The ring slot holding `serial`, or none once it left the ring (finished).
 func metal_submission_slot(device: MetalDevice*, serial: u64) -> MetalSubmission*?:
     if serial == 0: return none
+    # Asking about the open command buffer's work commits it.
+    if device.open != none and serial >= device.open_serial: metal_flush(device)
     let slot = &device.submissions[(usize)(serial % (u64)timed_submissions)]
     return slot if slot.serial == serial else none
 

@@ -418,7 +418,8 @@ into the slot or `finish()` gives it back. A batch keeps the textures it copies
 from alive until it is submitted. At most three batches are held at once per
 device, so one can be on the GPU while the caller works through another.
 `read` is a batch of one, split into runs of rows when a region is larger than a
-slot. `tests/readbench` times each phase on a device.
+slot. `tests/readbench` times each phase on a device; `tests/framebench` times
+frames and the driver memory they leave (see Per-draw memory below).
 
 `texture.frame()` begins a recording frame whose target is the texture (points
 equal texels). Its `present(color)` clears to `color` — alpha included — draws
@@ -880,6 +881,34 @@ On Vulkan a surface frame already waits for the queue before `present`
 returns, so its submission is finished at once. On Metal it runs while the
 next frame records. Metal keeps a submission's command buffers only while they
 run, so drawables go back to their layer as before.
+
+On Metal, one submission usually covers a whole frame. Texture frames,
+uploads, copies and mipmap generation are encoded into the device's open
+command buffer instead of a command buffer each. The open buffer is committed
+when a surface presents, a read or compute pass needs what came before, a
+`Device.done`, `wait` or `gpu_time` asks about its submission, or it has taken
+64 encodings. Texture frames and transfers since the last commit therefore
+share a submission, and the surface frame that follows them carries the whole
+frame's GPU time.
+
+### Per-draw memory
+
+A pass's vertices, coverage words and shader instances, and the bytes of every
+upload, are copied into an upload ring instead of buffers of their own: a few
+8 MiB buffers the device makes once, filled front to back and reused once the
+GPU has finished the submission that read them. A frame needing more adds a
+chunk, and a single larger request gets a chunk of its size. Committing frees
+chunks no work uses, beyond two kept for the next frames. Before the ring,
+every pass made three short-lived buffers and every upload a staging buffer,
+and the Metal driver grew its pools by 8 MiB with them and kept them.
+
+`tests/framebench` measures a frame's CPU time and the memory the driver keeps
+on a heavy scene (16 tiles drawn into textures, an upload and about 1000
+rectangles a frame) and a blank one. Note that on Apple silicon the driver
+itself takes a fixed amount once a process first uses each kind of encoder:
+about 230 MB for render passes and 160 MB more for blit or compute work
+(`footprint` lists it as "IOAccelerator (graphics)", and a 20-line
+Objective-C program shows the same). That baseline is not luce-gpu's to free.
 
 ### Long-running work
 

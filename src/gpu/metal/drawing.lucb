@@ -255,10 +255,10 @@ func metal_drawing_destroy(state: MetalDrawing*):
     free(state) in memory.heap
 
 ## Record `canvas` into `target` (a color texture of `slot`'s format) cleared to
-## `color`, or over its contents when `keep`, on a new command buffer that the
-## caller commits. The encoded slot clears to the encoded color and has the
-## built-in draws encode theirs.
-func metal_pass(device: MetalDevice*, target: void*, slot: usize, canvas: Canvas, color: Color, width: u64, height: u64, keep: bool = false) -> void*!:
+## `color`, or over its contents when `keep`, as a render pass of `command`. Its
+## vertices, coverage and instances go in the upload ring. The encoded slot
+## clears to the encoded color and has the built-in draws encode theirs.
+func metal_pass(device: MetalDevice*, command: void*, target: void*, slot: usize, canvas: Canvas, color: Color, width: u64, height: u64, keep: bool = false) -> !:
     let encoded = slot == metal_encoded_slot
     let descriptor = metal_ptr(try metal_class("MTLRenderPassDescriptor"), metal_sel("renderPassDescriptor")) else error(failed, "could not create a Metal render pass")
     let attachments = metal_required(metal_ptr(descriptor, metal_sel("colorAttachments")))
@@ -269,12 +269,9 @@ func metal_pass(device: MetalDevice*, target: void*, slot: usize, canvas: Canvas
     metal_uint_arg(attachment, metal_sel("setStoreAction:"), 1)
     let clear = Color(srgb_encoded(color.red), srgb_encoded(color.green), srgb_encoded(color.blue), color.alpha) if encoded else color
     metal_color_arg(attachment, metal_sel("setClearColor:"), LuceGpuMetalClearColor(red = clear.red * clear.alpha, green = clear.green * clear.alpha, blue = clear.blue * clear.alpha, alpha = clear.alpha))
-    var masks: void*? = none
-    defer metal_release_slot(&masks)
-    var buffer: void*? = none
-    defer metal_release_slot(&buffer)
-    var instances: void*? = none
-    defer metal_release_slot(&instances)
+    var masks: MetalSpan? = none
+    var buffer: MetalSpan? = none
+    var instances: MetalSpan? = none
     var drawing: MetalDrawing*? = none
     if canvas.draw_count > 0:
         let state = try metal_drawing(device)
@@ -284,19 +281,15 @@ func metal_pass(device: MetalDevice*, target: void*, slot: usize, canvas: Canvas
         metal_uint_arg(depth, metal_sel("setLoadAction:"), 2)
         metal_uint_arg(depth, metal_sel("setStoreAction:"), 0)
         metal_double_arg(depth, metal_sel("setClearDepth:"), 1.0)
-        var empty_vertex = Vertex()
-        buffer = metal_buffer(metal_required(device.device), metal_sel("newBufferWithBytes:length:options:"), canvas.vertices.data if canvas.vertex_count > 0 else &empty_vertex, (u64)(canvas_max(1, canvas.vertex_count) * 32), 0) else error(failed, "could not upload GPU triangle data")
-        var empty: u32 = 0
-        let source = canvas.coverage.data if canvas.coverage_count > 0 else &empty
-        masks = metal_buffer(metal_required(device.device), metal_sel("newBufferWithBytes:length:options:"), source, (u64)(canvas_max(1, canvas.coverage_count) * 4), 0) else error(failed, "could not upload GPU coverage")
+        # Empty arrays still bind a span: the shaders' buffers are never unbound.
+        buffer = try metal_ring_stage(device, u8[]((u8*)canvas.vertices.data, canvas.vertex_count * 32))
+        masks = try metal_ring_stage(device, u8[]((u8*)canvas.coverage.data, canvas.coverage_count * 4))
         if canvas.instance_count > 0:
-            instances = metal_buffer(metal_required(device.device), metal_sel("newBufferWithBytes:length:options:"), canvas.instances.data,
-                                     (u64)(canvas.instance_count * memory.size_of(ShadeInstance)), 0) else error(failed, "could not upload GPU instances")
+            instances = try metal_ring_stage(device, u8[]((u8*)canvas.instances.data, canvas.instance_count * memory.size_of(ShadeInstance)))
         # Client pipeline states are built before encoding, so encoding cannot fail.
         for draw in canvas.draws[..<canvas.draw_count]:
             if let custom = draw.pipeline:
                 _ = try metal_client_state(device, (MetalClientPipeline*)custom.native, slot, draw.instanced)
-    let command = metal_ptr(metal_required(device.queue), metal_sel("commandBuffer")) else error(failed, "could not create a Metal command buffer")
     let encoder = metal_with_object(command, metal_sel("renderCommandEncoderWithDescriptor:"), descriptor) else error(failed, "could not create a Metal render encoder")
     if let state = drawing:
         let pipeline = metal_pipeline_for(device, state, slot) catch failure:
@@ -315,15 +308,16 @@ func metal_pass(device: MetalDevice*, target: void*, slot: usize, canvas: Canvas
                 _ = metal_mesh_pipeline(device, state, mesh.kind, slot) catch failure:
                     metal_void(encoder, metal_sel("endEncoding"))
                     error(failure.code, failure.message)
-        metal_encode(encoder, state, pipeline, geometry_pipeline, metal_required(buffer), metal_required(masks), instances, canvas, width, height, slot)
+        let vertices = buffer else trap("a Metal pass lost its vertices")
+        let coverage = masks else trap("a Metal pass lost its coverage")
+        metal_encode(encoder, state, pipeline, geometry_pipeline, vertices, coverage, instances, canvas, width, height, slot)
     metal_void(encoder, metal_sel("endEncoding"))
-    return command
 
-func metal_encode(encoder: void*, drawing: MetalDrawing*, pipeline: void*, geometry_pipeline: void*, buffer: void*, masks: void*, instances: void*?, canvas: Canvas, width: u64, height: u64, slot: usize):
-    metal_bind_buffer(encoder, metal_sel("setVertexBuffer:offset:atIndex:"), buffer, 0, 0)
+func metal_encode(encoder: void*, drawing: MetalDrawing*, pipeline: void*, geometry_pipeline: void*, buffer: MetalSpan, masks: MetalSpan, instances: MetalSpan?, canvas: Canvas, width: u64, height: u64, slot: usize):
+    metal_bind_buffer(encoder, metal_sel("setVertexBuffer:offset:atIndex:"), buffer.buffer, buffer.offset, 0)
     if let instance_buffer = instances:
-        metal_bind_buffer(encoder, metal_sel("setVertexBuffer:offset:atIndex:"), instance_buffer, 0, 1)
-    metal_bind_buffer(encoder, metal_sel("setFragmentBuffer:offset:atIndex:"), masks, 0, 5)
+        metal_bind_buffer(encoder, metal_sel("setVertexBuffer:offset:atIndex:"), instance_buffer.buffer, instance_buffer.offset, 1)
+    metal_bind_buffer(encoder, metal_sel("setFragmentBuffer:offset:atIndex:"), masks.buffer, masks.offset, 5)
     for draw in canvas.draws[..<canvas.draw_count]:
         let x = metal_min((u64)draw.clip.x, width)
         let y = metal_min((u64)draw.clip.y, height)
@@ -341,7 +335,7 @@ func metal_encode(encoder: void*, drawing: MetalDrawing*, pipeline: void*, geome
             let mesh_pipeline = metal_required(drawing.mesh_pipelines[(usize)(u8)mesh.kind * metal_slot_count + slot])
             metal_encode_mesh(encoder, drawing, mesh, mesh_pipeline, draw.count)
             # Later ordinary draws expect the canvas vertices at 0.
-            metal_bind_buffer(encoder, metal_sel("setVertexBuffer:offset:atIndex:"), buffer, 0, 0)
+            metal_bind_buffer(encoder, metal_sel("setVertexBuffer:offset:atIndex:"), buffer.buffer, buffer.offset, 0)
             continue
         var selected = pipeline
         if let custom = draw.pipeline:
@@ -382,10 +376,6 @@ func metal_sampler_for(drawing: MetalDrawing*, filter: Filter) -> void*:
 
 func metal_min(a: u64, b: u64) -> u64:
     return a if a < b else b
-
-func metal_release_slot(object: void*?*):
-    if let value = *object:
-        metal_void(value, metal_sel("release"))
 
 extern func metal_draw_instances as "objc_msgSend"(object: void*, selector: void*, primitive: u64, start: u64, count: u64, instances: u64, base: u64)
 extern func metal_inline_bytes as "objc_msgSend"(object: void*, selector: void*, bytes: const void*, length: u64, index: u64)
