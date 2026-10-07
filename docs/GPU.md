@@ -381,7 +381,7 @@ resize of depth storage, and releasing CPU commands before GPU completion.
 
 ## Textures and offscreen frames
 
-`Texture.create(device, width, height, format, storage = false)` allocates a
+`Texture.create(device, width, height, format, storage = false, mipmaps = false)` allocates a
 texture of a tightly packed, top-down, straight-alpha format: `rgba8`
 (sRGB-encoded, sampled as linear light), `rgba8_linear`, `rgba16_float` and
 `r8` (samples as red with alpha one), and the 32-bit `rgba32_float`,
@@ -392,6 +392,17 @@ ordered after earlier submissions; `upload` does not wait for its copy (the byte
 may be reused at once), and `read` waits, so `read` after a frame sees that
 frame. Pixel lengths must equal the region's texels times `texel_bytes(format)`,
 or `invalid_pixels` is returned.
+
+**Mipmaps.** `Texture.create(..., mipmaps = true)` gives a texture the full chain of
+smaller levels down to one texel (`levels()` says how many), for an image drawn smaller
+than it is. Uploads, frames and copies write the first level; `generate_mipmaps()` then
+fills each later level from the one before it (a box filter), on the queue like
+`upload`, without waiting (Metal's blit encoder `generateMipmapsForTexture`; on Vulkan a
+chain of linear `vkCmdBlitImage`s, refused with `unsupported` where the device cannot
+blit or filter the format). Sampling with `Filter.trilinear` picks levels by the draw's
+scale and blends between them; `nearest` and `linear` read the first level only. Only
+the formats frames render into have mipmaps, and not as storage images
+(`invalid_geometry`).
 
 Transfers go through host memory each device allocates once, keeps mapped and
 reuses (a readback ring of three 32 MiB slots, host-cached where the device has

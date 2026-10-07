@@ -51,9 +51,9 @@ func vulkan_surface_open(device: VulkanDevice*, host: window.Presentation, encod
     try vulkan_check(vkCreateSemaphore(device.device, &semaphore_info, none, &state.acquired), "the Vulkan acquisition semaphore could not be created")
     return state
 
-func vulkan_image_view(device: VulkanDevice*, image: u64, pixel_format: u32, aspect: u32) -> u64!:
+func vulkan_image_view(device: VulkanDevice*, image: u64, pixel_format: u32, aspect: u32, levels: u32 = 1) -> u64!:
     var info = VkImageViewCreateInfo(sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, image = image,
-                                     viewType = VK_IMAGE_VIEW_TYPE_2D, format = pixel_format, subresourceRange = VkImageSubresourceRange(aspectMask = aspect, levelCount = 1, layerCount = 1))
+                                     viewType = VK_IMAGE_VIEW_TYPE_2D, format = pixel_format, subresourceRange = VkImageSubresourceRange(aspectMask = aspect, levelCount = levels, layerCount = 1))
     var view: u64 = 0
     try vulkan_check(vkCreateImageView(device.device, &info, none, &view), "a Vulkan image view could not be created")
     return view

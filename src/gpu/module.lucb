@@ -127,10 +127,13 @@ pub let uniform_limit: usize = 128
 ## The most textures one draw can sample.
 pub let image_limit: usize = 4
 
-## How an image draw samples between texels.
+## How an image draw samples between texels. `trilinear` also blends between a
+## mipmapped texture's levels, as an image drawn smaller than it is needs;
+## `nearest` and `linear` read the first level only.
 pub enum Filter as u8:
     nearest = 0
     linear = 1
+    trilinear = 2
 
 ## A texel rectangle of a texture, from its top left.
 pub struct Region:

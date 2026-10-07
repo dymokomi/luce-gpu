@@ -287,15 +287,15 @@ func metal_encode_bindings(encoder: void*, drawing: MetalDrawing*, kernel: Metal
         try metal_table_encode(encoder, (MetalTable*)table.native)
     for index in 0..<binding_limit:
         if program.bindings[index] == (u8)BindingKind.sampler:
-            metal_bind_texture(encoder, metal_sel("setSamplerState:atIndex:"), metal_required(drawing.linear if recorded.filters[index] == Filter.linear else drawing.nearest), (u64)index)
+            metal_bind_texture(encoder, metal_sel("setSamplerState:atIndex:"), metal_sampler_for(drawing, recorded.filters[index]), (u64)index)
         if let buffer = recorded.buffers[index]:
             metal_bind_buffer(encoder, metal_sel("setBuffer:offset:atIndex:"), buffer.native, 0, (u64)index)
         if let texture = recorded.textures[index]:
             metal_bind_texture(encoder, metal_sel("setTexture:atIndex:"), metal_required(((MetalTexture*)texture.native).texture), (u64)index)
             if program.bindings[index] == (u8)BindingKind.sampled_image:
                 # Integer textures are never filtered.
-                let linear = recorded.filters[index] == Filter.linear and texture.format != Format.r32_uint
-                metal_bind_texture(encoder, metal_sel("setSamplerState:atIndex:"), metal_required(drawing.linear if linear else drawing.nearest), (u64)index)
+                let filter = Filter.nearest if texture.format == Format.r32_uint else recorded.filters[index]
+                metal_bind_texture(encoder, metal_sel("setSamplerState:atIndex:"), metal_sampler_for(drawing, filter), (u64)index)
     var uniforms = recorded.uniforms
     metal_inline_bytes(encoder, metal_sel("setBytes:length:atIndex:"), &uniforms, (u64)uniform_limit, metal_uniform_index)
 

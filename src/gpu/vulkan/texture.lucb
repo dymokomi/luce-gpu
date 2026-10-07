@@ -23,6 +23,9 @@ struct VulkanTexture:
     var format: Format
     var native_format: u32
     var layout: u32
+    ## Mip levels; with more than one, `attachment` views the first for frames.
+    var levels: u32 = 1
+    var attachment: u64
     ## Whether the device filters the format linearly; sampling falls back to
     ## nearest where it does not (32-bit floats on some devices).
     var filterable: bool
@@ -62,6 +65,7 @@ func vulkan_drawing(device: VulkanDevice*) -> !:
     try vulkan_check(vkCreatePipelineLayout(device.device, &layout_info, none, &device.layout), "the Vulkan pipeline layout could not be created")
     device.nearest = try vulkan_sampler(device, VK_FILTER_NEAREST)
     device.linear = try vulkan_sampler(device, VK_FILTER_LINEAR)
+    device.trilinear = try vulkan_sampler(device, VK_FILTER_LINEAR, true)
     device.fill = try vulkan_shader(device, fill_frag_words)
     device.ready = true
     # Every draw binds an image; one opaque texel stands in for draws that sample none.
@@ -70,10 +74,13 @@ func vulkan_drawing(device: VulkanDevice*) -> !:
     var white: u8[4] = [255, 255, 255, 255]
     try vulkan_texture_upload(device, placeholder, white, Region(0, 0, 1, 1))
 
-func vulkan_sampler(device: VulkanDevice*, filter: u32) -> u64!:
+## A clamped sampler; `mipmapped` also blends linearly between levels, where
+## the others read the first only (a maximum level of detail of zero).
+func vulkan_sampler(device: VulkanDevice*, filter: u32, mipmapped: bool = false) -> u64!:
     var info = VkSamplerCreateInfo(sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, magFilter = filter, minFilter = filter,
+                                   mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR if mipmapped else VK_SAMPLER_MIPMAP_MODE_NEAREST,
                                    addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-                                   maxAnisotropy = 1.0)
+                                   maxAnisotropy = 1.0, maxLod = 1000.0 if mipmapped else 0.0)
     var sampler: u64 = 0
     try vulkan_check(vkCreateSampler(device.device, &info, none, &sampler), "a Vulkan sampler could not be created")
     return sampler
@@ -100,6 +107,8 @@ func vulkan_drawing_destroy(device: VulkanDevice*):
     device.format_count = 0
     if device.nearest != 0: vkDestroySampler(device.device, device.nearest, none)
     if device.linear != 0: vkDestroySampler(device.device, device.linear, none)
+    if device.trilinear != 0: vkDestroySampler(device.device, device.trilinear, none)
+    device.trilinear = 0
     if device.fill != 0: vkDestroyShaderModule(device.device, device.fill, none)
     device.fill = 0
     if device.layout != 0: vkDestroyPipelineLayout(device.device, device.layout, none)
@@ -170,7 +179,7 @@ func vulkan_depth_destroy(device: VulkanDevice*):
 
 # mark: Images ================================================================================
 
-func vulkan_texture_create(device: VulkanDevice*, width: u32, height: u32, pixel_format: Format, storage: bool) -> VulkanTexture*!:
+func vulkan_texture_create(device: VulkanDevice*, width: u32, height: u32, pixel_format: Format, storage: bool, levels: u32 = 1) -> VulkanTexture*!:
     try vulkan_drawing(device)
     let native_format = vulkan_native_format(pixel_format)
     var properties: VkFormatProperties
@@ -178,21 +187,27 @@ func vulkan_texture_create(device: VulkanDevice*, width: u32, height: u32, pixel
     let features = properties.optimalTilingFeatures
     if (features & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) == 0 or (storage and (features & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) == 0):
         error(unsupported, "the Vulkan device cannot sample or store textures of this format")
+    let blits = VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT
+    if levels > 1 and (features & blits) != blits:
+        error(unsupported, "the Vulkan device cannot make mipmaps of this format")
     var usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT
     if renderable(pixel_format): usage = usage | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
     if storage: usage = usage | VK_IMAGE_USAGE_STORAGE_BIT
-    let state = try new VulkanTexture(width = width, height = height, format = pixel_format, native_format = native_format, layout = VK_IMAGE_LAYOUT_UNDEFINED,
+    let state = try new VulkanTexture(width = width, height = height, format = pixel_format, native_format = native_format, layout = VK_IMAGE_LAYOUT_UNDEFINED, levels = levels,
                                       filterable = (features & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) != 0) in memory.heap
     errdefer vulkan_texture_destroy(device, state)
     var info = VkImageCreateInfo(sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, imageType = VK_IMAGE_TYPE_2D, format = state.native_format,
-                                 extent = VkExtent3D(width = width, height = height, depth = 1), mipLevels = 1, arrayLayers = 1, samples = VK_SAMPLE_COUNT_1_BIT,
+                                 extent = VkExtent3D(width = width, height = height, depth = 1), mipLevels = levels, arrayLayers = 1, samples = VK_SAMPLE_COUNT_1_BIT,
                                  usage = usage)
     try vulkan_check(vkCreateImage(device.device, &info, none, &state.image), "a Vulkan image could not be created")
     var requirements: VkMemoryRequirements
     vkGetImageMemoryRequirements(device.device, state.image, &requirements)
     state.memory = try vulkan_image_memory(device, requirements)
     try vulkan_check(vkBindImageMemory(device.device, state.image, state.memory.memory, state.memory.offset), "Vulkan image memory could not be bound")
-    state.view = try vulkan_image_view(device, state.image, state.native_format, VK_IMAGE_ASPECT_COLOR_BIT)
+    state.view = try vulkan_image_view(device, state.image, state.native_format, VK_IMAGE_ASPECT_COLOR_BIT, levels)
+    # A framebuffer names one level: the first.
+    if levels > 1:
+        state.attachment = try vulkan_image_view(device, state.image, state.native_format, VK_IMAGE_ASPECT_COLOR_BIT)
     # The layout stays undefined until the first use: a pass rendering into it
     # starts from undefined anyway, and one sampling it first makes it ready
     # in its own commands (`vulkan_encode`), so creating costs no submission.
@@ -201,7 +216,7 @@ func vulkan_texture_create(device: VulkanDevice*, width: u32, height: u32, pixel
 ## Destroy the image now if every submission using it has completed, or else
 ## when the last of them does.
 func vulkan_texture_destroy(device: VulkanDevice*, state: VulkanTexture*):
-    let item = VulkanRetired(kind = vulkan_retired_image, handle = state.image, view = state.view, allocation = state.memory)
+    let item = VulkanRetired(kind = vulkan_retired_image, handle = state.image, view = state.view, extra = state.attachment, allocation = state.memory)
     let last_use = state.last_use
     free(state) in memory.heap
     vulkan_poll(device)
@@ -224,7 +239,7 @@ func vulkan_transition(command: u64, state: VulkanTexture*, layout: u32):
     var barrier = VkImageMemoryBarrier(sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
                                        srcAccessMask = vulkan_image_access, dstAccessMask = vulkan_image_access,
                                        oldLayout = state.layout, newLayout = layout, srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                                       image = state.image, subresourceRange = VkImageSubresourceRange(aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, levelCount = 1, layerCount = 1))
+                                       image = state.image, subresourceRange = VkImageSubresourceRange(aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, levelCount = state.levels, layerCount = 1))
     let stages = VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT
     vkCmdPipelineBarrier(command, stages, stages, 0, 0, none, 0, none, 1, &barrier)
     state.layout = layout
@@ -311,6 +326,49 @@ func vulkan_texture_copy(device: VulkanDevice*, source: VulkanTexture*, region: 
     source.last_use = serial
     target.last_use = serial
 
+## Fill levels 1.. of a mipmapped image from the one before each, by linear
+## blits halving it, and submit without waiting; the image is ready for
+## sampling again after.
+func vulkan_texture_mipmaps(device: VulkanDevice*, state: VulkanTexture*) -> !:
+    let slot = try vulkan_begin(device)
+    vulkan_transition(slot.command, state, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
+    var width = (i32)state.width
+    var height = (i32)state.height
+    for level in 1..<state.levels:
+        # Level - 1 was written (uploaded, drawn or blitted): it becomes the source.
+        vulkan_level_barrier(slot.command, state, level - 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL)
+        let next_width = width // 2 if width > 1 else 1
+        let next_height = height // 2 if height > 1 else 1
+        var blit = VkImageBlit(srcSubresource = VkImageSubresourceLayers(aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, mipLevel = level - 1, layerCount = 1),
+                               dstSubresource = VkImageSubresourceLayers(aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, mipLevel = level, layerCount = 1))
+        blit.srcOffsets[1] = VkOffset3D(x = width, y = height, z = 1)
+        blit.dstOffsets[1] = VkOffset3D(x = next_width, y = next_height, z = 1)
+        vkCmdBlitImage(slot.command, state.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, state.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR)
+        width = next_width
+        height = next_height
+    # Every level but the last is a source now; the last was written last.
+    for level in 0..<state.levels - 1:
+        vulkan_level_barrier(slot.command, state, level, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+    vulkan_level_barrier(slot.command, state, state.levels - 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+    state.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+    state.last_use = try vulkan_end(device, slot)
+
+## A barrier moving one mip level of the image between layouts.
+func vulkan_level_barrier(command: u64, state: VulkanTexture*, level: u32, from_layout: u32, to_layout: u32):
+    var barrier = VkImageMemoryBarrier(sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                                       srcAccessMask = vulkan_image_access, dstAccessMask = vulkan_image_access,
+                                       oldLayout = from_layout, newLayout = to_layout, srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                                       image = state.image, subresourceRange = VkImageSubresourceRange(aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, baseMipLevel = level, levelCount = 1, layerCount = 1))
+    let stages = VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT
+    vkCmdPipelineBarrier(command, stages, stages, 0, 0, none, 0, none, 1, &barrier)
+
+## The device's sampler for `filter` on an image the device filters linearly
+## or not.
+func vulkan_sampler_for(device: VulkanDevice*, filter: Filter, filterable: bool) -> u64:
+    if not filterable or filter == Filter.nearest:
+        return device.nearest
+    return device.trilinear if filter == Filter.trilinear else device.linear
+
 ## Destroy a framebuffer this call still owns; zero once it has been retired.
 func vulkan_framebuffer_release(device: VulkanDevice*, framebuffer: u64):
     if framebuffer != 0: vkDestroyFramebuffer(device.device, framebuffer, none)
@@ -321,7 +379,7 @@ func vulkan_framebuffer_release(device: VulkanDevice*, framebuffer: u64):
 func vulkan_texture_render(device: VulkanDevice*, state: VulkanTexture*, canvas: Canvas, color: Color, keep: bool) -> !:
     let formats = try vulkan_format_state(device, state.native_format)
     let depth = try vulkan_depth_for(device, state.width, state.height)
-    var attachments: u64[2] = [state.view, depth]
+    var attachments: u64[2] = [state.attachment if state.levels > 1 else state.view, depth]
     var framebuffer_info = VkFramebufferCreateInfo(sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
                                                    renderPass = formats.pass_texture, attachmentCount = 2, pAttachments = &attachments[0], width = state.width, height = state.height, layers = 1)
     var framebuffer: u64 = 0
@@ -332,7 +390,15 @@ func vulkan_texture_render(device: VulkanDevice*, state: VulkanTexture*, canvas:
     let slot = try vulkan_begin(device)
     let serial = device.submitted + 1
     var pass = formats.pass_texture
-    if keep:
+    if state.levels > 1:
+        # The pass moves only the first level (the framebuffer's view): the
+        # others are made ready for sampling here, and the first as the pass
+        # starts it.
+        vulkan_transition(slot.command, state, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+        if keep:
+            vulkan_level_barrier(slot.command, state, 0, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
+            pass = formats.pass_load
+    elif keep:
         # The loading pass starts from the attachment layout, made ready outside it.
         vulkan_transition(slot.command, state, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
         pass = formats.pass_load

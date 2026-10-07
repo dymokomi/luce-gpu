@@ -332,7 +332,7 @@ func vulkan_encode_dispatch(device: VulkanDevice*, command: u64, pool: u64, reco
     var count: u32 = 0
     for index in 0..<binding_limit:
         if program.bindings[index] == (u8)BindingKind.sampler:
-            images[index] = VkDescriptorImageInfo(sampler = device.linear if recorded.filters[index] == Filter.linear else device.nearest)
+            images[index] = VkDescriptorImageInfo(sampler = vulkan_sampler_for(device, recorded.filters[index], true))
             writes[(usize)count] = VkWriteDescriptorSet(sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, dstSet = set, dstBinding = (u32)index, descriptorCount = 1,
                                                         descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER, pImageInfo = &images[index])
             count += 1
@@ -351,8 +351,8 @@ func vulkan_encode_dispatch(device: VulkanDevice*, command: u64, pool: u64, reco
         let storage = program.bindings[index] == (u8)BindingKind.storage_image
         let layout = VK_IMAGE_LAYOUT_GENERAL if storage else VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
         vulkan_transition(command, image, layout)
-        let linear = recorded.filters[index] == Filter.linear and image.filterable and texture.format != Format.r32_uint
-        images[index] = VkDescriptorImageInfo(sampler = 0 if storage else (device.linear if linear else device.nearest), imageView = image.view, imageLayout = layout)
+        let sampler = vulkan_sampler_for(device, recorded.filters[index], image.filterable and texture.format != Format.r32_uint)
+        images[index] = VkDescriptorImageInfo(sampler = 0 if storage else sampler, imageView = image.view, imageLayout = layout)
         writes[(usize)count] = VkWriteDescriptorSet(sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, dstSet = set, dstBinding = (u32)index, descriptorCount = 1,
                                                     descriptorType = vulkan_descriptor_type(program.bindings[index]), pImageInfo = &images[index])
         count += 1

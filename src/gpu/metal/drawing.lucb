@@ -37,6 +37,7 @@ struct MetalDrawing:
     var depth_off: void*?
     var nearest: void*?
     var linear: void*?
+    var trilinear: void*?
     var placeholder: void*?
     var depth_texture: void*?
     var width: u64
@@ -90,6 +91,7 @@ func metal_drawing_open(device: MetalDevice*) -> MetalDrawing*!:
     state.depth_off = metal_with_object(native, metal_sel("newDepthStencilStateWithDescriptor:"), depth) else error(failed, "could not create GPU overlay state")
     state.nearest = try metal_sampler(native, 0)
     state.linear = try metal_sampler(native, 1)
+    state.trilinear = try metal_sampler(native, 1, true)
     # Every draw binds a texture; one opaque texel stands in for draws that sample none.
     let placeholder = try metal_texture_create(device, 1, 1, Format.rgba8_linear, false)
     var white: u8[4] = [255, 255, 255, 255]
@@ -100,11 +102,15 @@ func metal_drawing_open(device: MetalDevice*) -> MetalDrawing*!:
     free(placeholder) in memory.heap
     return state
 
-func metal_sampler(device: void*, filter: u64) -> void*!:
+## A clamped sampler filtering with `filter` (0 nearest, 1 linear); `mipmapped`
+## also blends linearly between levels, where the others read the first only.
+func metal_sampler(device: void*, filter: u64, mipmapped: bool = false) -> void*!:
     let descriptor = metal_ptr(try metal_class("MTLSamplerDescriptor"), metal_sel("new")) else error(failed, "could not create a GPU sampler descriptor")
     defer metal_void(descriptor, metal_sel("release"))
     metal_uint_arg(descriptor, metal_sel("setMinFilter:"), filter)
     metal_uint_arg(descriptor, metal_sel("setMagFilter:"), filter)
+    # MTLSamplerMipFilterNotMipmapped (0) or Linear (2).
+    metal_uint_arg(descriptor, metal_sel("setMipFilter:"), 2 if mipmapped else 0)
     # MTLSamplerAddressModeClampToEdge on both axes.
     metal_uint_arg(descriptor, metal_sel("setSAddressMode:"), 0)
     metal_uint_arg(descriptor, metal_sel("setTAddressMode:"), 0)
@@ -242,7 +248,7 @@ func metal_drawing_destroy(state: MetalDrawing*):
         if let value = pipeline: metal_void(value, metal_sel("release"))
     for pipeline in state.mesh_pipelines:
         if let value = pipeline: metal_void(value, metal_sel("release"))
-    for object in [state.depth_on, state.depth_off, state.nearest, state.linear, state.library, state.fill, state.geometry_library,
+    for object in [state.depth_on, state.depth_off, state.nearest, state.linear, state.trilinear, state.library, state.fill, state.geometry_library,
                    state.mesh_library, state.mesh_wire_library, state.mesh_fragment_library, state.mesh_id_library, state.mesh_placeholder]:
         if let value = object:
             metal_void(value, metal_sel("release"))
@@ -355,7 +361,7 @@ func metal_encode(encoder: void*, drawing: MetalDrawing*, pipeline: void*, geome
             if slot == metal_encoded_slot:
                 params.mode = params.mode | draw_encoded
             metal_inline_bytes(encoder, metal_sel("setFragmentBytes:length:atIndex:"), &params, 48, 0)
-        let sampler = metal_required(drawing.linear if draw.filter == Filter.linear else drawing.nearest)
+        let sampler = metal_sampler_for(drawing, draw.filter)
         for index in 0..<image_limit:
             var image = metal_required(drawing.placeholder)
             if let texture = draw.images[index]:
@@ -367,6 +373,12 @@ func metal_encode(encoder: void*, drawing: MetalDrawing*, pipeline: void*, geome
             metal_draw_instances(encoder, metal_sel("drawPrimitives:vertexStart:vertexCount:instanceCount:baseInstance:"), 3, 0, 6, (u64)draw.count, (u64)draw.first)
             continue
         metal_draw(encoder, metal_sel("drawPrimitives:vertexStart:vertexCount:"), 3, (u64)draw.first, (u64)draw.count)
+
+## The device's sampler for `filter`.
+func metal_sampler_for(drawing: MetalDrawing*, filter: Filter) -> void*:
+    if filter == Filter.trilinear:
+        return metal_required(drawing.trilinear)
+    return metal_required(drawing.linear if filter == Filter.linear else drawing.nearest)
 
 func metal_min(a: u64, b: u64) -> u64:
     return a if a < b else b

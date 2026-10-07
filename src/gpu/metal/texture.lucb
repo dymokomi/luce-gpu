@@ -20,7 +20,7 @@ extern func metal_copy_from_texture as "objc_msgSend"(object: void*, selector: v
                                                       size: LuceGpuMetalExtent, buffer: void*, offset: u64, bytes_per_row: u64, bytes_per_image: u64)
 extern func metal_new_buffer as "objc_msgSend"(object: void*, selector: void*, length: u64, options: u64) -> void*?
 
-func metal_texture_create(device: MetalDevice*, width: u32, height: u32, pixel_format: Format, storage: bool) -> MetalTexture*!:
+func metal_texture_create(device: MetalDevice*, width: u32, height: u32, pixel_format: Format, storage: bool, levels: u32 = 1) -> MetalTexture*!:
     let pool = objc_autoreleasePoolPush()
     defer objc_autoreleasePoolPop(pool)
     let state = try new MetalTexture(width = width, height = height, format = pixel_format) in memory.heap
@@ -31,6 +31,7 @@ func metal_texture_create(device: MetalDevice*, width: u32, height: u32, pixel_f
     metal_uint_arg(descriptor, metal_sel("setPixelFormat:"), metal_pixel_format(pixel_format))
     metal_uint_arg(descriptor, metal_sel("setWidth:"), (u64)width)
     metal_uint_arg(descriptor, metal_sel("setHeight:"), (u64)height)
+    metal_uint_arg(descriptor, metal_sel("setMipmapLevelCount:"), (u64)levels)
     # MTLStorageModePrivate; MTLTextureUsageShaderRead (1), and RenderTarget (4)
     # for formats frames render into, ShaderWrite (2) for storage images.
     metal_uint_arg(descriptor, metal_sel("setStorageMode:"), 2)
@@ -85,6 +86,17 @@ func metal_texture_copy(device: MetalDevice*, source: MetalTexture*, region: Reg
     metal_copy_texture(blit, metal_sel("copyFromTexture:sourceSlice:sourceLevel:sourceOrigin:sourceSize:toTexture:destinationSlice:destinationLevel:destinationOrigin:"),
                        metal_required(source.texture), 0, 0, LuceGpuMetalOrigin((u64)region.x, (u64)region.y, 0), LuceGpuMetalExtent((u64)region.width, (u64)region.height, 1),
                        metal_required(target.texture), 0, 0, LuceGpuMetalOrigin((u64)x, (u64)y, 0))
+    metal_void(blit, metal_sel("endEncoding"))
+    metal_submit(command)
+
+## Fill the levels after the first with a blit encoder's mipmap generation and
+## commit without waiting.
+func metal_texture_mipmaps(device: MetalDevice*, state: MetalTexture*) -> !:
+    let pool = objc_autoreleasePoolPush()
+    defer objc_autoreleasePoolPop(pool)
+    let command = metal_ptr(metal_required(device.queue), metal_sel("commandBuffer")) else error(failed, "could not create a Metal command buffer")
+    let blit = metal_ptr(command, metal_sel("blitCommandEncoder")) else error(failed, "could not create a Metal blit encoder")
+    metal_object(blit, metal_sel("generateMipmapsForTexture:"), metal_required(state.texture))
     metal_void(blit, metal_sel("endEncoding"))
     metal_submit(command)
 

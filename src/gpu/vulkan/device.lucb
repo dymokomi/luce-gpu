@@ -118,6 +118,7 @@ struct VulkanDevice:
     var layout: u64
     var nearest: u64
     var linear: u64
+    var trilinear: u64
     var placeholder: VulkanTexture*?
     var fill: u64
     var formats: VulkanFormatState[6]
@@ -552,6 +553,8 @@ func vulkan_retired_free(device: VulkanDevice*, item: VulkanRetired):
         vkDestroyDescriptorPool(device.device, item.handle, none)
     elif item.kind == vulkan_retired_image:
         if item.view != 0: vkDestroyImageView(device.device, item.view, none)
+        # A mipmapped texture's view of its first level, for frames.
+        if item.extra != 0: vkDestroyImageView(device.device, item.extra, none)
         if item.handle != 0: vkDestroyImage(device.device, item.handle, none)
     elif item.kind == vulkan_retired_queries:
         vkDestroyQueryPool(device.device, item.handle, none)

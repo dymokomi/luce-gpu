@@ -9,12 +9,12 @@
 #
 #==============================================================================================
 
-func backend_texture_create(device: DeviceState*, width: u32, height: u32, pixel_format: Format, storage: bool) -> void*!:
+func backend_texture_create(device: DeviceState*, width: u32, height: u32, pixel_format: Format, storage: bool, levels: u32 = 1) -> void*!:
     if (platform.windows or platform.linux) and device.backend == Backend.vulkan:
-        return (void*)try vulkan_texture_create((VulkanDevice*)device.native, width, height, pixel_format, storage)
+        return (void*)try vulkan_texture_create((VulkanDevice*)device.native, width, height, pixel_format, storage, levels)
     if platform.macos and platform.arm64:
         if device.backend == Backend.metal:
-            return (void*)try metal_texture_create((MetalDevice*)device.native, width, height, pixel_format, storage)
+            return (void*)try metal_texture_create((MetalDevice*)device.native, width, height, pixel_format, storage, levels)
     error(unsupported, "the GPU backend is not implemented")
 
 func backend_texture_upload(device: DeviceState*, native: void*, pixels: const u8[], region: Region) -> !:
@@ -44,6 +44,16 @@ func backend_texture_copy(device: DeviceState*, source: void*, region: Region, t
     if platform.macos and platform.arm64:
         if device.backend == Backend.metal:
             try metal_texture_copy((MetalDevice*)device.native, (MetalTexture*)source, region, (MetalTexture*)target, x, y)
+            return
+    error(unsupported, "the GPU backend is not implemented")
+
+func backend_texture_mipmaps(device: DeviceState*, native: void*) -> !:
+    if (platform.windows or platform.linux) and device.backend == Backend.vulkan:
+        try vulkan_texture_mipmaps((VulkanDevice*)device.native, (VulkanTexture*)native)
+        return
+    if platform.macos and platform.arm64:
+        if device.backend == Backend.metal:
+            try metal_texture_mipmaps((MetalDevice*)device.native, (MetalTexture*)native)
             return
     error(unsupported, "the GPU backend is not implemented")
 

@@ -57,6 +57,66 @@ pub func pixels(device: gpu.Device) -> !:
     var closed = try gpu.Texture.create(device, 8, 8, gpu.Format.rgba8)
     closed.destroy()
     assert(refused(source, gpu.Region(0, 0, 2, 2), closed, 0, 0) == gpu.closed)
+    try mipmaps(device)
+
+## Mipmapped textures: a frame draws the first level, generate_mipmaps fills the
+## rest, and only `trilinear` reads them: an 8x8 texture with one white texel,
+## drawn onto one pixel, averages to 4 that way and reads 0 from the first level.
+func mipmaps(device: gpu.Device) -> !:
+    var texture = try gpu.Texture.create(device, 8, 8, gpu.Format.rgba8_linear, mipmaps = true)
+    defer texture.destroy()
+    assert((try texture.levels()) == 4)
+    var odd = try gpu.Texture.create(device, 5, 3, gpu.Format.r8, mipmaps = true)
+    assert((try odd.levels()) == 3)
+    try odd.generate_mipmaps()
+    odd.destroy()
+    let frame = try texture.frame()
+    let root = try frame.value().target()
+    let corner = try root.value().region(gpu.Rect(width = 1.0, height = 1.0))
+    let a = gpu.Vertex(x = -1.0, y = 1.0, red = 1.0, green = 1.0, blue = 1.0)
+    var b = a
+    b.x = 1.0
+    var c = b
+    c.y = -1.0
+    var d = a
+    d.y = -1.0
+    try corner.value().triangles([a, b, c, a, c, d])
+    corner.release()
+    root.release()
+    assert((try frame.value().present(gpu.Color(0.0, 0.0, 0.0, 1.0))) == gpu.PresentResult.submitted)
+    frame.release()
+    try texture.generate_mipmaps()
+    var first: u8[256]
+    try texture.read(first)
+    assert(first[0] == 255 and first[4] == 0 and first[3] == 255)
+    for filter in [gpu.Filter.linear, gpu.Filter.trilinear]:
+        var pixel = try gpu.Texture.create(device, 1, 1, gpu.Format.rgba8_linear)
+        let shown = try pixel.frame()
+        let target = try shown.value().target()
+        try gpu.draw_image(target.value(), texture, gpu.Rect(width = 1.0, height = 1.0), filter = filter)
+        target.release()
+        assert((try shown.value().present(gpu.Color(0.0, 0.0, 0.0, 0.0))) == gpu.PresentResult.submitted)
+        shown.release()
+        var texel: u8[4]
+        try pixel.read(texel)
+        pixel.destroy()
+        if filter == gpu.Filter.trilinear:
+            assert(texel[0] >= 3 and texel[0] <= 5 and texel[3] == 255)
+        else:
+            assert(texel[0] == 0 and texel[3] == 255)
+    # Mipmaps are for the formats frames render into, and not storage images.
+    var rejected = false
+    _ = gpu.Texture.create(device, 8, 8, gpu.Format.rgba32_float, mipmaps = true) catch failure:
+        assert(failure.code == gpu.invalid_geometry)
+        rejected = true
+        recover gpu.Texture()
+    assert(rejected)
+    rejected = false
+    _ = gpu.Texture.create(device, 8, 8, gpu.Format.rgba8, storage = true, mipmaps = true) catch failure:
+        assert(failure.code == gpu.invalid_geometry)
+        rejected = true
+        recover gpu.Texture()
+    assert(rejected)
 
 ## The error copy_texture returns for these arguments.
 func refused(source: gpu.Texture, region: gpu.Region, target: gpu.Texture, x: u32, y: u32) -> ErrorCode:
