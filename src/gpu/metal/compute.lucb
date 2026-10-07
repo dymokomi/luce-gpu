@@ -45,7 +45,7 @@ func metal_limits(device: MetalDevice*) -> Limits:
                   ray_query = (metal_uint(native, metal_sel("supportsRaytracing")) & 0xff) != 0,
                   texture_tables = metal_uint(native, metal_sel("argumentBuffersSupport")) == metal_argument_buffers_tier2, texture_table_size = texture_table_limit)
 
-func metal_kernel_create(device: MetalDevice*, msl: c.str, group: u32[3], fast_math: bool) -> void*!:
+func metal_kernel_create(device: MetalDevice*, msl: c.str, group: u32[3], fast_math: bool, constants: const Constant[]) -> void*!:
     let pool = objc_autoreleasePoolPush()
     defer objc_autoreleasePoolPop(pool)
     let native = metal_required(device.device)
@@ -60,13 +60,39 @@ func metal_kernel_create(device: MetalDevice*, msl: c.str, group: u32[3], fast_m
     var failure: void*? = none
     let library = metal_library(native, metal_sel("newLibraryWithSource:options:error:"), try metal_text(msl), options, &failure) else error(invalid_shader, "could not compile the kernel's Metal source")
     defer metal_void(library, metal_sel("release"))
-    let function = metal_with_object(library, metal_sel("newFunctionWithName:"), try metal_text("luce_compute")) else error(invalid_shader, "the compute shader has no luce_compute entry")
+    let function = try metal_kernel_function(library, constants)
     defer metal_void(function, metal_sel("release"))
     let pipeline = metal_pipeline(native, metal_sel("newComputePipelineStateWithFunction:error:"), function, &failure) else error(invalid_shader, "could not build a Metal compute pipeline")
     errdefer metal_void(pipeline, metal_sel("release"))
     if (u64)group[0] * (u64)group[1] * (u64)group[2] > metal_uint(pipeline, metal_sel("maxTotalThreadsPerThreadgroup")):
         error(invalid_shader, "the kernel's workgroup is larger than its Metal pipeline allows")
     return (void*)try new MetalKernel(pipeline = pipeline, group = group) in memory.heap
+
+## The library's `luce_compute`, specialized with `constants` (function
+## constants at their ids; the others take their defaults). Metal requires
+## the specializing call for a function declaring constants even when none
+## is given a value, and accepts it for every function (+1).
+func metal_kernel_function(library: void*, constants: const Constant[]) -> void*!:
+    let name = try metal_text("luce_compute")
+    let values = metal_ptr(try metal_class("MTLFunctionConstantValues"), metal_sel("new")) else error(failed, "could not create Metal function constant values")
+    defer metal_void(values, metal_sel("release"))
+    for constant in constants:
+        var bits = constant.bits
+        # Bool constants are one byte; MTLDataTypeBool, UInt, Int and Float.
+        var flag: u8 = (u8)bits
+        let data: const void* = (const void*)&flag if constant.kind == ConstantKind.boolean else (const void*)&bits
+        metal_constant_value(values, metal_sel("setConstantValue:type:atIndex:"), data, metal_constant_type(constant.kind), (u64)constant.id)
+    var failure: void*? = none
+    return metal_specialized(library, metal_sel("newFunctionWithName:constantValues:error:"), name, values, &failure) else error(invalid_shader, "could not specialize the kernel's Metal function")
+
+func metal_constant_type(kind: ConstantKind) -> u64:
+    if kind == ConstantKind.boolean: return 53
+    if kind == ConstantKind.int32: return 29
+    if kind == ConstantKind.float32: return 3
+    return 33
+
+extern func metal_constant_value as "objc_msgSend"(object: void*, selector: void*, value: const void*, kind: u64, index: u64)
+extern func metal_specialized as "objc_msgSend"(object: void*, selector: void*, name: void*, values: void*, failure: void*?*) -> void*?
 
 func metal_kernel_release(device: void*, native: void*):
     _ = device
@@ -91,7 +117,8 @@ func metal_fill_kernel(device: MetalDevice*) -> MetalKernel*!:
     let compute = metal_required_compute(device)
     if let fill = compute.fill:
         return fill
-    let fill = (MetalKernel*)try metal_kernel_create(device, fill_comp_msl, fill_comp_group, fill_comp_fast_math)
+    var no_constants: Constant[]
+    let fill = (MetalKernel*)try metal_kernel_create(device, fill_comp_msl, fill_comp_group, fill_comp_fast_math, no_constants)
     compute.fill = fill
     return fill
 

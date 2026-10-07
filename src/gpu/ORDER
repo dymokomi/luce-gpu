@@ -16,6 +16,7 @@ readback.lucb
 upload.lucb
 shader.lucb
 shaders.lucb
+specialize.lucb
 compute.lucb
 compute_shaders.lucb
 table.lucb

@@ -8,7 +8,9 @@ a vertex shader becomes SPIR-V words only. A compute shader (`.comp`) becomes
 (its workgroup size), `<stem>_comp_bindings` (what each set-0 binding holds)
 `<stem>_comp_fast_math` (whether Metal may relax IEEE float rules) and
 `<stem>_comp_table` (whether it reads a texture table), the arguments of
-`gpu.Kernel.create`. Builds use the checked-in module, so
+`gpu.Kernel.create`; a kernel with specialization constants
+(`layout(constant_id = N) const uint NAME = 1u;`) also gets
+`<stem>_comp_constant_ids`, `_kinds`, `_defaults` and `_names`. Builds use the checked-in module, so
 glslangValidator and spirv-cross are needed only when a shader changes.
 
     embed_shaders.py OUTPUT.lucb [--vertex FILE.vert] [-I DIR] [--depfile FILE] SHADER...
@@ -56,6 +58,8 @@ TABLE_BUFFER = 29
 BINDING_LIMIT = 16
 # gpu.Kernel's binding kinds.
 STORAGE_BUFFER, STORAGE_IMAGE, SAMPLED_IMAGE, ACCELERATION_STRUCTURE, SAMPLER = 1, 2, 3, 4, 5
+# gpu.ConstantKind of each specialization constant type a kernel may declare.
+CONSTANT_KINDS = {'uint': 1, 'int': 2, 'float': 3, 'bool': 4}
 
 
 class Shader:
@@ -165,7 +169,22 @@ def kernel_layout(shader, spv):
     push = None
     for block in reflection.get('push_constants', []):
         push = reflection['types'][block['type']]['name']
-    return entry['workgroup_size'], bindings, push, table
+    constants = []
+    for constant in reflection.get('specialization_constants', []):
+        kind = CONSTANT_KINDS.get(constant['type'])
+        if kind is None:
+            sys.exit(f'{shader.path}: specialization constant {constant["name"]} is a {constant["type"]}; kernels take uint, int, float and bool')
+        constants.append((constant['id'], kind, constant_bits(constant['type'], constant['default_value']), constant['name']))
+    return entry['workgroup_size'], bindings, push, table, sorted(constants)
+
+
+def constant_bits(kind, value):
+    """A specialization constant's default as the 32 bits gpu.Constant holds."""
+    if kind == 'float':
+        return struct.unpack('<I', struct.pack('<f', value))[0]
+    if kind == 'bool':
+        return 1 if value else 0
+    return value & 0xffffffff
 
 
 def kernel_msl(shader, spv, push, table, temporary):
@@ -218,13 +237,20 @@ with tempfile.TemporaryDirectory(prefix='luce-shader-') as temporary:
             continue
         emit_mark(f'{shader.stem}: compute kernel' + (f' ({", ".join(shader.defines)})' if shader.defines else ''))
         spv, words = words_of(shader.path, 'comp', temporary, shader.stem, shader.defines, args.target_env)
-        group, bindings, push, table = kernel_layout(shader, spv)
+        group, bindings, push, table, constants = kernel_layout(shader, spv)
         emit_words(shader.stem + '_comp_words', words)
         emit_text(f'{shader.stem}_comp_msl', kernel_msl(shader, spv, push, table, temporary))
         lines.append(f'{visibility}let {shader.stem}_comp_group: u32[3] = [{", ".join(str(size) for size in group)}]')
         lines.append(f'{visibility}let {shader.stem}_comp_bindings: u8[{BINDING_LIMIT}] = [{", ".join(str(kind) for kind in bindings)}]')
         lines.append(f'{visibility}let {shader.stem}_comp_fast_math: bool = {"true" if shader.stem in args.fast_math else "false"}')
         lines.append(f'{visibility}let {shader.stem}_comp_table: bool = {"true" if table else "false"}')
+        if constants:
+            # The specialization constants, by id: kind (gpu.ConstantKind), default bits, name.
+            count = len(constants)
+            lines.append(f'{visibility}let {shader.stem}_comp_constant_ids: u32[{count}] = [{", ".join(str(c[0]) for c in constants)}]')
+            lines.append(f'{visibility}let {shader.stem}_comp_constant_kinds: u8[{count}] = [{", ".join(str(c[1]) for c in constants)}]')
+            lines.append(f'{visibility}let {shader.stem}_comp_constant_defaults: u32[{count}] = [{", ".join(f"0x{c[2]:08x}" for c in constants)}]')
+            lines.append(f'{visibility}let {shader.stem}_comp_constant_names: c.str[{count}] = [{", ".join(chr(34) + c[3] + chr(34) for c in constants)}]')
         lines.append('')
 args.output.write_text('\n'.join(lines).rstrip('\n') + '\n', encoding='utf-8')
 if args.depfile:

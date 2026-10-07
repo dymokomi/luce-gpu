@@ -1,0 +1,105 @@
+#==============================================================================================
+#
+#   specialize - Specialization constants of compute kernels
+#
+#   DESCRIPTION:
+#       A kernel may declare `layout(constant_id = N) const uint NAME = 1u;` (uint, int, float or
+#       bool): a constant whose value is chosen when the kernel is created, so the compiler
+#       folds it and drops the branches it rules out, which a uniform cannot do. Vulkan passes
+#       the values as a VkSpecializationInfo; Metal as function constants (spirv-cross turns the
+#       constants into `[[function_constant(N)]]`). Values are checked against the constants
+#       the kernel's SPIR-V declares; constants given no value keep their defaults.
+#
+#==============================================================================================
+
+## The kinds of value a specialization constant holds.
+pub enum ConstantKind as u8:
+    uint32 = 1
+    int32 = 2
+    float32 = 3
+    boolean = 4
+
+## A value for a kernel's specialization constant `id` (its constant_id): the
+## kind the kernel declares and the value's 32 bits.
+pub struct Constant:
+    pub var id: u32
+    pub var kind: ConstantKind
+    pub var bits: u32
+
+    pub static func uint32(id: u32, value: u32) -> Constant:
+        return Constant(id = id, kind = ConstantKind.uint32, bits = value)
+
+    pub static func int32(id: u32, value: i32) -> Constant:
+        return Constant(id = id, kind = ConstantKind.int32, bits = (u32)value)
+
+    pub static func float32(id: u32, value: f32) -> Constant:
+        var stored = value
+        return Constant(id = id, kind = ConstantKind.float32, bits = memory.read[u32]((const void*)&stored))
+
+    pub static func boolean(id: u32, value: bool) -> Constant:
+        return Constant(id = id, kind = ConstantKind.boolean, bits = 1 if value else 0)
+
+## Check `constants` against the specialization constants `spirv` declares:
+## each id declared once in the values and declared by the kernel, of its kind.
+func check_constants(spirv: const u32[], constants: const Constant[]) -> !:
+    for index in 0..<constants.length:
+        let value = constants[index]
+        for earlier in 0..<index:
+            if constants[earlier].id == value.id:
+                error(invalid_shader, "a specialization constant is given two values")
+        let kind = spirv_constant_kind(spirv, value.id) else error(invalid_shader, "the kernel declares no specialization constant with that id")
+        if kind != value.kind:
+            error(invalid_shader, "a specialization constant's value is not of the kind the kernel declares")
+
+# SPIR-V opcodes and the SpecId decoration.
+let spirv_decorate: u32 = 71
+let spirv_spec_id: u32 = 1
+let spirv_type_bool: u32 = 20
+let spirv_type_int: u32 = 21
+let spirv_type_float: u32 = 22
+let spirv_spec_true: u32 = 48
+let spirv_spec_false: u32 = 49
+let spirv_spec_constant: u32 = 50
+
+## The kind of the specialization constant `id` declares, or none.
+func spirv_constant_kind(spirv: const u32[], id: u32) -> ConstantKind?:
+    # The result id decorated SpecId = id.
+    let target = spirv_find(spirv, spirv_decorate, 3, spirv_spec_id, id, 1) else return none
+    # Its OpSpecConstant*: [result type, result, ...].
+    var type_id: u32? = none
+    var at: usize = 5
+    while at < spirv.length:
+        let opcode = spirv[at] & 0xffff
+        let count = (usize)(spirv[at] >> 16)
+        if count == 0: return none
+        if (opcode == spirv_spec_true or opcode == spirv_spec_false or opcode == spirv_spec_constant) and at + 2 < spirv.length and spirv[at + 2] == target:
+            type_id = spirv[at + 1]
+            break
+        at += count
+    let wanted = type_id else return none
+    at = 5
+    while at < spirv.length:
+        let opcode = spirv[at] & 0xffff
+        let count = (usize)(spirv[at] >> 16)
+        if count == 0: return none
+        if at + 1 < spirv.length and spirv[at + 1] == wanted:
+            if opcode == spirv_type_bool: return ConstantKind.boolean
+            if opcode == spirv_type_float and count >= 3 and spirv[at + 2] == 32: return ConstantKind.float32
+            if opcode == spirv_type_int and count >= 4 and spirv[at + 2] == 32:
+                return ConstantKind.int32 if spirv[at + 3] == 1 else ConstantKind.uint32
+            return none
+        at += count
+    return none
+
+## The first operand of the first `opcode` instruction (at least `length`
+## words) whose operands `key` and `key + 1` are `first` and `second`.
+func spirv_find(spirv: const u32[], opcode: u32, length: usize, first: u32, second: u32, key: usize) -> u32?:
+    var at: usize = 5
+    while at < spirv.length:
+        let count = (usize)(spirv[at] >> 16)
+        if count == 0: return none
+        if (spirv[at] & 0xffff) == opcode and count > length and at + key + 2 < spirv.length:
+            if spirv[at + key + 1] == first and spirv[at + key + 2] == second:
+                return spirv[at + 1]
+        at += count
+    return none

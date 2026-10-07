@@ -46,8 +46,11 @@ pub struct Kernel:
     ## embed_shaders.py emits them: `<stem>_comp_words`, `_msl`, `_group`,
     ## `_bindings`, `_fast_math` and `_table`. Float math follows IEEE rules
     ## (infinities and NaNs propagate) unless `fast_math` lets Metal relax
-    ## them; `table` says the kernel reads a texture table (set 1).
-    pub static func create(device: Device, spirv: const u32[], msl: c.str, group: const u32[], bindings: const u8[], fast_math: bool = false, table: bool = false) -> Kernel!:
+    ## them; `table` says the kernel reads a texture table (set 1). `constants`
+    ## specialize the kernel: a value for each specialization constant to
+    ## change, the others keeping their defaults.
+    pub static func create(device: Device, spirv: const u32[], msl: c.str, group: const u32[], bindings: const u8[], fast_math: bool = false, table: bool = false,
+                           constants: const Constant[]? = none) -> Kernel!:
         let owner = try device.checked()
         if spirv.length < 5 or spirv[0] != 0x07230203:
             error(invalid_shader, "SPIR-V words must begin with the SPIR-V magic number")
@@ -70,8 +73,11 @@ pub struct Kernel:
             kinds[index] = bindings[index]
         if table and not owner.limits.texture_tables:
             error(unsupported, "the device has no texture tables")
+        var none_given: Constant[]
+        let values: const Constant[] = constants else none_given
+        try check_constants(spirv, values)
         var size: u32[3] = [group[0], group[1], group[2]]
-        let native = try backend_kernel_create(owner, spirv, msl, size, kinds, fast_math, table)
+        let native = try backend_kernel_create(owner, spirv, msl, size, kinds, fast_math, table, values)
         errdefer owner.destroy_kernel(owner.native, native)
         let state = try new KernelState(device = owner, native = native, group = size, bindings = kinds, table = table) in memory.heap
         owner.references += 1
@@ -528,12 +534,12 @@ struct ComputeState:
 
 # mark: Dispatch ==============================================================================
 
-func backend_kernel_create(device: DeviceState*, spirv: const u32[], msl: c.str, group: u32[3], bindings: u8[16], fast_math: bool, table: bool) -> void*!:
+func backend_kernel_create(device: DeviceState*, spirv: const u32[], msl: c.str, group: u32[3], bindings: u8[16], fast_math: bool, table: bool, constants: const Constant[]) -> void*!:
     if (platform.windows or platform.linux) and device.backend == Backend.vulkan:
-        return (void*)try vulkan_kernel_create((VulkanDevice*)device.native, spirv, bindings, table)
+        return (void*)try vulkan_kernel_create((VulkanDevice*)device.native, spirv, bindings, table, constants)
     if platform.macos and platform.arm64:
         if device.backend == Backend.metal:
-            return try metal_kernel_create((MetalDevice*)device.native, msl, group, fast_math)
+            return try metal_kernel_create((MetalDevice*)device.native, msl, group, fast_math, constants)
     error(unsupported, "compute kernels are unavailable on this backend")
 
 func backend_kernel_destroyer(backend: Backend) -> func(void*, void*) -> unit:

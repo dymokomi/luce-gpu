@@ -615,8 +615,32 @@ Two features keep shared GLSL manageable across many kernels:
 - **Variants.** `FILE.comp:STEM:NAME=VALUE,...` embeds one source under another
   stem with preprocessor defines. `trace.comp:trace:SPECTRAL=1
   trace.comp:trace_rgb:SPECTRAL=0` gives `trace_comp_*` and `trace_rgb_comp_*`.
-  Use this where Vulkan code would use specialization constants; the workgroup
-  size must be a number, not `local_size_x_id`.
+  Variants are fixed when embedding; specialization constants (below) choose
+  values when a kernel is created. The workgroup size must be a number, not
+  `local_size_x_id`.
+
+### Specialization constants
+
+A kernel may declare constants whose values are chosen when it is created, as
+Vulkan's specialization constants and Metal's function constants do (Cycles
+specializes its kernels to a scene this way):
+
+```glsl
+layout(constant_id = 0) const uint SAMPLER = 0u;
+layout(constant_id = 1) const bool MOTION_BLUR = false;
+```
+
+The compiler folds them and drops the branches they rule out, which a uniform
+cannot do. A constant is a `uint`, `int`, `float` or `bool`. Embedding records
+the kernel's constants as `<stem>_comp_constant_ids`, `_kinds`, `_defaults`
+(their 32 bits) and `_names`. `Kernel.create(..., constants = values)` takes a
+value for each constant to change, as a `gpu.Constant`:
+`Constant.uint32(id, value)`, `int32`, `float32` or `boolean`. Constants
+without a value keep their defaults. A value for an id the kernel does not
+declare, of another kind, or given twice is refused with `invalid_shader`.
+Each specialization is a pipeline of its own: Vulkan passes a
+`VkSpecializationInfo`, and Metal builds the function with
+`MTLFunctionConstantValues`.
 
 ### Kernels, passes and dispatches
 
@@ -635,7 +659,7 @@ try y.read(0, result)
 
 | Operation | Contract |
 | --- | --- |
-| `Kernel.create(device, words, msl, group, bindings, fast_math = false, table = false)` | Builds the pipeline. `invalid_shader` when either form is rejected or the workgroup exceeds `limits()`. `group()` returns the size. |
+| `Kernel.create(device, words, msl, group, bindings, fast_math = false, table = false, constants = none)` | Builds the pipeline, specialized with `constants`. `invalid_shader` when either form is rejected or the workgroup exceeds `limits()`. `group()` returns the size. |
 | `Compute.begin(device)` | Starts recording. Commands are recorded portably and encoded at `submit`, so other work on the device (uploads, frames, reads) goes on meanwhile. |
 | `dispatch(kernel, bindings, uniforms, x, y = 1, z = 1, textures = none)` | Runs `x * y * z` workgroups. Element `n` of `bindings` is binding `n`; bindings the kernel does not use may be left closed (`Binding()`). `uniforms` fill the push-constant block (at most 128 bytes, zero-padded). A zero count records nothing. |
 | `dispatch_indirect(kernel, bindings, uniforms, arguments, offset)` | Takes the three u32 workgroup counts from `arguments` at `offset`, as earlier commands left them (Vulkan's `vkCmdDispatchIndirect`, Metal's indirect threadgroups). |

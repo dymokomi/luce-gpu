@@ -18,6 +18,7 @@ pub func checks(device: gpu.Device) -> !:
     try images(device)
     try float_atomics(device, limits)
     try ieee(device)
+    try specialization(device)
     try subgroups(device, limits)
     try timing(device, limits)
     try frame_timing(device, limits)
@@ -623,6 +624,59 @@ func tables(device: gpu.Device, limits: gpu.Limits) -> !:
 
 func close_float(value: f32, wanted: f32) -> bool:
     return value >= wanted - 0.002 and value <= wanted + 0.002
+
+## Specialization constants of each kind change what a kernel computes;
+## constants given no value keep their defaults; a value for an id the
+## kernel lacks, of the wrong kind, or given twice is refused.
+func specialization(device: gpu.Device) -> !:
+    assert(kernels.special_comp_constant_ids[0] == 0 and kernels.special_comp_constant_ids[3] == 5)
+    assert(kernels.special_comp_constant_kinds[2] == (u8)gpu.ConstantKind.float32 and kernels.special_comp_constant_defaults[1] == 0xffffffff)
+    let count: usize = 64
+    var out = try gpu.Buffer.allocate(device, count * 4)
+    defer out.destroy()
+    let everything: gpu.Constant[4] = [gpu.Constant.uint32(0, 1), gpu.Constant.int32(1, 3), gpu.Constant.float32(2, 0.5), gpu.Constant.boolean(5, true)]
+    try special_run(device, &out, none, count)
+    var values: u8[256]
+    try out.read(0, values)
+    for index in 0..<count:
+        assert(float_at(values, index) == 2.0 * (f32)index - 1.0)
+    try special_run(device, &out, everything, count)
+    try out.read(0, values)
+    for index in 0..<count:
+        assert(float_at(values, index) == -(0.5 * (f32)index + 3.0) * 10.0)
+    let flip_only: gpu.Constant[1] = [gpu.Constant.boolean(5, true)]
+    try special_run(device, &out, flip_only, count)
+    try out.read(0, values)
+    for index in 0..<count:
+        assert(float_at(values, index) == (2.0 * (f32)index - 1.0) * 10.0)
+    let refused_sets: gpu.Constant[3] = [gpu.Constant.uint32(9, 1), gpu.Constant.int32(0, 1), gpu.Constant.float32(5, 1.0)]
+    for constant in refused_sets:
+        let one: gpu.Constant[1] = [constant]
+        var refused = false
+        _ = gpu.Kernel.create(device, kernels.special_comp_words, kernels.special_comp_msl, kernels.special_comp_group, kernels.special_comp_bindings, constants = one) catch failure:
+            assert(failure.code == gpu.invalid_shader)
+            refused = true
+            recover gpu.Kernel()
+        assert(refused)
+    let twice: gpu.Constant[2] = [gpu.Constant.uint32(0, 1), gpu.Constant.uint32(0, 2)]
+    var refused = false
+    _ = gpu.Kernel.create(device, kernels.special_comp_words, kernels.special_comp_msl, kernels.special_comp_group, kernels.special_comp_bindings, constants = twice) catch failure:
+        assert(failure.code == gpu.invalid_shader)
+        refused = true
+        recover gpu.Kernel()
+    assert(refused)
+
+func special_run(device: gpu.Device, out: gpu.Buffer*, constants: const gpu.Constant[]?, count: usize) -> !:
+    var program = try gpu.Kernel.create(device, kernels.special_comp_words, kernels.special_comp_msl, kernels.special_comp_group, kernels.special_comp_bindings, constants = constants)
+    defer program.destroy()
+    var uniforms: u8[4]
+    memory.write[u32]((void*)&uniforms[0], (u32)count)
+    var pass = try gpu.Compute.begin(device)
+    defer pass.close()
+    let bindings: gpu.Binding[1] = [gpu.Binding(buffer = *out)]
+    try pass.dispatch(program, bindings, uniforms, (u32)((count + 63) // 64))
+    try pass.submit()
+    try pass.wait()
 
 func close(value: i32, wanted: i32) -> bool:
     return value >= wanted - 1 and value <= wanted + 1

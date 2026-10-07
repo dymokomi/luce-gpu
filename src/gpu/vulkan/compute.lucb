@@ -120,7 +120,7 @@ func vulkan_buffer_contents(buffer: VulkanBuffer*) -> u8*?:
 
 # mark: Kernels ===============================================================================
 
-func vulkan_kernel_create(device: VulkanDevice*, spirv: const u32[], bindings: u8[16], table: bool) -> void*!:
+func vulkan_kernel_create(device: VulkanDevice*, spirv: const u32[], bindings: u8[16], table: bool, constants: const Constant[]) -> void*!:
     try vulkan_drawing(device)
     let state = try new VulkanKernel(bindings = bindings, table = table) in memory.heap
     errdefer vulkan_kernel_destroy(device, state)
@@ -143,9 +143,20 @@ func vulkan_kernel_create(device: VulkanDevice*, spirv: const u32[], bindings: u
     let module = vulkan_shader(device, spirv) catch failure:
         error(invalid_shader, "Vulkan refused the kernel's SPIR-V")
     defer vkDestroyShaderModule(device.device, module, none)
+    # Specialization constants: four bytes each (VkBool32 for bool), in order.
+    var entries: VkSpecializationMapEntry[64]
+    var data: u32[64]
+    if constants.length > entries.length:
+        error(invalid_shader, "a kernel is given at most 64 specialization constants")
+    for index in 0..<constants.length:
+        entries[index] = VkSpecializationMapEntry(constantID = constants[index].id, offset = (u32)index * 4, size = 4)
+        data[index] = constants[index].bits
+    var specialization = VkSpecializationInfo(mapEntryCount = (u32)constants.length, pMapEntries = &entries[0], dataSize = constants.length * 4, pData = (void*)&data[0])
     var pipeline_info = VkComputePipelineCreateInfo(sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, layout = state.pipeline_layout,
                                                     stage = VkPipelineShaderStageCreateInfo(sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
                                                                                             stage = VK_SHADER_STAGE_COMPUTE_BIT, module = module, pName = "main"))
+    if constants.length > 0:
+        pipeline_info.stage.pSpecializationInfo = &specialization
     if vkCreateComputePipelines(device.device, 0, 1, &pipeline_info, none, &state.pipeline) != VK_SUCCESS:
         error(invalid_shader, "Vulkan could not build the kernel's compute pipeline")
     return (void*)state
