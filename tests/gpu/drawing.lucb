@@ -91,6 +91,34 @@ pub func contracts() -> !:
     canvas.destroy()
     assert(tracker.live == 0)
 
+    # The draw limit: 4096 by default, raised by allow_draws up to 65536.
+    let one = full(gpu.Vertex(green = 1.0))
+    assert(canvas.draw_limit() == 4096)
+    for index in 0..<(usize)4096:
+        try canvas.triangles(one, clip)
+    rejected = false
+    canvas.triangles(one, clip) catch failure:
+        assert(failure.code == gpu.command_limit)
+        rejected = true
+    assert(rejected and canvas.count() == 4096 * 6)
+    try canvas.allow_draws(5000)
+    try canvas.allow_draws(100)
+    assert(canvas.draw_limit() == 5000)
+    for index in 4096..<(usize)5000:
+        try canvas.triangles(one, clip)
+    rejected = false
+    canvas.triangles(one, clip) catch failure:
+        assert(failure.code == gpu.command_limit)
+        rejected = true
+    assert(rejected and canvas.count() == 5000 * 6)
+    rejected = false
+    canvas.allow_draws(65537) catch failure:
+        assert(failure.code == gpu.command_limit)
+        rejected = true
+    assert(rejected and canvas.draw_limit() == 5000)
+    canvas.destroy()
+    assert(tracker.live == 0)
+
 pub func pixels() -> !:
     var device = try gpu.Device.open()
     defer device.destroy()

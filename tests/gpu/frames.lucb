@@ -50,6 +50,8 @@ pub func contracts() -> !:
     let region = try target.value().region(gpu.Rect(x = -10.0, y = 5.0, width = 30.0, height = 20.0))
     defer region.release()
     assert((try region.value().size()).pixel_width == 60.0)
+    assert((try region.value().pixel_format()) == none)
+    try region.value().allow_draws(8192)
     try region.value().triangles(quad(gpu.Vertex(red = 1.0)))
     frame.close()
     assert(not target.is_valid() and not region.is_valid())

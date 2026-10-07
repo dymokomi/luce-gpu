@@ -1,0 +1,53 @@
+from luce_gpu import gpu
+
+## What a target reports and allows, on a device: the texel format of a texture
+## frame's targets, and a draw limit raised past the default for one frame.
+pub func pixels(device: gpu.Device) -> !:
+    var texture = try gpu.Texture.create(device, 64, 64, gpu.Format.rgba8_linear)
+    defer texture.destroy()
+    let frame = try texture.frame()
+    defer frame.release()
+    let root = try frame.value().target()
+    defer root.release()
+    assert((try root.value().pixel_format()) == gpu.Format.rgba8_linear)
+    let child = try root.value().region(gpu.Rect(x = 8.0, y = 8.0, width = 16.0, height = 16.0))
+    assert((try child.value().pixel_format()) == gpu.Format.rgba8_linear)
+    child.release()
+    # 4,200 one-pixel draws: past the default 4,096 once allowed, in one pass.
+    try root.value().allow_draws(4200)
+    for index in 0..<(usize)4200:
+        let x = (f64)(index % 64)
+        let y = (f64)(index // 64)
+        let quad = solid_quad(x, y, 64.0, 0.0, 1.0, 0.0)
+        try root.value().triangles(quad)
+    assert((try frame.value().present(gpu.Color(1.0, 0.0, 0.0, 1.0))) == gpu.PresentResult.submitted)
+    var texels: u8[16384]
+    try texture.read(texels)
+    # Rows 0..64 are all drawn (64 * 64 = 4096 draws), the last 104 draws repeat
+    # row 64's positions off the texture.
+    for index in 0..<(usize)4096:
+        assert(texels[index * 4] == 0 and texels[index * 4 + 1] == 255)
+    var other = try gpu.Texture.create(device, 4, 4, gpu.Format.r8)
+    defer other.destroy()
+    let mask = try other.frame()
+    defer mask.release()
+    let mask_root = try mask.value().target()
+    defer mask_root.release()
+    assert((try mask_root.value().pixel_format()) == gpu.Format.r8)
+
+## Two clip-space triangles covering the pixel at (`x`, `y`) of a `side`-pixel
+## square target, in a straight linear color.
+func solid_quad(x: f64, y: f64, side: f64, red: f32, green: f32, blue: f32) -> gpu.Vertex[6]:
+    let left = (f32)(x * 2.0 / side - 1.0)
+    let right = (f32)((x + 1.0) * 2.0 / side - 1.0)
+    let top = (f32)(1.0 - y * 2.0 / side)
+    let bottom = (f32)(1.0 - (y + 1.0) * 2.0 / side)
+    let a = gpu.Vertex(x = left, y = top, red = red, green = green, blue = blue)
+    var b = a
+    b.x = right
+    var c = a
+    c.x = right
+    c.y = bottom
+    var d = a
+    d.y = bottom
+    return [a, b, c, a, c, d]

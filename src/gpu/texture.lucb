@@ -80,6 +80,7 @@ pub struct Texture:
         let recording = (try native.state_value()).value()
         recording.presentation = (void*)state
         recording.device = state.device
+        recording.format = state.format
         recording.validate = check_texture_frame
         recording.submit = submit_texture_frame
         recording.release = release_texture_frame

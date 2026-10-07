@@ -331,7 +331,14 @@ work. Invalid geometry is rejected before recording. A canvas allows up to
 1,048,576 vertices and 4,096 draws by default; failed growth preserves its recorded contents.
 Dense 3D clients may call `RenderTarget.allow_vertices` (or `Canvas.allow_vertices`)
 to raise the shared frame budget up to 8,388,608 vertices. This allocates nothing
-until triangles are appended and leaves ordinary UI frames unchanged.
+until triangles are appended and leaves ordinary UI frames unchanged. In the same way
+`RenderTarget.allow_draws` (or `Canvas.allow_draws`) raises the draw limit up to
+65,536, for a frame several clients share, such as a window whose page and interface
+draw into it together; past the limit a draw returns `command_limit`.
+
+`RenderTarget.pixel_format()` is the texel format of the texture a target draws into,
+or none for a presentation surface (and a standalone frame): the format a client
+pipeline drawing there must be made for.
 `clear` retains capacity; `destroy` releases it.
 
 The built-in pipeline's fragment stage is written once in GLSL

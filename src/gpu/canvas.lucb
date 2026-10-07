@@ -84,6 +84,7 @@ pub struct Canvas:
     var coverage: u32[]
     var coverage_count: usize
     var vertex_budget: usize
+    var draw_budget: usize
 
     ## Opt in to a larger bounded frame; this changes no allocation until append.
     ## The default UI budget and the draw-count limit remain unchanged.
@@ -91,6 +92,18 @@ pub struct Canvas:
         if count > 8388608:
             error(command_limit, "canvas vertex budget cannot exceed 8388608")
         self.vertex_budget = canvas_max(self.vertex_budget, count)
+
+    ## Raise the draw limit from 4096 up to `count` (at most 65536), as
+    ## `allow_vertices` raises the vertex budget: for a frame several clients
+    ## share. Allocates nothing until draws are recorded.
+    pub func allow_draws(count: usize) -> !:
+        if count > canvas_draw_ceiling:
+            error(command_limit, "canvas draw limit cannot exceed 65536")
+        self.draw_budget = canvas_max(self.draw_budget, count)
+
+    ## The most draws the canvas records.
+    pub func draw_limit() -> usize:
+        return canvas_max(canvas_draw_default, self.draw_budget)
 
     ## The number of vertices recorded so far.
     pub func count() -> usize:
@@ -117,12 +130,7 @@ pub struct Canvas:
 
     func retained(geometry: GeometryState*, clip: Clip, viewport: Viewport, uniforms: f32[28], depth_slope: f32 = 0.0) -> !:
         if clip.width == 0 or clip.height == 0: return
-        if self.draw_count == 4096: error(command_limit, "canvas exceeds 4096 draws")
-        if self.draw_count == self.draws.length:
-            let grown = try new Draw[canvas_max(16, self.draws.length * 2)] --- in memory.heap
-            if self.draw_count > 0: memory.copy(grown, self.draws, self.draw_count)
-            if self.draws.length > 0: free(self.draws) in memory.heap
-            self.draws = grown
+        try self.reserve_draw()
         self.draws[self.draw_count] = Draw(first = 0, count = geometry.count * (6 if geometry.lines else 1), clip = clip, depth = true, depth_slope = depth_slope, viewport = viewport, geometry = geometry, geometry_uniforms = uniforms)
         geometry.references += 1
         self.draw_count += 1
@@ -133,12 +141,7 @@ pub struct Canvas:
         if clip.width == 0 or clip.height == 0:
             release_mesh_draw(mesh)
             return
-        if self.draw_count == 4096: error(command_limit, "canvas exceeds 4096 draws")
-        if self.draw_count == self.draws.length:
-            let grown = try new Draw[canvas_max(16, self.draws.length * 2)] --- in memory.heap
-            if self.draw_count > 0: memory.copy(grown, self.draws, self.draw_count)
-            if self.draws.length > 0: free(self.draws) in memory.heap
-            self.draws = grown
+        try self.reserve_draw()
         self.draws[self.draw_count] = Draw(first = 0, count = count, clip = clip, depth = true, depth_slope = depth_slope, viewport = viewport, mesh = mesh)
         self.draw_count += 1
 
@@ -163,8 +166,9 @@ pub struct Canvas:
         if vertices.length == 0 or clip.width == 0 or clip.height == 0:
             return
         let budget = canvas_max(1048576, self.vertex_budget)
-        if vertices.length > budget - self.vertex_count or self.draw_count == 4096:
-            error(command_limit, "canvas exceeds its vertex budget or 4096 draws")
+        if vertices.length > budget - self.vertex_count:
+            error(command_limit, "canvas exceeds its vertex budget")
+        try self.reserve_draw()
         let needed = self.vertex_count + vertices.length
         if needed > self.vertices.length:
             let capacity = canvas_max(needed, canvas_min(budget, canvas_max(256, self.vertices.length * 2)))
@@ -174,18 +178,20 @@ pub struct Canvas:
             if self.vertices.length > 0:
                 free(self.vertices) in memory.heap
             self.vertices = grown
-        if self.draw_count == self.draws.length:
-            let capacity = canvas_max(16, self.draws.length * 2)
-            let grown = try new Draw[capacity] --- in memory.heap
-            if self.draw_count > 0:
-                memory.copy(grown, self.draws, self.draw_count)
-            if self.draws.length > 0:
-                free(self.draws) in memory.heap
-            self.draws = grown
         memory.copy(self.vertices[self.vertex_count..], vertices, vertices.length)
         self.draws[self.draw_count] = Draw(first = self.vertex_count, count = vertices.length, clip = clip, depth = depth, depth_slope = (f32)slope_bias, viewport = viewport)
         self.vertex_count = needed
         self.draw_count += 1
+
+    ## Room for one more draw within the draw limit; on failure nothing changes.
+    func reserve_draw() -> !:
+        if self.draw_count >= self.draw_limit():
+            error(command_limit, "canvas exceeds its draw limit (4096 unless allow_draws raised it)")
+        if self.draw_count == self.draws.length:
+            let grown = try new Draw[canvas_max(16, self.draws.length * 2)] --- in memory.heap
+            if self.draw_count > 0: memory.copy(grown, self.draws, self.draw_count)
+            if self.draws.length > 0: free(self.draws) in memory.heap
+            self.draws = grown
 
     ## Draw `source` of `texture` onto `rectangle`, given in backing pixels of the
     ## target, modulated by `opacity`. The texture stays retained until the canvas
@@ -243,6 +249,10 @@ pub struct Canvas:
         if self.draws.length > 0:
             free(self.draws) in memory.heap
         self = Canvas()
+
+## The draws a canvas allows unless raised, and the most it can be raised to.
+let canvas_draw_default: usize = 4096
+let canvas_draw_ceiling: usize = 65536
 
 # mark: Geometry helpers ======================================================================
 ## Two clip-space triangles covering `rectangle`, given in backing pixels of a

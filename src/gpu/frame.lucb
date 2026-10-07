@@ -41,6 +41,8 @@ struct FrameState:
     var presentation: void*?
     # The device a surface or texture frame draws on; a standalone frame has none.
     var device: DeviceState*?
+    # A texture frame's texel format; none for a surface or standalone frame.
+    var format: Format?
     var validate: (func(void*, window.Size) -> unit!)?
     var submit: (func(void*, Canvas, Color) -> PresentResult!)?
     var release: (func(void*) -> unit)?
@@ -193,6 +195,20 @@ pub struct RenderTarget:
     pub func allow_vertices(count: usize) -> !:
         try self.frame.check()
         try self.frame.canvas.allow_vertices(count)
+
+    ## Raise this frame's shared draw limit from 4096 up to `count` (at most
+    ## 65536), without allocating storage: for a frame several clients fill,
+    ## such as a window whose page and interface draw into it together.
+    pub func allow_draws(count: usize) -> !:
+        try self.frame.check()
+        try self.frame.canvas.allow_draws(count)
+
+    ## The texel format of the texture this target draws into, or none for a
+    ## presentation surface (or a standalone frame): the format a client
+    ## pipeline drawing here must be made for.
+    pub func pixel_format() -> Format?!:
+        try self.frame.check()
+        return self.frame.format
 
     ## Record clip-space triangles. Optional slope_bias is in logical pixels,
     ## scaled to the backing target; zero preserves ordinary surface depth.
