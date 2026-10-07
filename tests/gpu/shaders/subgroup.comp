@@ -1,0 +1,19 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_ballot : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+#extension GL_KHR_shader_subgroup_vote : require
+// Subgroup operations checked against each other: every lane of a full
+// subgroup counts the same size by addition, ballot and the built-in, sees the
+// first lane's value by shuffle and by broadcast, and agrees on a vote.
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0, std430) writeonly buffer Out { uvec4 results[]; };
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    uint added = subgroupAdd(1u);
+    uint balloted = subgroupBallotBitCount(subgroupBallot(true));
+    bool shuffled = subgroupShuffle(i, 0u) == subgroupBroadcastFirst(i);
+    bool voted = subgroupAll(i < 1000000u);
+    results[i] = uvec4(gl_SubgroupSize, added, balloted, (shuffled && voted) ? 1u : 0u);
+}

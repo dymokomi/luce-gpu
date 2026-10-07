@@ -113,6 +113,11 @@ let VK_SAMPLE_COUNT_1_BIT: u32 = 1
 let VK_SHADER_STAGE_COMPUTE_BIT: u32 = 32
 let VK_SHADER_STAGE_FRAGMENT_BIT: u32 = 16
 let VK_SHADER_STAGE_VERTEX_BIT: u32 = 1
+let VK_SUBGROUP_FEATURE_ARITHMETIC_BIT: u32 = 4
+let VK_SUBGROUP_FEATURE_BALLOT_BIT: u32 = 8
+let VK_SUBGROUP_FEATURE_BASIC_BIT: u32 = 1
+let VK_SUBGROUP_FEATURE_SHUFFLE_BIT: u32 = 16
+let VK_SUBGROUP_FEATURE_VOTE_BIT: u32 = 2
 let VK_SUBOPTIMAL_KHR: i32 = 1000001003
 let VK_SUBPASS_CONTENTS_INLINE: u32 = 0
 let VK_SUBPASS_EXTERNAL: u32 = 4294967295
@@ -729,6 +734,16 @@ extern struct VkPhysicalDeviceSparseProperties:
     residencyStandard3DBlockShape: u32
     residencyAlignedMipSize: u32
     residencyNonResidentStrict: u32
+
+extern struct VkPhysicalDeviceSubgroupProperties:
+    sType: u32
+    pNext: void*?
+    subgroupSize: u32
+    supportedStages: u32
+    supportedOperations: u32
+    quadOperationsInAllStages: u32
+
+let VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES: u32 = 1000094000
 
 extern struct VkPipelineColorBlendAttachmentState:
     blendEnable: u32

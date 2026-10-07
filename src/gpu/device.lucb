@@ -99,6 +99,12 @@ pub struct Limits:
     ## Whether kernels may add to 32-bit floats atomically in storage buffers
     ## (GL_EXT_shader_atomic_float's atomicAdd).
     pub var float_atomic_add: bool = false
+    ## The invocations in one subgroup (a SIMD group on Metal, a wave or warp
+    ## elsewhere): what GLSL's gl_SubgroupSize reports in a kernel.
+    pub var subgroup_size: u32 = 0
+    ## Whether kernels may use the KHR subgroup operations: basic, vote,
+    ## arithmetic, ballot and shuffle (GL_KHR_shader_subgroup_*).
+    pub var subgroup_ops: bool = false
 
 struct DeviceState:
     var backend: Backend

@@ -28,7 +28,8 @@ struct VulkanKernel:
 ## buffer is the largest storage range, in whole words.
 func vulkan_device_limits(device: VulkanDevice*, float_atomic_add: bool) -> Limits:
     var properties = VkPhysicalDeviceProperties2(sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2)
-    var maintenance = VkPhysicalDeviceMaintenance3Properties(sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_3_PROPERTIES)
+    var subgroups = VkPhysicalDeviceSubgroupProperties(sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES)
+    var maintenance = VkPhysicalDeviceMaintenance3Properties(sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_3_PROPERTIES, pNext = (void*)&subgroups)
     var largest: u64 = 0xffffffffffffffffu64
     if device.version >= vulkan_api_version_1_1:
         properties.pNext = (void*)&maintenance
@@ -39,8 +40,12 @@ func vulkan_device_limits(device: VulkanDevice*, float_atomic_add: bool) -> Limi
     let limits = properties.properties.limits
     var buffer_bytes = (u64)limits.maxStorageBufferRange // 4 * 4
     if largest < buffer_bytes: buffer_bytes = largest // 4 * 4
+    # Basic, vote, arithmetic, ballot and shuffle, in the compute stage.
+    let operations = VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_VOTE_BIT | VK_SUBGROUP_FEATURE_ARITHMETIC_BIT | VK_SUBGROUP_FEATURE_BALLOT_BIT | VK_SUBGROUP_FEATURE_SHUFFLE_BIT
+    let subgroup_ops = (subgroups.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) != 0 and (subgroups.supportedOperations & operations) == operations
     return Limits(buffer_bytes = buffer_bytes, group_threads = limits.maxComputeWorkGroupInvocations, group_size = limits.maxComputeWorkGroupSize,
-                  group_count = limits.maxComputeWorkGroupCount, shared_bytes = limits.maxComputeSharedMemorySize, float_atomic_add = float_atomic_add)
+                  group_count = limits.maxComputeWorkGroupCount, shared_bytes = limits.maxComputeSharedMemorySize, float_atomic_add = float_atomic_add,
+                  subgroup_size = subgroups.subgroupSize, subgroup_ops = subgroup_ops)
 
 func vulkan_limits(device: VulkanDevice*) -> Limits:
     return device.limits

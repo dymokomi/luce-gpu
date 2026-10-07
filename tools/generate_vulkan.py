@@ -38,7 +38,7 @@ vkEnumerateDeviceExtensionProperties vkCreateComputePipelines vkCmdDispatch vkCm
 '''.split()
 # Structures reached only through pNext chains, which no command names.
 CHAINED = '''
-VkPhysicalDeviceMaintenance3Properties VkPhysicalDeviceShaderAtomicFloatFeaturesEXT
+VkPhysicalDeviceMaintenance3Properties VkPhysicalDeviceShaderAtomicFloatFeaturesEXT VkPhysicalDeviceSubgroupProperties
 '''.split()
 
 

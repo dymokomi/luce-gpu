@@ -489,6 +489,13 @@ cannot answer without an extra buffer. Atomics on storage buffers (`atomicAdd`,
 work everywhere; image atomics are refused. Adding floats atomically
 (`GL_EXT_shader_atomic_float`'s `atomicAdd` on a `float` in a buffer) works
 where `limits().float_atomic_add` says so.
+Subgroup operations (`GL_KHR_shader_subgroup_*`: `subgroupAdd`,
+`subgroupBallot`, `subgroupShuffle` and the rest) work where
+`limits().subgroup_ops` says so; they need `--target-env vulkan1.1` or later,
+and spirv-cross turns them into Metal's `simd_*` functions. The subgroup size
+differs by device (32 on Apple and NVIDIA GPUs, 64 on AMD's by default), so
+read it from `limits().subgroup_size` or `gl_SubgroupSize` rather than
+assuming one.
 
 `tools/embed_shaders.py OUTPUT.lucb --public FILE.comp...` turns each kernel
 into four declarations, the arguments of `Kernel.create`:
@@ -614,6 +621,8 @@ copy source or destination, indirect arguments, or mesh data.
 | `group_count` | workgroups per dispatch dimension | 2^32 - 1 | `maxComputeWorkGroupCount` |
 | `shared_bytes` | GLSL `shared` memory | `maxThreadgroupMemoryLength` | `maxComputeSharedMemorySize` |
 | `float_atomic_add` | `atomicAdd` on floats in buffers | Metal 3 GPUs | `VK_EXT_shader_atomic_float` |
+| `subgroup_size` | `gl_SubgroupSize` (SIMD group, wave, warp) | 32 | `VkPhysicalDeviceSubgroupProperties` |
+| `subgroup_ops` | basic, vote, arithmetic, ballot and shuffle in kernels | true | those five in the compute stage |
 
 ### Long-running work
 
@@ -643,6 +652,6 @@ need.
 on Linux and Windows): saxpy, a twelve-dispatch reduction, compaction with
 atomics feeding an indirect dispatch, fills, copies, shared views, a 256 MiB
 buffer, kernels and buffers destroyed before their pass is submitted, IEEE
-infinities and NaNs (the same bits on every backend), storage
+infinities and NaNs (the same bits on every backend), subgroup operations, storage
 images of each 32-bit format written, sampled, read and written in place, read
 back and drawn for display, and float atomics.

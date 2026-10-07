@@ -33,10 +33,13 @@ func metal_limits(device: MetalDevice*) -> Limits:
     let float_atomics = (metal_uint_with(native, metal_sel("supportsFamily:"), metal_family_metal3) & 0xff) != 0
     # Every Apple-silicon GPU allows 1024 threads per threadgroup in each
     # dimension and in all (the Metal feature set tables); a kernel's own
-    # pipeline may allow fewer, which Kernel.create checks.
+    # pipeline may allow fewer, which Kernel.create checks. Its SIMD groups
+    # are 32 wide and support every subgroup operation spirv-cross maps to
+    # simd_* functions.
     return Limits(buffer_bytes = metal_uint(native, metal_sel("maxBufferLength")), group_threads = 1024,
                   group_size = [1024, 1024, 1024], group_count = [0xffffffffu32, 0xffffffffu32, 0xffffffffu32],
-                  shared_bytes = (u32)metal_uint(native, metal_sel("maxThreadgroupMemoryLength")), float_atomic_add = float_atomics)
+                  shared_bytes = (u32)metal_uint(native, metal_sel("maxThreadgroupMemoryLength")), float_atomic_add = float_atomics,
+                  subgroup_size = 32, subgroup_ops = true)
 
 func metal_kernel_create(device: MetalDevice*, msl: c.str, group: u32[3], fast_math: bool) -> void*!:
     let pool = objc_autoreleasePoolPush()

@@ -17,6 +17,7 @@ pub func checks(device: gpu.Device) -> !:
     try images(device)
     try float_atomics(device, limits)
     try ieee(device)
+    try subgroups(device, limits)
     try refusals(device)
 
 func kernel(device: gpu.Device, words: const u32[], msl: c.str, group: const u32[], bindings: const u8[]) -> gpu.Kernel!:
@@ -386,6 +387,31 @@ func ieee(device: gpu.Device) -> !:
     assert(word(results, 0) == 0x7f800000 and word(results, 1) == 0xff800000)
     assert(word(results, 2) == 1 and word(results, 3) == 1 and word(results, 4) == 1)
     assert(word(results, 5) == 0xff800000 and word(results, 6) == 0x7f800000 and word(results, 7) == 1)
+
+## Every lane of every subgroup sees the subgroup size the device reports, by
+## the built-in, by addition and by ballot, and shuffle, broadcast and vote agree.
+func subgroups(device: gpu.Device, limits: gpu.Limits) -> !:
+    if not limits.subgroup_ops:
+        print("skip subgroups: the device lacks the KHR subgroup operations")
+        return
+    assert(limits.subgroup_size >= 4 and limits.subgroup_size <= 128)
+    var program = try kernel(device, kernels.subgroup_comp_words, kernels.subgroup_comp_msl, kernels.subgroup_comp_group, kernels.subgroup_comp_bindings)
+    defer program.destroy()
+    let count: usize = 256
+    var out = try gpu.Buffer.allocate(device, count * 16)
+    defer out.destroy()
+    var nothing: u8[]
+    var pass = try gpu.Compute.begin(device)
+    defer pass.close()
+    let bindings: gpu.Binding[1] = [gpu.Binding(buffer = out)]
+    try pass.dispatch(program, bindings, nothing, (u32)(count // 64))
+    try pass.submit()
+    try pass.wait()
+    var results: u8[4096]
+    try out.read(0, results)
+    for index in 0..<count:
+        assert(word(results, index * 4) == limits.subgroup_size and word(results, index * 4 + 1) == limits.subgroup_size)
+        assert(word(results, index * 4 + 2) == limits.subgroup_size and word(results, index * 4 + 3) == 1)
 
 func close(value: i32, wanted: i32) -> bool:
     return value >= wanted - 1 and value <= wanted + 1
