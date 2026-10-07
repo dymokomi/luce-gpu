@@ -18,6 +18,7 @@ shader.lucb
 shaders.lucb
 compute.lucb
 compute_shaders.lucb
+table.lucb
 backend.lucb
 presentation.lucb
 resources.lucb

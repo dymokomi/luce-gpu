@@ -6,8 +6,9 @@ source cross-compiled from them, with its entry point named `luce_fragment`;
 a vertex shader becomes SPIR-V words only. A compute shader (`.comp`) becomes
 `<stem>_comp_words`, `<stem>_comp_msl` (entry `luce_compute`), `<stem>_comp_group`
 (its workgroup size), `<stem>_comp_bindings` (what each set-0 binding holds)
-and `<stem>_comp_fast_math` (whether Metal may relax IEEE float rules), the
-arguments of `gpu.Kernel.create`. Builds use the checked-in module, so
+`<stem>_comp_fast_math` (whether Metal may relax IEEE float rules) and
+`<stem>_comp_table` (whether it reads a texture table), the arguments of
+`gpu.Kernel.create`. Builds use the checked-in module, so
 glslangValidator and spirv-cross are needed only when a shader changes.
 
     embed_shaders.py OUTPUT.lucb [--vertex FILE.vert] [-I DIR] [--depfile FILE] SHADER...
@@ -47,12 +48,14 @@ parser.add_argument('--vertex-metal', action='store_true', help='also translate 
 args = parser.parse_args()
 visibility = 'pub ' if args.public else ''
 
-# Compute kernels see push constants at this Metal buffer index, clear of
-# storage buffers at bindings 0..15 (Metal allows 31 buffer indices).
+# Compute kernels see push constants at this Metal buffer index, and a texture
+# table (set 1) at the one below, clear of storage buffers at bindings 0..15
+# (Metal allows 31 buffer indices).
 PUSH_CONSTANT_BUFFER = 30
+TABLE_BUFFER = 29
 BINDING_LIMIT = 16
 # gpu.Kernel's binding kinds.
-STORAGE_BUFFER, STORAGE_IMAGE, SAMPLED_IMAGE, ACCELERATION_STRUCTURE = 1, 2, 3, 4
+STORAGE_BUFFER, STORAGE_IMAGE, SAMPLED_IMAGE, ACCELERATION_STRUCTURE, SAMPLER = 1, 2, 3, 4, 5
 
 
 class Shader:
@@ -140,11 +143,18 @@ def kernel_layout(shader, spv):
     entry = reflection['entryPoints'][0]
     if any(entry.get('workgroup_size_is_spec_constant_id', [])):
         sys.exit(f'{shader.path}: give the workgroup size as numbers; embed variants with defines instead')
-    for kind in ('ubos', 'separate_images', 'separate_samplers', 'subpass_inputs'):
+    for kind in ('ubos', 'subpass_inputs'):
         if reflection.get(kind):
             sys.exit(f'{shader.path}: kernels take storage buffers, images and push constants, not {kind}')
+    # A texture table: one runtime array of texture2D at set 1, binding 0.
+    table = False
+    for resource in reflection.get('separate_images', []):
+        if resource.get('set', 0) != 1 or resource.get('binding', 0) != 0 or resource.get('array') != [0] or table:
+            sys.exit(f'{shader.path}: a separate image must be the texture table: `layout(set = 1, binding = 0) uniform texture2D name[];`')
+        table = True
     bindings = [0] * BINDING_LIMIT
-    for kind, code in (('ssbos', STORAGE_BUFFER), ('images', STORAGE_IMAGE), ('textures', SAMPLED_IMAGE), ('acceleration_structures', ACCELERATION_STRUCTURE)):
+    for kind, code in (('ssbos', STORAGE_BUFFER), ('images', STORAGE_IMAGE), ('textures', SAMPLED_IMAGE), ('acceleration_structures', ACCELERATION_STRUCTURE),
+                       ('separate_samplers', SAMPLER)):
         for resource in reflection.get(kind, []):
             binding = resource.get('binding', 0)
             if resource.get('set', 0) != 0 or binding >= BINDING_LIMIT or resource.get('array'):
@@ -155,11 +165,15 @@ def kernel_layout(shader, spv):
     push = None
     for block in reflection.get('push_constants', []):
         push = reflection['types'][block['type']]['name']
-    return entry['workgroup_size'], bindings, push
+    return entry['workgroup_size'], bindings, push, table
 
 
-def kernel_msl(shader, spv, push, temporary):
-    msl = subprocess.run([args.spirv_cross, '--msl', '--msl-version', '30000', '--msl-decoration-binding',
+def kernel_msl(shader, spv, push, table, temporary):
+    # A texture table becomes a Metal argument buffer of texture handles (set 1,
+    # in device memory, tier 2); set 0 stays as plain bindings.
+    tables = ['--msl-argument-buffers', '--msl-argument-buffer-tier', '1', '--msl-discrete-descriptor-set', '0',
+              '--msl-device-argument-buffer', '1', '1'] if table else []
+    msl = subprocess.run([args.spirv_cross, '--msl', '--msl-version', '30000', '--msl-decoration-binding', *tables,
                           '--rename-entry-point', 'main', 'luce_compute', 'comp', str(spv)],
                          check=True, capture_output=True, text=True).stdout
     if 'spvBufferSizeConstants' in msl:
@@ -169,9 +183,13 @@ def kernel_msl(shader, spv, push, temporary):
     if push is not None:
         # spirv-cross puts the push-constant block at buffer 0 when it maps
         # bindings directly; move it clear of the storage buffers.
-        msl, count = re.subn(r'(constant ' + re.escape(push) + r'& \w+ )\[\[buffer\(0\)\]\]', rf'\1[[buffer({PUSH_CONSTANT_BUFFER})]]', msl)
+        msl, count = re.subn(r'(constant ' + re.escape(push) + r'& \w+ )\[\[buffer\(\d+\)\]\]', rf'\1[[buffer({PUSH_CONSTANT_BUFFER})]]', msl)
         if count != 1:
             sys.exit(f'{shader.path}: could not place the push-constant block in the Metal translation')
+    if table:
+        msl, count = re.subn(r'(spvDescriptorSetBuffer1& spvDescriptorSet1 )\[\[buffer\(\d+\)\]\]', rf'\1[[buffer({TABLE_BUFFER})]]', msl)
+        if count != 1:
+            sys.exit(f'{shader.path}: could not place the texture table in the Metal translation')
     check_msl(shader.stem, msl, temporary, 'metal3.0')
     return msl
 
@@ -199,12 +217,13 @@ with tempfile.TemporaryDirectory(prefix='luce-shader-') as temporary:
             continue
         emit_mark(f'{shader.stem}: compute kernel' + (f' ({", ".join(shader.defines)})' if shader.defines else ''))
         spv, words = words_of(shader.path, 'comp', temporary, shader.stem, shader.defines, args.target_env)
-        group, bindings, push = kernel_layout(shader, spv)
+        group, bindings, push, table = kernel_layout(shader, spv)
         emit_words(shader.stem + '_comp_words', words)
-        emit_text(f'{shader.stem}_comp_msl', kernel_msl(shader, spv, push, temporary))
+        emit_text(f'{shader.stem}_comp_msl', kernel_msl(shader, spv, push, table, temporary))
         lines.append(f'{visibility}let {shader.stem}_comp_group: u32[3] = [{", ".join(str(size) for size in group)}]')
         lines.append(f'{visibility}let {shader.stem}_comp_bindings: u8[{BINDING_LIMIT}] = [{", ".join(str(kind) for kind in bindings)}]')
         lines.append(f'{visibility}let {shader.stem}_comp_fast_math: bool = {"true" if shader.stem in args.fast_math else "false"}')
+        lines.append(f'{visibility}let {shader.stem}_comp_table: bool = {"true" if table else "false"}')
         lines.append('')
 args.output.write_text('\n'.join(lines).rstrip('\n') + '\n', encoding='utf-8')
 if args.depfile:

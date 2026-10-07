@@ -1,0 +1,149 @@
+#==============================================================================================
+#
+#   table - Texture tables: bindless sampled textures for kernels
+#
+#   DESCRIPTION:
+#       A TextureTable holds sampled textures in numbered slots that a kernel indexes at run
+#       time (`layout(set = 1, binding = 0) uniform texture2D textures[]`), as a material table
+#       does: Vulkan's descriptor indexing, Metal's argument buffers (tier 2). The table holds a
+#       reference to each texture in it. Changing a slot while submitted work may read the
+#       table would race on both backends, so a change first waits for the last pass that used
+#       the table.
+#
+#==============================================================================================
+
+## The most slots a table has on any device; `limits().texture_table_size`
+## may be lower.
+pub let texture_table_limit: u32 = 65536
+
+## Sampled textures in slots a kernel indexes. The zero value is closed;
+## copies alias ownership; one owner destroys it on the main thread, and
+## submitted work keeps it alive until it finishes.
+pub struct TextureTable:
+    var state: TableState*?
+
+    ## A table of `capacity` empty slots, where the device has
+    ## `limits().texture_tables`; at most `limits().texture_table_size`.
+    pub static func create(device: Device, capacity: u32) -> TextureTable!:
+        let owner = try device.checked()
+        if not owner.limits.texture_tables:
+            error(unsupported, "the device has no texture tables")
+        if capacity == 0 or capacity > owner.limits.texture_table_size:
+            error(invalid_geometry, "a texture table has 1 to limits().texture_table_size slots")
+        let slots = try new TextureState*?[(usize)capacity] in memory.heap
+        errdefer free(slots) in memory.heap
+        let native = try backend_table_create(owner, capacity)
+        errdefer backend_table_destroy(owner, native)
+        let state = try new TableState(device = owner, native = native, slots = slots) in memory.heap
+        owner.references += 1
+        return TextureTable(state = state)
+
+    ## Put `texture` in slot `index`, replacing what was there. Any texture
+    ## of the device but an r32_uint one, which holds integers.
+    pub func set(index: u32, texture: Texture) -> !:
+        let state = try self.checked()
+        let image = try texture.checked()
+        if image.device != state.device:
+            error(wrong_device, "a texture table holds textures of its own device")
+        if image.format == Format.r32_uint:
+            error(invalid_geometry, "a texture table samples color; r32_uint holds integers")
+        try state.change(index)
+        backend_table_set(state.device, state.native, index, image)
+        image.references += 1
+        state.release_slot(index)
+        state.slots[(usize)index] = image
+
+    ## Empty slot `index`; a kernel must not read an empty slot.
+    pub func clear(index: u32) -> !:
+        let state = try self.checked()
+        try state.change(index)
+        backend_table_clear(state.device, state.native, index)
+        state.release_slot(index)
+
+    ## The number of slots.
+    pub func capacity() -> u32:
+        let state = self.state else return 0
+        return (u32)state.slots.length
+
+    pub func is_open() -> bool:
+        return self.state != none
+
+    ## Release this handle on the main thread; submitted work keeps the table
+    ## until it finishes.
+    pub func destroy():
+        let state = self.state else return
+        require_thread()
+        self.state = none
+        release_table(state)
+
+    func checked() -> TableState*!:
+        try check_thread()
+        return self.state else error(closed, "the texture table is closed")
+
+struct TableState:
+    var device: DeviceState*
+    var native: void*
+    var slots: TextureState*?[]
+    var references: usize = 1
+    ## The newest submission that read the table.
+    var last: Submission
+
+    ## Make slot `index` safe to change: in range, and no longer read by work
+    ## on the GPU.
+    func change(index: u32) -> !:
+        if (usize)index >= self.slots.length:
+            error(invalid_geometry, "a texture table slot is past its capacity")
+        if not backend_submission_done(self.device, self.last):
+            try backend_submission_wait(self.device, self.last)
+
+    func release_slot(index: u32):
+        if let texture = self.slots[(usize)index]:
+            self.slots[(usize)index] = none
+            release_texture(texture)
+
+func release_table(state: TableState*):
+    state.references -= 1
+    if state.references == 0:
+        for index in 0..<state.slots.length:
+            state.release_slot((u32)index)
+        free(state.slots) in memory.heap
+        backend_table_destroy(state.device, state.native)
+        release_device(state.device)
+        free(state) in memory.heap
+
+# mark: Dispatch ==============================================================================
+
+func backend_table_create(device: DeviceState*, capacity: u32) -> void*!:
+    if (platform.windows or platform.linux) and device.backend == Backend.vulkan:
+        return (void*)try vulkan_table_create((VulkanDevice*)device.native, capacity)
+    if platform.macos and platform.arm64:
+        if device.backend == Backend.metal:
+            return (void*)try metal_table_create((MetalDevice*)device.native, capacity)
+    error(unsupported, "texture tables are unavailable on this backend")
+
+func backend_table_set(device: DeviceState*, native: void*, index: u32, texture: TextureState*):
+    if (platform.windows or platform.linux) and device.backend == Backend.vulkan:
+        vulkan_table_set((VulkanDevice*)device.native, (VulkanTable*)native, index, (VulkanTexture*)texture.native)
+        return
+    if platform.macos and platform.arm64:
+        if device.backend == Backend.metal:
+            metal_table_set((MetalTable*)native, index, (MetalTexture*)texture.native)
+
+func backend_table_clear(device: DeviceState*, native: void*, index: u32):
+    if (platform.windows or platform.linux) and device.backend == Backend.vulkan:
+        vulkan_table_clear((VulkanDevice*)device.native, (VulkanTable*)native, index)
+        return
+    if platform.macos and platform.arm64:
+        if device.backend == Backend.metal:
+            metal_table_clear((MetalTable*)native, index)
+
+## The backend frees what submitted work still reads once that work has
+## finished (Metal command buffers retain the table's buffer; Vulkan retires
+## its descriptors after their last submission).
+func backend_table_destroy(device: DeviceState*, native: void*):
+    if (platform.windows or platform.linux) and device.backend == Backend.vulkan:
+        vulkan_table_destroy((VulkanDevice*)device.native, (VulkanTable*)native)
+        return
+    if platform.macos and platform.arm64:
+        if device.backend == Backend.metal:
+            metal_table_destroy((MetalTable*)native)

@@ -36,10 +36,13 @@ vkCmdCopyBufferToImage vkCmdCopyImageToBuffer vkCmdCopyBuffer vkCmdCopyImage vkC
 vkEnumerateInstanceVersion vkGetPhysicalDeviceProperties2 vkGetPhysicalDeviceFeatures2
 vkEnumerateDeviceExtensionProperties vkCreateComputePipelines vkCmdDispatch vkCmdDispatchIndirect vkCmdFillBuffer
 vkCreateQueryPool vkDestroyQueryPool vkCmdResetQueryPool vkCmdWriteTimestamp vkGetQueryPoolResults
+vkGetBufferDeviceAddress
 '''.split()
 # Structures reached only through pNext chains, which no command names.
 CHAINED = '''
 VkPhysicalDeviceMaintenance3Properties VkPhysicalDeviceShaderAtomicFloatFeaturesEXT VkPhysicalDeviceSubgroupProperties
+VkPhysicalDeviceVulkan12Features VkPhysicalDeviceDescriptorIndexingProperties VkDescriptorSetLayoutBindingFlagsCreateInfo
+VkDescriptorSetVariableDescriptorCountAllocateInfo VkMemoryAllocateFlagsInfo
 '''.split()
 
 

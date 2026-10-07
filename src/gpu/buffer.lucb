@@ -69,6 +69,20 @@ pub struct Buffer:
         let data = state.data else error(invalid_geometry, "only a shared buffer has a CPU view")
         return u8[](data, state.bytes)
 
+    ## The buffer's address on the GPU, for kernels that reach it through
+    ## GL_EXT_buffer_reference (a `buffer_reference` block or a uint64_t), where
+    ## the device has `limits().buffer_addresses`. Once its address is taken,
+    ## every compute pass submitted while the buffer lives counts as using it
+    ## (Metal makes it resident; Vulkan keeps it until those passes finish),
+    ## so a kernel may reach it through any address it is given.
+    pub func address() -> u64!:
+        let state = try self.checked()
+        if not state.device.limits.buffer_addresses:
+            error(unsupported, "the device gives buffers no GPU addresses")
+        if not state.addressed:
+            try note_addressed(state)
+        return backend_buffer_address(state.device, state.native)
+
     ## The size in bytes; zero when closed.
     pub func bytes() -> usize:
         let state = self.state else return 0
@@ -100,6 +114,8 @@ struct BufferState:
     let memory_kind: Memory
     ## A shared buffer's mapping.
     var data: u8*?
+    ## Whether its address was taken (DeviceState.addressed lists it).
+    var addressed: bool
 
 func check_buffer_size(device: DeviceState*, bytes: u64) -> !:
     if bytes < 4 or bytes % 4 != 0 or bytes > device.limits.buffer_bytes:
@@ -117,9 +133,30 @@ func adopt_buffer(owner: DeviceState*, native: void*, bytes: usize, memory_kind:
     owner.references += 1
     return Buffer(state)
 
+## List `state` among its device's addressed buffers.
+func note_addressed(state: BufferState*) -> !:
+    let device = state.device
+    if device.addressed_count == device.addressed.length:
+        let grown = try new BufferState*[device.addressed.length * 2 + 16] --- in memory.heap
+        memory.copy(grown, device.addressed, device.addressed_count)
+        if device.addressed.length > 0: free(device.addressed) in memory.heap
+        device.addressed = grown
+    device.addressed[device.addressed_count] = state
+    device.addressed_count += 1
+    state.addressed = true
+
+func forget_addressed(state: BufferState*):
+    let device = state.device
+    for index in 0..<device.addressed_count:
+        if device.addressed[index] == state:
+            device.addressed_count -= 1
+            device.addressed[index] = device.addressed[device.addressed_count]
+            return
+
 func release_buffer(state: BufferState*):
     state.references -= 1
     if state.references == 0:
+        if state.addressed: forget_addressed(state)
         state.device.destroy_buffer(state.device.native, state.native)
         release_device(state.device)
         free(state) in memory.heap
@@ -146,6 +183,13 @@ func backend_buffer_contents(device: DeviceState*, native: void*) -> u8*?:
     if platform.macos and platform.arm64:
         return metal_buffer_contents(native)
     return none
+
+func backend_buffer_address(device: DeviceState*, native: void*) -> u64:
+    if (platform.windows or platform.linux) and device.backend == Backend.vulkan:
+        return vulkan_buffer_address((VulkanDevice*)device.native, (VulkanBuffer*)native)
+    if platform.macos and platform.arm64:
+        return metal_uint(native, metal_sel("gpuAddress"))
+    return 0
 
 func backend_buffer_upload(device: DeviceState*, native: void*, offset: usize, data: const u8[]) -> !:
     if (platform.windows or platform.linux) and device.backend == Backend.vulkan:

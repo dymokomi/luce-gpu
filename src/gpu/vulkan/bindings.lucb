@@ -27,6 +27,7 @@ let VK_ATTACHMENT_STORE_OP_STORE: u32 = 0
 let VK_BLEND_FACTOR_ONE: u32 = 1
 let VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA: u32 = 7
 let VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT: u32 = 256
+let VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT: u32 = 131072
 let VK_BUFFER_USAGE_STORAGE_BUFFER_BIT: u32 = 32
 let VK_BUFFER_USAGE_TRANSFER_DST_BIT: u32 = 2
 let VK_BUFFER_USAGE_TRANSFER_SRC_BIT: u32 = 1
@@ -39,7 +40,14 @@ let VK_COLOR_SPACE_SRGB_NONLINEAR_KHR: u32 = 0
 let VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT: u32 = 1
 let VK_COMPARE_OP_LESS: u32 = 1
 let VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR: u32 = 1
+let VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT: u32 = 4
+let VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT: u32 = 1
+let VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT: u32 = 8
+let VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT: u32 = 2
+let VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT: u32 = 2
 let VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER: u32 = 1
+let VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE: u32 = 2
+let VK_DESCRIPTOR_TYPE_SAMPLER: u32 = 0
 let VK_DESCRIPTOR_TYPE_STORAGE_BUFFER: u32 = 7
 let VK_DESCRIPTOR_TYPE_STORAGE_IMAGE: u32 = 3
 let VK_DYNAMIC_STATE_DEPTH_BIAS: u32 = 3
@@ -90,6 +98,7 @@ let VK_KHR_SURFACE_EXTENSION_NAME: c.str = "VK_KHR_surface"
 let VK_KHR_SWAPCHAIN_EXTENSION_NAME: c.str = "VK_KHR_swapchain"
 let VK_KHR_WIN32_SURFACE_EXTENSION_NAME: c.str = "VK_KHR_win32_surface"
 let VK_KHR_XLIB_SURFACE_EXTENSION_NAME: c.str = "VK_KHR_xlib_surface"
+let VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT: u32 = 2
 let VK_MEMORY_HEAP_DEVICE_LOCAL_BIT: u32 = 1
 let VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT: u32 = 1
 let VK_MEMORY_PROPERTY_HOST_CACHED_BIT: u32 = 8
@@ -175,6 +184,13 @@ extern struct VkBufferCreateInfo:
     pQueueFamilyIndices: u32*?
 
 let VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO: u32 = 12
+
+extern struct VkBufferDeviceAddressInfo:
+    sType: u32
+    pNext: void*?
+    buffer: u64
+
+let VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO: u32 = 1000244001
 
 extern struct VkBufferImageCopy:
     bufferOffset: u64
@@ -311,6 +327,14 @@ extern struct VkDescriptorSetLayoutBinding:
     stageFlags: u32
     pImmutableSamplers: u64*?
 
+extern struct VkDescriptorSetLayoutBindingFlagsCreateInfo:
+    sType: u32
+    pNext: void*?
+    bindingCount: u32
+    pBindingFlags: u32*?
+
+let VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO: u32 = 1000161000
+
 extern struct VkDescriptorSetLayoutCreateInfo:
     sType: u32
     pNext: void*?
@@ -319,6 +343,14 @@ extern struct VkDescriptorSetLayoutCreateInfo:
     pBindings: VkDescriptorSetLayoutBinding*?
 
 let VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO: u32 = 32
+
+extern struct VkDescriptorSetVariableDescriptorCountAllocateInfo:
+    sType: u32
+    pNext: void*?
+    descriptorSetCount: u32
+    pDescriptorCounts: u32*?
+
+let VK_STRUCTURE_TYPE_DESCRIPTOR_SET_VARIABLE_DESCRIPTOR_COUNT_ALLOCATE_INFO: u32 = 1000161003
 
 extern struct VkDeviceCreateInfo:
     sType: u32
@@ -488,6 +520,14 @@ extern struct VkInstanceCreateInfo:
 
 let VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO: u32 = 1
 
+extern struct VkMemoryAllocateFlagsInfo:
+    sType: u32
+    pNext: void*?
+    flags: u32
+    deviceMask: u32
+
+let VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO: u32 = 1000060000
+
 extern struct VkMemoryAllocateInfo:
     sType: u32
     pNext: void*?
@@ -525,6 +565,35 @@ extern struct VkOffset3D:
     x: i32
     y: i32
     z: i32
+
+extern struct VkPhysicalDeviceDescriptorIndexingProperties:
+    sType: u32
+    pNext: void*?
+    maxUpdateAfterBindDescriptorsInAllPools: u32
+    shaderUniformBufferArrayNonUniformIndexingNative: u32
+    shaderSampledImageArrayNonUniformIndexingNative: u32
+    shaderStorageBufferArrayNonUniformIndexingNative: u32
+    shaderStorageImageArrayNonUniformIndexingNative: u32
+    shaderInputAttachmentArrayNonUniformIndexingNative: u32
+    robustBufferAccessUpdateAfterBind: u32
+    quadDivergentImplicitLod: u32
+    maxPerStageDescriptorUpdateAfterBindSamplers: u32
+    maxPerStageDescriptorUpdateAfterBindUniformBuffers: u32
+    maxPerStageDescriptorUpdateAfterBindStorageBuffers: u32
+    maxPerStageDescriptorUpdateAfterBindSampledImages: u32
+    maxPerStageDescriptorUpdateAfterBindStorageImages: u32
+    maxPerStageDescriptorUpdateAfterBindInputAttachments: u32
+    maxPerStageUpdateAfterBindResources: u32
+    maxDescriptorSetUpdateAfterBindSamplers: u32
+    maxDescriptorSetUpdateAfterBindUniformBuffers: u32
+    maxDescriptorSetUpdateAfterBindUniformBuffersDynamic: u32
+    maxDescriptorSetUpdateAfterBindStorageBuffers: u32
+    maxDescriptorSetUpdateAfterBindStorageBuffersDynamic: u32
+    maxDescriptorSetUpdateAfterBindSampledImages: u32
+    maxDescriptorSetUpdateAfterBindStorageImages: u32
+    maxDescriptorSetUpdateAfterBindInputAttachments: u32
+
+let VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_PROPERTIES: u32 = 1000161002
 
 extern struct VkPhysicalDeviceFeatures:
     robustBufferAccess: u32
@@ -764,6 +833,59 @@ extern struct VkPhysicalDeviceSubgroupProperties:
     quadOperationsInAllStages: u32
 
 let VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES: u32 = 1000094000
+
+extern struct VkPhysicalDeviceVulkan12Features:
+    sType: u32
+    pNext: void*?
+    samplerMirrorClampToEdge: u32
+    drawIndirectCount: u32
+    storageBuffer8BitAccess: u32
+    uniformAndStorageBuffer8BitAccess: u32
+    storagePushConstant8: u32
+    shaderBufferInt64Atomics: u32
+    shaderSharedInt64Atomics: u32
+    shaderFloat16: u32
+    shaderInt8: u32
+    descriptorIndexing: u32
+    shaderInputAttachmentArrayDynamicIndexing: u32
+    shaderUniformTexelBufferArrayDynamicIndexing: u32
+    shaderStorageTexelBufferArrayDynamicIndexing: u32
+    shaderUniformBufferArrayNonUniformIndexing: u32
+    shaderSampledImageArrayNonUniformIndexing: u32
+    shaderStorageBufferArrayNonUniformIndexing: u32
+    shaderStorageImageArrayNonUniformIndexing: u32
+    shaderInputAttachmentArrayNonUniformIndexing: u32
+    shaderUniformTexelBufferArrayNonUniformIndexing: u32
+    shaderStorageTexelBufferArrayNonUniformIndexing: u32
+    descriptorBindingUniformBufferUpdateAfterBind: u32
+    descriptorBindingSampledImageUpdateAfterBind: u32
+    descriptorBindingStorageImageUpdateAfterBind: u32
+    descriptorBindingStorageBufferUpdateAfterBind: u32
+    descriptorBindingUniformTexelBufferUpdateAfterBind: u32
+    descriptorBindingStorageTexelBufferUpdateAfterBind: u32
+    descriptorBindingUpdateUnusedWhilePending: u32
+    descriptorBindingPartiallyBound: u32
+    descriptorBindingVariableDescriptorCount: u32
+    runtimeDescriptorArray: u32
+    samplerFilterMinmax: u32
+    scalarBlockLayout: u32
+    imagelessFramebuffer: u32
+    uniformBufferStandardLayout: u32
+    shaderSubgroupExtendedTypes: u32
+    separateDepthStencilLayouts: u32
+    hostQueryReset: u32
+    timelineSemaphore: u32
+    bufferDeviceAddress: u32
+    bufferDeviceAddressCaptureReplay: u32
+    bufferDeviceAddressMultiDevice: u32
+    vulkanMemoryModel: u32
+    vulkanMemoryModelDeviceScope: u32
+    vulkanMemoryModelAvailabilityVisibilityChains: u32
+    shaderOutputViewportIndex: u32
+    shaderOutputLayer: u32
+    subgroupBroadcastDynamicId: u32
+
+let VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES: u32 = 51
 
 extern struct VkPipelineColorBlendAttachmentState:
     blendEnable: u32
@@ -1243,3 +1365,4 @@ let VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR: u32 = 1000004000
 # func vkCmdResetQueryPool(commandBuffer: u64, queryPool: u64, firstQuery: u32, queryCount: u32)
 # func vkCmdWriteTimestamp(commandBuffer: u64, pipelineStage: u32, queryPool: u64, query: u32)
 # func vkGetQueryPoolResults(device: u64, queryPool: u64, firstQuery: u32, queryCount: u32, dataSize: usize, pData: void*?, stride: u64, flags: u32) -> i32
+# func vkGetBufferDeviceAddress(device: u64, pInfo: VkBufferDeviceAddressInfo*?) -> u64

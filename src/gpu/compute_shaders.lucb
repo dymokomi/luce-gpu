@@ -57,3 +57,4 @@ let fill_comp_msl: c.str = "#include <metal_stdlib>\n#include <simd/simd.h>\n\nu
 let fill_comp_group: u32[3] = [64, 1, 1]
 let fill_comp_bindings: u8[16] = [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
 let fill_comp_fast_math: bool = false
+let fill_comp_table: bool = false

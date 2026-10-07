@@ -522,9 +522,11 @@ void main() {
 ```
 
 Everything lives in descriptor set 0 at bindings 0..15, one resource per
-binding: storage buffers, storage images and sampled images. Small
+binding: storage buffers, storage images, sampled images and samplers. Set 1
+is reserved for a texture table (see below). Small
 per-dispatch values go in the push-constant block. Uniform buffers, separate
-samplers and arrays of resources are refused when embedding. Pass counts in
+images outside a texture table and arrays of resources are refused when
+embedding. Pass counts in
 push constants instead of calling `.length()` on a runtime array, which Metal
 cannot answer without an extra buffer. Atomics on storage buffers (`atomicAdd`,
 `atomicMin`, `atomicMax`, `atomicExchange`, `atomicCompSwap` on 32-bit ints)
@@ -549,6 +551,7 @@ into four declarations, the arguments of `Kernel.create`:
 | `<stem>_comp_group` | the workgroup size, read from the shader |
 | `<stem>_comp_bindings` | what each binding holds (`BindingKind`) |
 | `<stem>_comp_fast_math` | whether Metal may use fast math for it (`--fast-math STEM`) |
+| `<stem>_comp_table` | whether it reads a texture table (set 1) |
 
 On macOS the tool compiles each Metal translation with `xcrun metal`, so a
 kernel Metal would refuse fails here rather than at run time. Kernels that need
@@ -591,9 +594,9 @@ try y.read(0, result)
 
 | Operation | Contract |
 | --- | --- |
-| `Kernel.create(device, words, msl, group, bindings, fast_math = false)` | Builds the pipeline. `invalid_shader` when either form is rejected or the workgroup exceeds `limits()`. `group()` returns the size. |
+| `Kernel.create(device, words, msl, group, bindings, fast_math = false, table = false)` | Builds the pipeline. `invalid_shader` when either form is rejected or the workgroup exceeds `limits()`. `group()` returns the size. |
 | `Compute.begin(device)` | Starts recording. Commands are recorded portably and encoded at `submit`, so other work on the device (uploads, frames, reads) goes on meanwhile. |
-| `dispatch(kernel, bindings, uniforms, x, y = 1, z = 1)` | Runs `x * y * z` workgroups. Element `n` of `bindings` is binding `n`; bindings the kernel does not use may be left closed (`Binding()`). `uniforms` fill the push-constant block (at most 128 bytes, zero-padded). A zero count records nothing. |
+| `dispatch(kernel, bindings, uniforms, x, y = 1, z = 1, textures = none)` | Runs `x * y * z` workgroups. Element `n` of `bindings` is binding `n`; bindings the kernel does not use may be left closed (`Binding()`). `uniforms` fill the push-constant block (at most 128 bytes, zero-padded). A zero count records nothing. |
 | `dispatch_indirect(kernel, bindings, uniforms, arguments, offset)` | Takes the three u32 workgroup counts from `arguments` at `offset`, as earlier commands left them (Vulkan's `vkCmdDispatchIndirect`, Metal's indirect threadgroups). |
 | `copy(source, source_offset, destination, destination_offset, bytes)` | Copies between buffers; ranges four-byte aligned and apart when the buffer is the same. |
 | `fill(buffer, offset, bytes, value = 0)` | Sets every 32-bit word in the range. Metal fills bytes, so a value whose four bytes differ runs a small built-in kernel. |
@@ -644,6 +647,63 @@ storage image is in the general layout during a pass and goes back to the
 sampling layout after it; on Metal the textures are created with shader-write
 usage.
 
+### Buffer addresses and texture tables
+
+Some data does not fit fixed bindings: a scene's meshes in many buffers, its
+materials' textures in a table indexed per hit. Two features cover that, in
+the spirit of CUDA pointers and Vulkan's bindless descriptors.
+
+**Buffer addresses.** `buffer.address() -> u64` is the buffer's address on the
+GPU, where `limits().buffer_addresses`. Store it in a buffer or push constants
+and reach the buffer through `GL_EXT_buffer_reference` (embed such kernels with
+`--target-env vulkan1.2`):
+
+```glsl
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+layout(buffer_reference, std430) readonly buffer Positions { vec4 positions[]; };
+layout(set = 0, binding = 0, std430) readonly buffer Meshes { uint64_t meshes[]; };
+...
+Positions mesh = Positions(meshes[id]);
+vec4 p = mesh.positions[index];
+```
+
+Once a buffer's address has been taken, every compute pass submitted while the
+buffer lives counts as using it: Metal makes it resident in each pass, and
+Vulkan keeps it until those passes finish. A kernel can therefore reach any
+buffer whose address it is given without the pass naming it. Destroying the
+buffer still ends its life, so keep buffers alive while addresses to them are
+in use.
+
+**Texture tables.** A `TextureTable` holds textures in numbered slots that a
+kernel indexes at run time, where `limits().texture_tables`. Declare it as
+set 1, binding 0, with a sampler in set 0, and pass the kernel's `_table` flag
+to `Kernel.create`:
+
+```glsl
+#extension GL_EXT_nonuniform_qualifier : require
+layout(set = 0, binding = 2) uniform sampler point;          // Binding(filter = ...)
+layout(set = 1, binding = 0) uniform texture2D textures[];
+...
+vec4 c = textureLod(sampler2D(textures[nonuniformEXT(slot)], point), uv, 0.0);
+```
+
+```luce
+var table = try gpu.TextureTable.create(device, 1024)
+try table.set(3, albedo)
+try pass.dispatch(shade, bindings, uniforms, groups, textures = table)
+```
+
+The table holds a reference to each texture in it; `clear(index)` empties a
+slot, and a kernel must not read an empty one. Changing a slot while
+submitted work may still read the table would race on the GPU, so `set` and
+`clear` first wait for the last pass that used the table. Change tables
+between frames, or keep two. Metal stores the textures' `gpuResourceID`s in an
+argument buffer (embed_shaders.py moves it to buffer index 29) and makes them
+resident for each dispatch. Vulkan keeps one descriptor set of sampled images,
+updated after bind. Only sampled textures go in tables; storage images and
+buffers stay bound, or reached by address.
+
 ### Buffers for compute
 
 `Buffer.allocate(device, bytes, memory = Memory.device)` makes a zeroed buffer.
@@ -669,6 +729,9 @@ copy source or destination, indirect arguments, or mesh data.
 | `subgroup_size` | `gl_SubgroupSize` (SIMD group, wave, warp) | 32 | `VkPhysicalDeviceSubgroupProperties` |
 | `subgroup_ops` | basic, vote, arithmetic, ballot and shuffle in kernels | true | those five in the compute stage |
 | `timestamps` | submissions and passes are timed | true | the queue's `timestampValidBits` > 0 |
+| `buffer_addresses` | `Buffer.address` | Metal 3 GPUs (`gpuAddress`) | `bufferDeviceAddress` and `shaderInt64` |
+| `texture_tables` | `TextureTable` | argument buffers tier 2 | descriptor indexing: runtime arrays, nonuniform indexing, partially bound, variable count, update after bind |
+| `texture_table_size` | slots per table | 65536 | `maxDescriptorSetUpdateAfterBindSampledImages`, at most 65536 |
 
 ### Completion and GPU time
 
@@ -734,5 +797,5 @@ atomics feeding an indirect dispatch, fills, copies, shared views, a 256 MiB
 buffer, kernels and buffers destroyed before their pass is submitted, IEEE
 infinities and NaNs (the same bits on every backend), subgroup operations, storage
 images of each 32-bit format written, sampled, read and written in place, read
-back and drawn for display, float atomics, and submissions, GPU times and
-timestamps.
+back and drawn for display, float atomics, submissions, GPU times and
+timestamps, buffers reached by address, and texture tables.

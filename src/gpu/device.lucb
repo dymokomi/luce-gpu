@@ -128,6 +128,14 @@ pub struct Limits:
     ## Whether the device times submissions and compute passes' timestamps
     ## (`Device.gpu_time`, `Compute.timestamp`).
     pub var timestamps: bool = false
+    ## Whether buffers have GPU addresses (`Buffer.address`) for
+    ## GL_EXT_buffer_reference: Vulkan's bufferDeviceAddress, Metal 3's gpuAddress.
+    pub var buffer_addresses: bool = false
+    ## Whether kernels can read texture tables (`TextureTable`): Vulkan's
+    ## descriptor indexing, Metal's tier-2 argument buffers.
+    pub var texture_tables: bool = false
+    ## The most slots a texture table has.
+    pub var texture_table_size: u32 = 0
 
 struct DeviceState:
     var backend: Backend
@@ -145,9 +153,14 @@ struct DeviceState:
     var destroy_kernel: func(void*, void*) -> unit
     var destroy_device: func(Backend, void*) -> unit
     var limits: Limits
+    # Buffers whose addresses were taken (Buffer.address): every compute
+    # pass counts as using them.
+    var addressed: BufferState*[]
+    var addressed_count: usize
 
 func release_device(state: DeviceState*):
     state.references -= 1
     if state.references == 0:
         state.destroy_device(state.backend, state.native)
+        if state.addressed.length > 0: free(state.addressed) in memory.heap
         free(state) in memory.heap

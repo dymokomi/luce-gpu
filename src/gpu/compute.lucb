@@ -31,6 +31,9 @@ pub enum BindingKind as u8:
     sampled_image = 3
     ## A ray-tracing acceleration structure (reserved).
     acceleration_structure = 4
+    ## A sampler (`uniform sampler`), for a texture table's textures; bound
+    ## with `Binding(filter = ...)`.
+    sampler = 5
 
 ## A compute program on one device; the zero value is closed, copies alias
 ## ownership, and submitted work keeps it alive until it finishes.
@@ -40,9 +43,10 @@ pub struct Kernel:
     ## Build a kernel from its SPIR-V words and Metal source (each backend
     ## uses its own form), its workgroup size and its binding kinds, as
     ## embed_shaders.py emits them: `<stem>_comp_words`, `_msl`, `_group`,
-    ## `_bindings`, and `_fast_math`. Float math follows IEEE rules (infinities
-    ## and NaNs propagate) unless `fast_math` lets Metal relax them.
-    pub static func create(device: Device, spirv: const u32[], msl: c.str, group: const u32[], bindings: const u8[], fast_math: bool = false) -> Kernel!:
+    ## `_bindings`, `_fast_math` and `_table`. Float math follows IEEE rules
+    ## (infinities and NaNs propagate) unless `fast_math` lets Metal relax
+    ## them; `table` says the kernel reads a texture table (set 1).
+    pub static func create(device: Device, spirv: const u32[], msl: c.str, group: const u32[], bindings: const u8[], fast_math: bool = false, table: bool = false) -> Kernel!:
         let owner = try device.checked()
         if spirv.length < 5 or spirv[0] != 0x07230203:
             error(invalid_shader, "SPIR-V words must begin with the SPIR-V magic number")
@@ -58,13 +62,15 @@ pub struct Kernel:
             error(invalid_shader, "the kernel's workgroup holds more invocations than the device's limits().group_threads")
         var kinds: u8[16]
         for index in 0..<bindings.length:
-            if bindings[index] > (u8)BindingKind.sampled_image:
+            if bindings[index] == (u8)BindingKind.acceleration_structure or bindings[index] > (u8)BindingKind.sampler:
                 error(unsupported, "acceleration structures are not supported yet")
             kinds[index] = bindings[index]
+        if table and not owner.limits.texture_tables:
+            error(unsupported, "the device has no texture tables")
         var size: u32[3] = [group[0], group[1], group[2]]
-        let native = try backend_kernel_create(owner, spirv, msl, size, kinds, fast_math)
+        let native = try backend_kernel_create(owner, spirv, msl, size, kinds, fast_math, table)
         errdefer owner.destroy_kernel(owner.native, native)
-        let state = try new KernelState(device = owner, native = native, group = size, bindings = kinds) in memory.heap
+        let state = try new KernelState(device = owner, native = native, group = size, bindings = kinds, table = table) in memory.heap
         owner.references += 1
         return Kernel(state = state)
 
@@ -92,6 +98,7 @@ struct KernelState:
     var native: void*
     var group: u32[3]
     var bindings: u8[16]
+    var table: bool
     var references: usize = 1
 
 func release_kernel(state: KernelState*):
@@ -110,7 +117,7 @@ pub struct Binding:
     ## A storage image (a texture created with `storage`) or a sampled image,
     ## as the kernel declares the binding.
     pub var texture: Texture
-    ## How a sampled image is filtered.
+    ## How a sampled image, or a sampler binding, filters.
     pub var filter: Filter = Filter.nearest
 
 # mark: Recording =============================================================================
@@ -132,6 +139,8 @@ struct ComputeCommand:
     var buffers: BufferState*?[16]
     var textures: TextureState*?[16]
     var filters: Filter[16]
+    ## The texture table set 1 reads.
+    var table: TableState*?
     var uniforms: u8[128]
     var groups: u32[3]
     ## The indirect arguments, the copy's source or the fill's target.
@@ -149,6 +158,7 @@ func release_command(command: ComputeCommand*):
         if let buffer = slot: release_buffer(buffer)
     for slot in command.textures:
         if let texture = slot: release_texture(texture)
+    if let table = command.table: release_table(table)
     if let buffer = command.buffer: release_buffer(buffer)
     if let target = command.target: release_buffer(target)
     *command = ComputeCommand()
@@ -169,26 +179,27 @@ pub struct Compute:
         return Compute(state = state)
 
     ## Run `kernel` over `x` by `y` by `z` workgroups with `bindings` (element n
-    ## is binding n) and up to 128 `uniforms` bytes as its push constants. A
+    ## is binding n) and up to 128 `uniforms` bytes as its push constants;
+    ## `textures` is the texture table a kernel made with `table` reads. A
     ## zero count records nothing.
-    pub func dispatch(kernel: Kernel, bindings: const Binding[], uniforms: const u8[], x: u32, y: u32 = 1, z: u32 = 1) -> !:
+    pub func dispatch(kernel: Kernel, bindings: const Binding[], uniforms: const u8[], x: u32, y: u32 = 1, z: u32 = 1, textures: TextureTable? = none) -> !:
         let state = try self.recording()
         let limits = state.device.limits
         if x > limits.group_count[0] or y > limits.group_count[1] or z > limits.group_count[2]:
             error(invalid_geometry, "a dispatch launches more workgroups than the device's limits().group_count")
         if x == 0 or y == 0 or z == 0:
             return
-        var command = try state.bound(command_dispatch, kernel, bindings, uniforms)
+        var command = try state.bound(command_dispatch, kernel, bindings, uniforms, textures)
         command.groups = [x, y, z]
         try state.append(&command)
 
     ## Run `kernel` over the workgroup counts the GPU wrote to `arguments` at
     ## `offset`: three u32s, x, y and z, as earlier commands left them.
-    pub func dispatch_indirect(kernel: Kernel, bindings: const Binding[], uniforms: const u8[], arguments: Buffer, offset: usize) -> !:
+    pub func dispatch_indirect(kernel: Kernel, bindings: const Binding[], uniforms: const u8[], arguments: Buffer, offset: usize, textures: TextureTable? = none) -> !:
         let state = try self.recording()
         let source = try state.own(arguments)
         try check_buffer_range(source, offset, 12)
-        var command = try state.bound(command_indirect, kernel, bindings, uniforms)
+        var command = try state.bound(command_indirect, kernel, bindings, uniforms, textures)
         command.buffer = source
         command.offset = offset
         source.references += 1
@@ -243,7 +254,7 @@ pub struct Compute:
     pub func submit() -> !:
         let state = try self.recording()
         defer state.release_commands()
-        let submitted = backend_compute_submit(state.device, state.commands[..<state.count], state.stamps) catch failure:
+        let submitted = backend_compute_submit(state.device, state.commands[..<state.count], state.stamps, state.device.addressed[..<state.device.addressed_count]) catch failure:
             # Nothing reached the queue: the pass is over and reports the failure.
             state.phase = 2
             state.failed = true
@@ -251,6 +262,8 @@ pub struct Compute:
         state.submission = Submission(serial = submitted.serial)
         state.native = submitted.native
         state.phase = 1
+        for command in state.commands[..<state.count]:
+            if let table = command.table: table.last = state.submission
 
     ## The pass's submission on the device's queue, once submitted: for
     ## `Device.done`, `Device.wait` and `Device.gpu_time`.
@@ -344,10 +357,18 @@ struct ComputeState:
 
     ## A dispatch of `kernel` holding its bindings and uniforms, checked
     ## against what the kernel declares; it holds a reference to each.
-    func bound(kind: u8, kernel: Kernel, bindings: const Binding[], uniforms: const u8[]) -> ComputeCommand!:
+    func bound(kind: u8, kernel: Kernel, bindings: const Binding[], uniforms: const u8[], textures: TextureTable?) -> ComputeCommand!:
         let program = try kernel.checked()
         if program.device != self.device:
             error(wrong_device, "the kernel belongs to another GPU device")
+        var table: TableState*? = none
+        if let given = textures:
+            table = try given.checked()
+        if program.table != (table != none):
+            error(invalid_geometry, "a kernel reading a texture table is dispatched with one, and only such a kernel")
+        if let held = table:
+            if held.device != self.device:
+                error(wrong_device, "a compute pass uses texture tables of its own device")
         if uniforms.length > uniform_limit:
             error(invalid_geometry, "a dispatch carries at most 128 uniform bytes")
         if bindings.length > binding_limit:
@@ -363,6 +384,9 @@ struct ComputeState:
             if declared == (u8)BindingKind.storage_buffer:
                 command.buffers[index] = try self.own(bindings[index].buffer)
                 continue
+            if declared == (u8)BindingKind.sampler:
+                command.filters[index] = bindings[index].filter
+                continue
             let image = bindings[index].texture.state else error(closed, "a compute pass was given a closed texture")
             if image.closed or image.device != self.device:
                 error(wrong_device, "a compute pass uses open textures of its own device")
@@ -371,6 +395,9 @@ struct ComputeState:
             command.textures[index] = image
             command.filters[index] = bindings[index].filter
         program.references += 1
+        if let held = table:
+            held.references += 1
+            command.table = held
         for slot in command.buffers:
             if let buffer = slot: buffer.references += 1
         for slot in command.textures:
@@ -395,9 +422,9 @@ struct ComputeState:
 
 # mark: Dispatch ==============================================================================
 
-func backend_kernel_create(device: DeviceState*, spirv: const u32[], msl: c.str, group: u32[3], bindings: u8[16], fast_math: bool) -> void*!:
+func backend_kernel_create(device: DeviceState*, spirv: const u32[], msl: c.str, group: u32[3], bindings: u8[16], fast_math: bool, table: bool) -> void*!:
     if (platform.windows or platform.linux) and device.backend == Backend.vulkan:
-        return (void*)try vulkan_kernel_create((VulkanDevice*)device.native, spirv, bindings)
+        return (void*)try vulkan_kernel_create((VulkanDevice*)device.native, spirv, bindings, table)
     if platform.macos and platform.arm64:
         if device.backend == Backend.metal:
             return try metal_kernel_create((MetalDevice*)device.native, msl, group, fast_math)
@@ -413,12 +440,14 @@ struct ComputeSubmitted:
     var serial: u64
     var native: void*?
 
-func backend_compute_submit(device: DeviceState*, commands: const ComputeCommand[], stamps: usize) -> ComputeSubmitted!:
+## `addressed` are the buffers whose addresses were taken: every pass may
+## reach them, so each counts as using them.
+func backend_compute_submit(device: DeviceState*, commands: const ComputeCommand[], stamps: usize, addressed: BufferState*[]) -> ComputeSubmitted!:
     if (platform.windows or platform.linux) and device.backend == Backend.vulkan:
-        return try vulkan_compute_submit((VulkanDevice*)device.native, commands, stamps)
+        return try vulkan_compute_submit((VulkanDevice*)device.native, commands, stamps, addressed)
     if platform.macos and platform.arm64:
         if device.backend == Backend.metal:
-            return try metal_compute_submit((MetalDevice*)device.native, commands, stamps)
+            return try metal_compute_submit((MetalDevice*)device.native, commands, stamps, addressed)
     error(unsupported, "compute work is unavailable on this backend")
 
 func backend_compute_stamps(device: DeviceState*, native: void*?, out: u64[]) -> !:

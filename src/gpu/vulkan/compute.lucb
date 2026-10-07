@@ -14,6 +14,7 @@
 #==============================================================================================
 
 struct VulkanKernel:
+    var table: bool
     var pipeline: u64
     var pipeline_layout: u64
     var set_layout: u64
@@ -26,9 +27,12 @@ struct VulkanKernel:
 ## The device's limits, from VkPhysicalDeviceLimits (and the largest single
 ## allocation on Vulkan 1.1 and later). Buffers are bound whole, so the largest
 ## buffer is the largest storage range, in whole words.
-func vulkan_device_limits(device: VulkanDevice*, float_atomic_add: bool) -> Limits:
+func vulkan_device_limits(device: VulkanDevice*) -> Limits:
     var properties = VkPhysicalDeviceProperties2(sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2)
+    var indexing = VkPhysicalDeviceDescriptorIndexingProperties(sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_PROPERTIES)
     var subgroups = VkPhysicalDeviceSubgroupProperties(sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES)
+    if device.version >= vulkan_api_version_1_2:
+        subgroups.pNext = (void*)&indexing
     var maintenance = VkPhysicalDeviceMaintenance3Properties(sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_3_PROPERTIES, pNext = (void*)&subgroups)
     var largest: u64 = 0xffffffffffffffffu64
     if device.version >= vulkan_api_version_1_1:
@@ -44,9 +48,15 @@ func vulkan_device_limits(device: VulkanDevice*, float_atomic_add: bool) -> Limi
     # Basic, vote, arithmetic, ballot and shuffle, in the compute stage.
     let operations = VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_VOTE_BIT | VK_SUBGROUP_FEATURE_ARITHMETIC_BIT | VK_SUBGROUP_FEATURE_BALLOT_BIT | VK_SUBGROUP_FEATURE_SHUFFLE_BIT
     let subgroup_ops = (subgroups.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) != 0 and (subgroups.supportedOperations & operations) == operations
+    # A table's descriptors are updated after binding, in one set used by the compute stage.
+    var table_size = texture_table_limit
+    if indexing.maxDescriptorSetUpdateAfterBindSampledImages < table_size: table_size = indexing.maxDescriptorSetUpdateAfterBindSampledImages
+    if indexing.maxPerStageDescriptorUpdateAfterBindSampledImages < table_size: table_size = indexing.maxPerStageDescriptorUpdateAfterBindSampledImages
+    let tables = device.features.texture_tables and table_size > 0
     return Limits(buffer_bytes = buffer_bytes, group_threads = limits.maxComputeWorkGroupInvocations, group_size = limits.maxComputeWorkGroupSize,
-                  group_count = limits.maxComputeWorkGroupCount, shared_bytes = limits.maxComputeSharedMemorySize, float_atomic_add = float_atomic_add,
-                  subgroup_size = subgroups.subgroupSize, subgroup_ops = subgroup_ops, timestamps = device.timestamp_bits > 0)
+                  group_count = limits.maxComputeWorkGroupCount, shared_bytes = limits.maxComputeSharedMemorySize, float_atomic_add = device.features.float_atomic_add,
+                  subgroup_size = subgroups.subgroupSize, subgroup_ops = subgroup_ops, timestamps = device.timestamp_bits > 0,
+                  buffer_addresses = device.features.buffer_addresses, texture_tables = tables, texture_table_size = table_size if tables else 0)
 
 func vulkan_limits(device: VulkanDevice*) -> Limits:
     return device.limits
@@ -58,12 +68,12 @@ func vulkan_buffer_allocate(device: VulkanDevice*, bytes: usize, memory_kind: Me
     try vulkan_drawing(device)
     let state = try new VulkanBuffer(bytes = (u64)bytes) in memory.heap
     errdefer vulkan_buffer_release((void*)device, (void*)state)
-    var info = VkBufferCreateInfo(sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, size = state.bytes, usage = vulkan_buffer_usage)
+    var info = VkBufferCreateInfo(sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, size = state.bytes, usage = vulkan_buffer_usage(device))
     try vulkan_check(vkCreateBuffer(device.device, &info, none, &state.buffer), "a Vulkan buffer could not be created")
     var requirements: VkMemoryRequirements
     vkGetBufferMemoryRequirements(device.device, state.buffer, &requirements)
     if memory_kind == Memory.device:
-        state.memory = try vulkan_memory(device, requirements, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+        state.memory = try vulkan_buffer_memory(device, requirements, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
         try vulkan_check(vkBindBufferMemory(device.device, state.buffer, state.memory, 0), "Vulkan buffer memory could not be bound")
         let slot = try vulkan_begin(device)
         vkCmdFillBuffer(slot.command, state.buffer, 0, state.bytes, 0)
@@ -74,17 +84,33 @@ func vulkan_buffer_allocate(device: VulkanDevice*, bytes: usize, memory_kind: Me
     let local = visible | VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
     var block: u64 = 0
     if vulkan_has_memory_type(device, requirements, local):
-        block = vulkan_memory(device, requirements, local) catch failure:
+        block = vulkan_buffer_memory(device, requirements, local) catch failure:
             _ = failure
             recover 0
     if block == 0:
-        block = try vulkan_memory(device, requirements, visible)
+        block = try vulkan_buffer_memory(device, requirements, visible)
     state.memory = block
     try vulkan_check(vkBindBufferMemory(device.device, state.buffer, state.memory, 0), "Vulkan buffer memory could not be bound")
     try vulkan_check(vkMapMemory(device.device, state.memory, 0, state.bytes, 0, &state.mapped), "Vulkan buffer memory could not be mapped")
     let mapped = state.mapped else error(failed, "Vulkan returned an empty memory mapping")
     memory.set(u8[]((u8*)mapped, bytes), 0)
     return state
+
+## Dedicated memory for a buffer, allocated for device addresses where the
+## device has them.
+func vulkan_buffer_memory(device: VulkanDevice*, requirements: VkMemoryRequirements, flags: u32) -> u64!:
+    let type_index = try vulkan_memory_type(device, requirements, flags)
+    var addressed = VkMemoryAllocateFlagsInfo(sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO, flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT)
+    var info = VkMemoryAllocateInfo(sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, allocationSize = requirements.size, memoryTypeIndex = type_index)
+    if device.features.buffer_addresses:
+        info.pNext = (void*)&addressed
+    var block: u64 = 0
+    try vulkan_check(vkAllocateMemory(device.device, &info, none, &block), "Vulkan device memory allocation failed")
+    return block
+
+func vulkan_buffer_address(device: VulkanDevice*, buffer: VulkanBuffer*) -> u64:
+    var info = VkBufferDeviceAddressInfo(sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, buffer = buffer.buffer)
+    return vkGetBufferDeviceAddress(device.device, &info)
 
 ## A shared buffer's mapping.
 func vulkan_buffer_contents(buffer: VulkanBuffer*) -> u8*?:
@@ -93,9 +119,9 @@ func vulkan_buffer_contents(buffer: VulkanBuffer*) -> u8*?:
 
 # mark: Kernels ===============================================================================
 
-func vulkan_kernel_create(device: VulkanDevice*, spirv: const u32[], bindings: u8[16]) -> void*!:
+func vulkan_kernel_create(device: VulkanDevice*, spirv: const u32[], bindings: u8[16], table: bool) -> void*!:
     try vulkan_drawing(device)
-    let state = try new VulkanKernel(bindings = bindings) in memory.heap
+    let state = try new VulkanKernel(bindings = bindings, table = table) in memory.heap
     errdefer vulkan_kernel_destroy(device, state)
     var layout_bindings: VkDescriptorSetLayoutBinding[16]
     var count: u32 = 0
@@ -108,7 +134,9 @@ func vulkan_kernel_create(device: VulkanDevice*, spirv: const u32[], bindings: u
     var set_info = VkDescriptorSetLayoutCreateInfo(sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, bindingCount = count, pBindings = &layout_bindings[0])
     try vulkan_check(vkCreateDescriptorSetLayout(device.device, &set_info, none, &state.set_layout), "a Vulkan kernel layout could not be created")
     var push = VkPushConstantRange(stageFlags = VK_SHADER_STAGE_COMPUTE_BIT, size = (u32)uniform_limit)
-    var layout_info = VkPipelineLayoutCreateInfo(sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, setLayoutCount = 1, pSetLayouts = &state.set_layout,
+    # A kernel reading a texture table has the device's table layout as set 1.
+    var set_layouts: u64[2] = [state.set_layout, try vulkan_table_layout(device) if table else 0]
+    var layout_info = VkPipelineLayoutCreateInfo(sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, setLayoutCount = 2 if table else 1, pSetLayouts = &set_layouts[0],
                                                  pushConstantRangeCount = 1, pPushConstantRanges = &push)
     try vulkan_check(vkCreatePipelineLayout(device.device, &layout_info, none, &state.pipeline_layout), "a Vulkan kernel pipeline layout could not be created")
     let module = vulkan_shader(device, spirv) catch failure:
@@ -124,6 +152,7 @@ func vulkan_kernel_create(device: VulkanDevice*, spirv: const u32[], bindings: u
 func vulkan_descriptor_type(kind: u8) -> u32:
     if kind == (u8)BindingKind.storage_image: return VK_DESCRIPTOR_TYPE_STORAGE_IMAGE
     if kind == (u8)BindingKind.sampled_image: return VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
+    if kind == (u8)BindingKind.sampler: return VK_DESCRIPTOR_TYPE_SAMPLER
     return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
 
 ## Release once every submission that dispatched the kernel has completed.
@@ -159,7 +188,7 @@ let vulkan_compute_stages: u32 = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPEL
 ## Record `commands` into one submission and submit it without waiting. Its
 ## start and end are timed in the device's timing queries; a pass with
 ## timestamps gets a query pool of its own, which it keeps for reading them.
-func vulkan_compute_submit(device: VulkanDevice*, commands: const ComputeCommand[], stamps: usize) -> ComputeSubmitted!:
+func vulkan_compute_submit(device: VulkanDevice*, commands: const ComputeCommand[], stamps: usize, addressed: BufferState*[]) -> ComputeSubmitted!:
     try vulkan_drawing(device)
     var dispatches: u32 = 0
     for recorded in commands:
@@ -181,11 +210,12 @@ func vulkan_compute_submit(device: VulkanDevice*, commands: const ComputeCommand
     if stamped != 0:
         vkCmdResetQueryPool(slot.command, stamped, 0, (u32)stamps)
     if dispatches > 0:
-        var sizes: VkDescriptorPoolSize[3] = [
+        var sizes: VkDescriptorPoolSize[4] = [
             VkDescriptorPoolSize(descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, descriptorCount = dispatches * (u32)binding_limit),
             VkDescriptorPoolSize(descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, descriptorCount = dispatches * (u32)binding_limit),
-            VkDescriptorPoolSize(descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, descriptorCount = dispatches * (u32)binding_limit)]
-        var pool_info = VkDescriptorPoolCreateInfo(sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, maxSets = dispatches, poolSizeCount = 3, pPoolSizes = &sizes[0])
+            VkDescriptorPoolSize(descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, descriptorCount = dispatches * (u32)binding_limit),
+            VkDescriptorPoolSize(descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER, descriptorCount = dispatches * (u32)binding_limit)]
+        var pool_info = VkDescriptorPoolCreateInfo(sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, maxSets = dispatches, poolSizeCount = 4, pPoolSizes = &sizes[0])
         try vulkan_check(vkCreateDescriptorPool(device.device, &pool_info, none, &pool), "Vulkan compute descriptors could not be created")
     # Earlier submissions' writes (uploads, passes) before this pass reads.
     vulkan_compute_barrier(slot.command, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, vulkan_compute_stages)
@@ -225,8 +255,12 @@ func vulkan_compute_submit(device: VulkanDevice*, commands: const ComputeCommand
             if let buffer = bound: ((VulkanBuffer*)buffer.native).last_use = serial
         for bound in recorded.textures:
             if let texture = bound: ((VulkanTexture*)texture.native).last_use = serial
+        if let table = recorded.table: vulkan_table_used((VulkanTable*)table.native, serial)
         if let buffer = recorded.buffer: ((VulkanBuffer*)buffer.native).last_use = serial
         if let buffer = recorded.target: ((VulkanBuffer*)buffer.native).last_use = serial
+    # Buffers kernels may reach by address count as used by every pass.
+    for buffer in addressed:
+        ((VulkanBuffer*)buffer.native).last_use = serial
     return ComputeSubmitted(serial = serial, native = (void*)(usize)stamped if stamped != 0 else none)
 
 # mark: Timing ================================================================================
@@ -297,6 +331,12 @@ func vulkan_encode_dispatch(device: VulkanDevice*, command: u64, pool: u64, reco
     var writes: VkWriteDescriptorSet[16]
     var count: u32 = 0
     for index in 0..<binding_limit:
+        if program.bindings[index] == (u8)BindingKind.sampler:
+            images[index] = VkDescriptorImageInfo(sampler = device.linear if recorded.filters[index] == Filter.linear else device.nearest)
+            writes[(usize)count] = VkWriteDescriptorSet(sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, dstSet = set, dstBinding = (u32)index, descriptorCount = 1,
+                                                        descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER, pImageInfo = &images[index])
+            count += 1
+            continue
         if let buffer = recorded.buffers[index]:
             let native = (VulkanBuffer*)buffer.native
             infos[index] = VkDescriptorBufferInfo(buffer = native.buffer, range = native.bytes)
@@ -320,6 +360,10 @@ func vulkan_encode_dispatch(device: VulkanDevice*, command: u64, pool: u64, reco
         vkUpdateDescriptorSets(device.device, count, &writes[0], 0, none)
     vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, kernel.pipeline)
     vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_COMPUTE, kernel.pipeline_layout, 0, 1, &set, 0, none)
+    if let table = recorded.table:
+        let native = (VulkanTable*)table.native
+        vulkan_table_ready(command, native)
+        vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_COMPUTE, kernel.pipeline_layout, 1, 1, &native.set, 0, none)
     var uniforms = recorded.uniforms
     vkCmdPushConstants(command, kernel.pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, (u32)uniform_limit, (void*)&uniforms)
     if recorded.kind == command_indirect:
@@ -327,3 +371,88 @@ func vulkan_encode_dispatch(device: VulkanDevice*, command: u64, pool: u64, reco
         vkCmdDispatchIndirect(command, ((VulkanBuffer*)arguments.native).buffer, (u64)recorded.offset)
     else:
         vkCmdDispatch(command, recorded.groups[0], recorded.groups[1], recorded.groups[2])
+
+# mark: Texture tables ========================================================================
+
+## A texture table: one descriptor set of sampled images, updated after
+## binding and partially bound, from a pool of its own; the textures in it,
+## made ready for sampling by each dispatch that reads it.
+struct VulkanTable:
+    var pool: u64
+    var set: u64
+    var textures: VulkanTexture*?[]
+    ## The newest submission that read the table.
+    var last_use: u64
+
+## The device's table layout, set 1 of every kernel that reads a table: a
+## variable-count array of sampled images, made on first use.
+func vulkan_table_layout(device: VulkanDevice*) -> u64!:
+    if device.table_layout != 0:
+        return device.table_layout
+    var binding = VkDescriptorSetLayoutBinding(binding = 0, descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, descriptorCount = device.limits.texture_table_size,
+                                               stageFlags = VK_SHADER_STAGE_COMPUTE_BIT)
+    var flags: u32 = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT
+    var binding_flags = VkDescriptorSetLayoutBindingFlagsCreateInfo(sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO, bindingCount = 1, pBindingFlags = &flags)
+    var info = VkDescriptorSetLayoutCreateInfo(sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, pNext = (void*)&binding_flags,
+                                               flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT, bindingCount = 1, pBindings = &binding)
+    try vulkan_check(vkCreateDescriptorSetLayout(device.device, &info, none, &device.table_layout), "the Vulkan texture table layout could not be created")
+    return device.table_layout
+
+func vulkan_table_create(device: VulkanDevice*, capacity: u32) -> VulkanTable*!:
+    try vulkan_drawing(device)
+    var layout = try vulkan_table_layout(device)
+    let textures = try new VulkanTexture*?[(usize)capacity] in memory.heap
+    let state = try new VulkanTable(textures = textures) in memory.heap
+    errdefer vulkan_table_destroy(device, state)
+    var size = VkDescriptorPoolSize(descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, descriptorCount = capacity)
+    var pool_info = VkDescriptorPoolCreateInfo(sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT,
+                                               maxSets = 1, poolSizeCount = 1, pPoolSizes = &size)
+    try vulkan_check(vkCreateDescriptorPool(device.device, &pool_info, none, &state.pool), "a Vulkan texture table could not be created")
+    var count = capacity
+    var variable = VkDescriptorSetVariableDescriptorCountAllocateInfo(sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_VARIABLE_DESCRIPTOR_COUNT_ALLOCATE_INFO, descriptorSetCount = 1, pDescriptorCounts = &count)
+    var set_info = VkDescriptorSetAllocateInfo(sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, pNext = (void*)&variable, descriptorPool = state.pool,
+                                               descriptorSetCount = 1, pSetLayouts = &layout)
+    try vulkan_check(vkAllocateDescriptorSets(device.device, &set_info, &state.set), "a Vulkan texture table could not be allocated")
+    return state
+
+## Point slot `index` at `image` (or, cleared, at the placeholder image, so no
+## slot ever names a destroyed view).
+func vulkan_table_write(device: VulkanDevice*, table: VulkanTable*, index: u32, image: VulkanTexture*):
+    var info = VkDescriptorImageInfo(imageView = image.view, imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+    var write = VkWriteDescriptorSet(sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, dstSet = table.set, dstBinding = 0, dstArrayElement = index, descriptorCount = 1,
+                                     descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, pImageInfo = &info)
+    vkUpdateDescriptorSets(device.device, 1, &write, 0, none)
+
+func vulkan_table_set(device: VulkanDevice*, table: VulkanTable*, index: u32, texture: VulkanTexture*):
+    vulkan_table_write(device, table, index, texture)
+    table.textures[(usize)index] = texture
+
+func vulkan_table_clear(device: VulkanDevice*, table: VulkanTable*, index: u32):
+    let placeholder = device.placeholder else trap("Vulkan drawing state has no placeholder image")
+    vulkan_table_write(device, table, index, placeholder)
+    table.textures[(usize)index] = none
+
+## Every texture in the table in the sampling layout, before a dispatch reads it.
+func vulkan_table_ready(command: u64, table: VulkanTable*):
+    for slot in table.textures:
+        if let texture = slot: vulkan_transition(command, texture, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+
+func vulkan_table_used(table: VulkanTable*, serial: u64):
+    table.last_use = serial
+    for slot in table.textures:
+        if let texture = slot: texture.last_use = serial
+
+## Free the table's pool (and its set) once its last submission has finished.
+func vulkan_table_destroy(device: VulkanDevice*, table: VulkanTable*):
+    let item = VulkanRetired(kind = vulkan_retired_descriptors, handle = table.pool)
+    let serial = table.last_use
+    free(table.textures) in memory.heap
+    free(table) in memory.heap
+    if item.handle == 0: return
+    vulkan_poll(device)
+    if serial <= device.completed:
+        vulkan_retired_free(device, item)
+        return
+    vulkan_retire(&device.slots[(usize)(serial % (u64)vulkan_slot_limit)], item) catch failure:
+        vulkan_wait(device, serial) catch waited: _ = waited
+        vulkan_retired_free(device, item)

@@ -18,19 +18,21 @@ struct VulkanBuffer:
     ## A shared buffer's persistent mapping.
     var mapped: void*?
 
-## Every buffer can be bound for storage, copied from and to, and read as
-## indirect dispatch arguments.
-let vulkan_buffer_usage: u32 = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT
+## Every buffer can be bound for storage, copied from and to, read as
+## indirect dispatch arguments, and, where the device has them, addressed.
+func vulkan_buffer_usage(device: VulkanDevice*) -> u32:
+    let usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT
+    return usage | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT if device.features.buffer_addresses else usage
 
 func vulkan_buffer_create(device: VulkanDevice*, data: const u8[]) -> VulkanBuffer*!:
     try vulkan_drawing(device)
     let state = try new VulkanBuffer(bytes = (u64)data.length) in memory.heap
     errdefer vulkan_buffer_release((void*)device, (void*)state)
-    var info = VkBufferCreateInfo(sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, size = state.bytes, usage = vulkan_buffer_usage)
+    var info = VkBufferCreateInfo(sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, size = state.bytes, usage = vulkan_buffer_usage(device))
     try vulkan_check(vkCreateBuffer(device.device, &info, none, &state.buffer), "a Vulkan buffer could not be created")
     var requirements: VkMemoryRequirements
     vkGetBufferMemoryRequirements(device.device, state.buffer, &requirements)
-    state.memory = try vulkan_memory(device, requirements, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+    state.memory = try vulkan_buffer_memory(device, requirements, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
     try vulkan_check(vkBindBufferMemory(device.device, state.buffer, state.memory, 0), "Vulkan buffer memory could not be bound")
     try vulkan_buffer_upload(device, state, 0, data)
     return state
