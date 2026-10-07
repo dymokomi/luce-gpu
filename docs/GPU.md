@@ -455,6 +455,9 @@ one include file instead of copying it.
 ```glsl
 #version 450
 layout(location = 0) in vec4 vertex_color;      // the draw's color
+layout(location = 1) flat in vec4 data0;        // an instance's values (optional;
+layout(location = 2) flat in vec4 data1;        //   zero under `shade`)
+layout(location = 3) flat in vec4 data2;
 layout(location = 0) out vec4 fragment_color;   // premultiplied
 layout(push_constant) uniform Params { ... } params;   // up to 128 bytes
 layout(set = 0, binding = 1) uniform sampler2D first;  // bindings 1..4
@@ -472,6 +475,21 @@ images?, filter, color)` draws a rectangle of a `RenderTarget` with it: the
 uniform bytes fill the push-constant block (zero-padded to 128; Metal binds the
 whole block since a padded struct may be larger than the bytes given), the
 images sample at bindings 1.. with `filter`, and `color` is the vertex color.
+`shade_instances(target, pipeline, instances, uniforms?, images?, filter)` draws many
+rectangles with one pipeline in one draw. Each `ShadeInstance` has a `rect` (x, y,
+width, height in points of the target, like `shade`'s rectangle) and twelve floats of
+`data` its fragments read flat at locations 1..3; the uniforms, images and filter are
+the draw's, and the vertex color is opaque white. One call counts as one draw against
+the frame's draw limit however many rectangles it holds (up to 1,048,576 a frame), so
+a run of glyphs from one atlas, or a list of rounded rectangles, is one draw instead of
+hundreds. Rectangles draw in order, clipped like every draw; instances are copied. The
+vertex stage stays luce-gpu's, so the same fragment program serves `shade` (locations
+1..3 zero) and `shade_instances`: Metal builds a second pipeline state for a pipeline
+the first time it is drawn instanced (`luce_instance` reads the instances from vertex
+buffer 1 by `instance_id`, `drawPrimitives` with an instance count), and Vulkan a
+second pipeline with an instance-rate vertex binding (`shaders/instance.vert`,
+`vkCmdDraw(6, count, 0, first)`).
+
 A pipeline recorded into a frame of another target format is refused at
 `present` with `wrong_target`; one from another device with `wrong_device`.
 Shaders and pipelines are manual Base resources like textures, and a draw

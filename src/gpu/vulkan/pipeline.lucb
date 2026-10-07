@@ -88,13 +88,21 @@ func vulkan_pipelines(device: VulkanDevice*, state: VulkanFormatState*) -> !:
     state.overlay = try vulkan_build_pipeline(device, state.pass_texture, device.fill, Blend.over, false)
     state.depth_test = try vulkan_build_pipeline(device, state.pass_texture, device.fill, Blend.over, true)
 
-## One graphics pipeline: the quad vertex stage, `fragment` (a shader module
-## with the fragment contract), `blend`, and depth testing or not, compatible
-## with every render pass of `pass`'s color format.
-func vulkan_build_pipeline(device: VulkanDevice*, pass: u64, fragment: u64, blend: Blend, depth: bool, geometry: bool = false) -> u64!:
-    let vertex_shader = (try vulkan_shader(device, geometry_vert_words)) if geometry else (try vulkan_shader(device, quad_vert_words))
+## One graphics pipeline: the quad vertex stage (the geometry one, or the
+## instanced one of shade_instances), `fragment` (a shader module with the
+## fragment contract), `blend`, and depth testing or not, compatible with every
+## render pass of `pass`'s color format.
+func vulkan_build_pipeline(device: VulkanDevice*, pass: u64, fragment: u64, blend: Blend, depth: bool, geometry: bool = false, instanced: bool = false) -> u64!:
+    var vertex_shader: u64 = 0
+    if geometry:
+        vertex_shader = try vulkan_shader(device, geometry_vert_words)
+    elif instanced:
+        vertex_shader = try vulkan_shader(device, instance_vert_words)
+    else:
+        vertex_shader = try vulkan_shader(device, quad_vert_words)
     defer vkDestroyShaderModule(device.device, vertex_shader, none)
-    return try vulkan_graphics_pipeline(device, pass, vertex_shader, fragment, device.layout, blend, depth, not geometry)
+    let input = VulkanVertexInput.instances if instanced else (VulkanVertexInput.pulled if geometry else VulkanVertexInput.vertices)
+    return try vulkan_graphics_pipeline(device, pass, vertex_shader, fragment, device.layout, blend, depth, input)
 
 ## A depth-tested pipeline of the vertex stage `vertex` pulling from storage
 ## buffers and the fragment stage `fragment`, laid out by `layout`.
@@ -103,11 +111,18 @@ func vulkan_stage_pipeline(device: VulkanDevice*, pass: u64, vertex: const u32[]
     defer vkDestroyShaderModule(device.device, vertex_shader, none)
     let fragment_shader = try vulkan_shader(device, fragment)
     defer vkDestroyShaderModule(device.device, fragment_shader, none)
-    return try vulkan_graphics_pipeline(device, pass, vertex_shader, fragment_shader, layout, blend, true, false)
+    return try vulkan_graphics_pipeline(device, pass, vertex_shader, fragment_shader, layout, blend, true, VulkanVertexInput.pulled)
 
-## `vertex_input`: the quad stage's 32-byte vertices at binding 0; otherwise
-## the vertex stage pulls from storage buffers and takes no vertex input.
-func vulkan_graphics_pipeline(device: VulkanDevice*, pass: u64, vertex_shader: u64, fragment: u64, layout: u64, blend: Blend, depth: bool, vertex_input: bool) -> u64!:
+## What a pipeline's vertex stage reads from bound vertex buffers.
+enum VulkanVertexInput as u8:
+    ## Nothing: it pulls from storage buffers.
+    pulled = 0
+    ## The quad stage's 32-byte vertices at binding 0.
+    vertices = 1
+    ## The instanced stage's 64-byte instances (ShadeInstance) at binding 1.
+    instances = 2
+
+func vulkan_graphics_pipeline(device: VulkanDevice*, pass: u64, vertex_shader: u64, fragment: u64, layout: u64, blend: Blend, depth: bool, vertex_input: VulkanVertexInput) -> u64!:
     var stages: VkPipelineShaderStageCreateInfo[2] = [
         VkPipelineShaderStageCreateInfo(sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, stage = VK_SHADER_STAGE_VERTEX_BIT, module = vertex_shader, pName = "main"),
         VkPipelineShaderStageCreateInfo(sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, stage = VK_SHADER_STAGE_FRAGMENT_BIT, module = fragment, pName = "main")]
@@ -119,9 +134,17 @@ func vulkan_graphics_pipeline(device: VulkanDevice*, pass: u64, vertex_shader: u
                                                            vertexBindingDescriptionCount = 1, pVertexBindingDescriptions = &binding,
                                                            vertexAttributeDescriptionCount = 2, pVertexAttributeDescriptions = &attributes[0])
     var assembly = VkPipelineInputAssemblyStateCreateInfo(sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO, topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
-    if not vertex_input:
+    var instance_binding = VkVertexInputBindingDescription(binding = 1, stride = 64, inputRate = VK_VERTEX_INPUT_RATE_INSTANCE)
+    var instance_attributes: VkVertexInputAttributeDescription[4]
+    for index in 0..<(usize)4:
+        instance_attributes[index] = VkVertexInputAttributeDescription(location = (u32)index, binding = 1, format = VK_FORMAT_R32G32B32A32_SFLOAT, offset = (u32)index * 16)
+    if vertex_input == VulkanVertexInput.pulled:
         vertex_info.vertexBindingDescriptionCount = 0
         vertex_info.vertexAttributeDescriptionCount = 0
+    elif vertex_input == VulkanVertexInput.instances:
+        vertex_info.pVertexBindingDescriptions = &instance_binding
+        vertex_info.vertexAttributeDescriptionCount = 4
+        vertex_info.pVertexAttributeDescriptions = &instance_attributes[0]
     var viewport_info = VkPipelineViewportStateCreateInfo(sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, viewportCount = 1, scissorCount = 1)
     var raster = VkPipelineRasterizationStateCreateInfo(sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, lineWidth = 1.0, depthBiasEnable = VK_TRUE if depth else VK_FALSE)
     var multisample = VkPipelineMultisampleStateCreateInfo(sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO, rasterizationSamples = VK_SAMPLE_COUNT_1_BIT)

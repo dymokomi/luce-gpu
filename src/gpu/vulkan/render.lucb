@@ -41,6 +41,10 @@ func vulkan_vertex_offset(canvas: Canvas) -> usize:
     # dedicated prefix at offset zero avoids imposing any guessed alignment.
     return (canvas_max(1, canvas.coverage_count) * 4 + 31) // 32 * 32
 
+## Where a canvas's instances start in its upload: after the vertices.
+func vulkan_instance_offset(canvas: Canvas) -> usize:
+    return (vulkan_vertex_offset(canvas) + canvas_max(1, canvas.vertex_count) * memory.size_of(Vertex) + 63) // 64 * 64
+
 func vulkan_upload(device: VulkanDevice*, canvas: Canvas) -> VulkanUpload!:
     var upload: VulkanUpload
     errdefer vulkan_upload_destroy(device, upload)
@@ -50,7 +54,9 @@ func vulkan_upload(device: VulkanDevice*, canvas: Canvas) -> VulkanUpload!:
     let vertex_bytes = canvas_max(1, canvas.vertex_count) * memory.size_of(Vertex)
     let mask_bytes = canvas_max(1, canvas.coverage_count) * 4
     let vertex_offset = vulkan_vertex_offset(canvas)
-    let parameter_offset = (vertex_offset + vertex_bytes + 255) // 256 * 256
+    let instance_offset = vulkan_instance_offset(canvas)
+    let instance_bytes = canvas.instance_count * memory.size_of(ShadeInstance)
+    let parameter_offset = (instance_offset + instance_bytes + 255) // 256 * 256
     var meshes: usize = 0
     for draw in canvas.draws[..<canvas.draw_count]:
         if draw.mesh != none: meshes += 1
@@ -73,6 +79,8 @@ func vulkan_upload(device: VulkanDevice*, canvas: Canvas) -> VulkanUpload!:
         memory.copy(masks, canvas.coverage, canvas.coverage_count)
     if canvas.vertex_count > 0:
         memory.copy(u8[]((u8*)destination + vertex_offset, vertex_bytes), u8[]((u8*)canvas.vertices.data, vertex_bytes), vertex_bytes)
+    if canvas.instance_count > 0:
+        memory.copy(u8[]((u8*)destination + instance_offset, instance_bytes), u8[]((u8*)canvas.instances.data, instance_bytes), instance_bytes)
     for index in 0..<canvas.draw_count:
         var uniforms = canvas.draws[index].geometry_uniforms
         memory.copy(u8[]((u8*)destination + parameter_offset + index * 256, 112), u8[]((u8*)&uniforms, 112), 112)
@@ -163,9 +171,10 @@ func vulkan_encode(device: VulkanDevice*, command: u64, formats: VulkanFormatSta
                                       renderArea = VkRect2D(extent = VkExtent2D(width = width, height = height)), clearValueCount = 2, pClearValues = &clears[0])
     vkCmdBeginRenderPass(command, &begin, VK_SUBPASS_CONTENTS_INLINE)
     if canvas.draw_count > 0:
-        var buffer = upload.buffer
-        var offset: u64 = (u64)vulkan_vertex_offset(canvas)
-        vkCmdBindVertexBuffers(command, 0, 1, &buffer, &offset)
+        # Binding 0: the vertices; binding 1: the instances of shade_instances.
+        var buffers: u64[2] = [upload.buffer, upload.buffer]
+        var offsets: u64[2] = [(u64)vulkan_vertex_offset(canvas), (u64)vulkan_instance_offset(canvas)]
+        vkCmdBindVertexBuffers(command, 0, 2, &buffers[0], &offsets[0])
         for index in 0..<canvas.draw_count:
             let draw = canvas.draws[index]
             if draw.clip.x >= width or draw.clip.y >= height:
@@ -193,7 +202,7 @@ func vulkan_encode(device: VulkanDevice*, command: u64, formats: VulkanFormatSta
                 continue
             var selected = formats.depth_test if draw.depth else formats.overlay
             if let custom = draw.pipeline:
-                selected = try vulkan_pipeline_for(device, (VulkanPipeline*)custom.native, formats.format)
+                selected = try vulkan_pipeline_for(device, (VulkanPipeline*)custom.native, formats.format, draw.instanced)
             if draw.geometry != none: selected = formats.geometry
             vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, selected)
             var descriptor = upload.descriptors[index]
@@ -204,7 +213,11 @@ func vulkan_encode(device: VulkanDevice*, command: u64, formats: VulkanFormatSta
             else:
                 var params = draw.params
                 vkCmdPushConstants(command, device.layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 48, &params)
-            vkCmdDraw(command, (u32)draw.count, 1, (u32)draw.first, 0)
+            if draw.instanced:
+                # Six vertices per rectangle, the draw's run of instances.
+                vkCmdDraw(command, 6, (u32)draw.count, 0, (u32)draw.first)
+            else:
+                vkCmdDraw(command, (u32)draw.count, 1, (u32)draw.first, 0)
     vkCmdEndRenderPass(command)
 
 func vulkan_drain(device: VulkanDevice*):

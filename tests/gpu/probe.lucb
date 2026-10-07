@@ -9,6 +9,7 @@ import textures
 import compute
 import targets
 import copies
+import instances
 import allocation
 import memory
 import native
@@ -215,6 +216,7 @@ pub func main(arguments: str[]) -> i32!:
         try compute.checks(device)
         try targets.pixels(device)
         try copies.pixels(device)
+        try instances.pixels(device)
         device.destroy()
         print("ok GPU device")
     elif arguments.length > 1 and arguments[1] == "gui":

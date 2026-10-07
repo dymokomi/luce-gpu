@@ -71,6 +71,9 @@ struct Draw:
     var geometry: GeometryState*?
     var geometry_uniforms: f32[28]
     var mesh: MeshDraw*?
+    # An instanced draw (shade_instances): `first..<first + count` of the
+    # canvas's instances rather than of its vertices.
+    var instanced: bool
 
 ## A reusable CPU command list, independent of any backend or window. triangles
 ## copies its input, so callers may reuse it immediately. A failed append leaves
@@ -85,6 +88,9 @@ pub struct Canvas:
     var coverage_count: usize
     var vertex_budget: usize
     var draw_budget: usize
+    # Instanced rectangles, their `rect` already in clip space.
+    var instances: ShadeInstance[]
+    var instance_count: usize
 
     ## Opt in to a larger bounded frame; this changes no allocation until append.
     ## The default UI budget and the draw-count limit remain unchanged.
@@ -115,6 +121,7 @@ pub struct Canvas:
         self.vertex_count = 0
         self.draw_count = 0
         self.coverage_count = 0
+        self.instance_count = 0
 
     func release_textures():
         for draw in self.draws[..<self.draw_count]:
@@ -212,6 +219,41 @@ pub struct Canvas:
         draw.filter = filter
         texture.references += 1
 
+    ## One instanced draw of `instances` (their rectangles already in clip space)
+    ## with a client pipeline, under `clip`: one draw against the draw limit.
+    ## The pipeline and images stay retained until the canvas is cleared.
+    func shade_instances(pipeline: PipelineState*, instances: const ShadeInstance[], uniforms: const u8[], images: TextureState*?[], filter: Filter, clip: Clip) -> !:
+        if uniforms.length > uniform_limit:
+            error(invalid_geometry, "a draw carries at most 128 uniform bytes")
+        if images.length > image_limit:
+            error(invalid_geometry, "a draw samples at most 4 images")
+        if instances.length == 0 or clip.width == 0 or clip.height == 0:
+            return
+        if instances.length > canvas_instance_limit - self.instance_count:
+            error(command_limit, "canvas exceeds 1048576 instances")
+        try self.reserve_draw()
+        let needed = self.instance_count + instances.length
+        if needed > self.instances.length:
+            let grown = try new ShadeInstance[canvas_max(needed, canvas_min(canvas_instance_limit, canvas_max(256, self.instances.length * 2)))] --- in memory.heap
+            if self.instance_count > 0:
+                memory.copy(grown, self.instances, self.instance_count)
+            if self.instances.length > 0:
+                free(self.instances) in memory.heap
+            self.instances = grown
+        memory.copy(self.instances[self.instance_count..], instances, instances.length)
+        var draw = Draw(first = self.instance_count, count = instances.length, clip = clip, instanced = true, filter = filter, pipeline = pipeline)
+        if uniforms.length > 0:
+            memory.copy(draw.uniforms[..<uniforms.length], uniforms, uniforms.length)
+        draw.uniform_count = (u32)uniforms.length
+        for index in 0..<images.length:
+            if let texture = images[index]:
+                draw.images[index] = texture
+                texture.references += 1
+        pipeline.references += 1
+        self.draws[self.draw_count] = draw
+        self.draw_count += 1
+        self.instance_count = needed
+
     ## Draw `rectangle` (backing pixels) with a client pipeline: `uniforms` go to
     ## the push-constant block, `images` to bindings 1.., `color` is the vertex
     ## color every fragment starts from. Pipeline and images stay retained
@@ -244,6 +286,8 @@ pub struct Canvas:
         self.release_textures()
         if self.coverage.length > 0:
             free(self.coverage) in memory.heap
+        if self.instances.length > 0:
+            free(self.instances) in memory.heap
         if self.vertices.length > 0:
             free(self.vertices) in memory.heap
         if self.draws.length > 0:
@@ -253,6 +297,8 @@ pub struct Canvas:
 ## The draws a canvas allows unless raised, and the most it can be raised to.
 let canvas_draw_default: usize = 4096
 let canvas_draw_ceiling: usize = 65536
+## The most instanced rectangles one canvas holds (64 MiB of them).
+let canvas_instance_limit: usize = 1048576
 
 # mark: Geometry helpers ======================================================================
 ## Two clip-space triangles covering `rectangle`, given in backing pixels of a
