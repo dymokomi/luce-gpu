@@ -399,10 +399,14 @@ func vulkan_memory(device: VulkanDevice*, requirements: VkMemoryRequirements, fl
 
 # mark: Image memory pages ====================================================================
 
-## Pages are 64 MiB, or 256 MiB when their heap holds more than 8 GiB.
+## Pages are 64 MiB, or 256 MiB in a discrete GPU's video memory of more than 8 GiB.
 func vulkan_page_size(device: VulkanDevice*, type_index: u32) -> u64:
     let heap = device.memory.memoryHeaps[(usize)device.memory.memoryTypes[(usize)type_index].heapIndex]
-    if heap.size > (8u64 << 30):
+    # An integrated GPU's (an APU's) large heap is the system's memory, which a
+    # big page would take from everything else for one small texture; a host
+    # heap (no VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) is too.
+    let video_memory = not device.integrated and (heap.flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0
+    if video_memory and heap.size > (8u64 << 30):
         return 256u64 << 20
     return 64u64 << 20
 
