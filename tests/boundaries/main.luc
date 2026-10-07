@@ -6,7 +6,7 @@ from luce_std import files, paths
 let failed = ErrorCode.package(1)
 
 pub func main(arguments: list[str]) -> int!:
-    let vulkan = "../../src/gpu/vulkan"
+    let vulkan = "src/gpu/vulkan"
     for module in ["device", "surface", "pipeline", "render"]:
         let text = files.read_text(paths.join(vulkan, f"{module}.lucb"))
         for native in ["GetModuleHandle", "CreateWin32Surface", "VK_KHR_win32_surface", "VkWin32Surface"]:

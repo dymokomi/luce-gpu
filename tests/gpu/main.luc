@@ -19,11 +19,13 @@ let failed = ErrorCode.package(1)
 class Checks:
     var base: str
     var work: str
+    var here: str
     var environment: list[str]
 
-    func init(self, base: str, work: str):
+    func init(self, base: str, work: str, here: str):
         self.base = base
         self.work = work
+        self.here = here
         self.environment = ["MTL_DEBUG_LAYER=1"]
 
     # Run `program`, failing unless it exits 0; its output, trimmed.
@@ -36,7 +38,7 @@ class Checks:
     # Build `source` (beside this program) with the extra `flags`; the output's path.
     func build(self, source: str, name: str, flags: list[str]) -> str!:
         let output = paths.join(self.work, name)
-        var words = ["build", source, "-o", output]
+        var words = ["build", paths.join(self.here, source), "-o", output]
         for flag in flags:
             words.append(flag)
         _ = self.run(self.base, words)
@@ -62,9 +64,10 @@ pub func main(arguments: list[str]) -> int!:
         error(failed, "LUCE_TEST_GPU must be required or optional")
     if window_policy != "required" and window_policy != "optional" and window_policy != "off":
         error(failed, "LUCE_TEST_WINDOW must be required, optional, or off")
-    let work = paths.join(paths.directory(paths.directory(process.current_directory())), "build/tests/gpu/work")
+    let work = paths.join(process.current_directory(), "build/tests/gpu/work")
+    let here = process.variable("LUC_TEST_DIR") else "tests/gpu"
     files.ensure_directory(work)
-    let checks = Checks(base, work)
+    let checks = Checks(base, work, here)
     if platform.macos:
         metal(checks, gpu_policy, window_policy)
     elif platform.linux:
@@ -115,7 +118,7 @@ func metal(checks: Checks, gpu_policy: str, window_policy: str) -> unit!:
         error(failed, f"probe device: {outcome}")
     let hardware = outcome == "ok GPU device"
     if gpu_policy == "required" and not hardware:
-        error(failed, "GPU tests require a Metal device")
+        error(failed, "GPU tests require a Metal device (LUCE_TEST_GPU=optional skips)")
     if hardware and has_desktop:
         checks.expect(probe, ["gui"], "ok GPU pixels, sRGB, resize, acquisition, ownership, and isolation")
     checks.links_none(probe, ["SDL"])
