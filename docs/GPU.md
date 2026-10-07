@@ -492,10 +492,19 @@ into four declarations, the arguments of `Kernel.create`:
 | `<stem>_comp_msl` | Metal Shading Language 3.0 from spirv-cross, entry `luce_compute`, push constants moved to buffer index 30 |
 | `<stem>_comp_group` | the workgroup size, read from the shader |
 | `<stem>_comp_bindings` | what each binding holds (`BindingKind`) |
+| `<stem>_comp_fast_math` | whether Metal may use fast math for it (`--fast-math STEM`) |
 
 On macOS the tool compiles each Metal translation with `xcrun metal`, so a
 kernel Metal would refuse fails here rather than at run time. Kernels that need
 newer SPIR-V (ray queries) take `--target-env vulkan1.2`.
+
+Kernels follow IEEE float rules on both backends: division by zero gives
+infinities, `min` and `max` order them, and `isnan`/`isinf` see NaNs and
+infinities. Vulkan drivers compile SPIR-V that way, while Metal compiles with
+fast math unless told otherwise, so luce-gpu turns it off for every kernel.
+`--fast-math STEM` lets Metal relax those rules for one kernel when speed
+matters more than inf/NaN behaviour; Vulkan ignores it. A ray-slab test that
+divides by a zero direction component needs the default.
 
 Two features keep shared GLSL manageable across many kernels:
 
@@ -526,7 +535,7 @@ try y.read(0, result)
 
 | Operation | Contract |
 | --- | --- |
-| `Kernel.create(device, words, msl, group, bindings)` | Builds the pipeline. `invalid_shader` when either form is rejected or the workgroup exceeds `limits()`. `group()` returns the size. |
+| `Kernel.create(device, words, msl, group, bindings, fast_math = false)` | Builds the pipeline. `invalid_shader` when either form is rejected or the workgroup exceeds `limits()`. `group()` returns the size. |
 | `Compute.begin(device)` | Starts recording. Commands are recorded portably and encoded at `submit`, so other work on the device (uploads, frames, reads) goes on meanwhile. |
 | `dispatch(kernel, bindings, uniforms, x, y = 1, z = 1)` | Runs `x * y * z` workgroups. Element `n` of `bindings` is binding `n`; bindings the kernel does not use may be left closed (`Binding()`). `uniforms` fill the push-constant block (at most 128 bytes, zero-padded). A zero count records nothing. |
 | `dispatch_indirect(kernel, bindings, uniforms, arguments, offset)` | Takes the three u32 workgroup counts from `arguments` at `offset`, as earlier commands left them (Vulkan's `vkCmdDispatchIndirect`, Metal's indirect threadgroups). |
@@ -626,6 +635,7 @@ need.
 `tests/gpu/compute.lucb` runs on Metal (the probe) and on Vulkan (`batching`,
 on Linux and Windows): saxpy, a twelve-dispatch reduction, compaction with
 atomics feeding an indirect dispatch, fills, copies, shared views, a 256 MiB
-buffer, kernels and buffers destroyed before their pass is submitted, storage
+buffer, kernels and buffers destroyed before their pass is submitted, IEEE
+infinities and NaNs (the same bits on every backend), storage
 images of each 32-bit format written, sampled, read and written in place, read
 back and drawn for display, and float atomics.

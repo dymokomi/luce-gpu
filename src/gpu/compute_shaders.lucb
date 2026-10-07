@@ -56,3 +56,4 @@ let fill_comp_words: u32[327] = [
 let fill_comp_msl: c.str = "#include <metal_stdlib>\n#include <simd/simd.h>\n\nusing namespace metal;\n\nstruct Fill\n{\n    uint first;\n    uint count;\n    uint value;\n};\n\nstruct Words\n{\n    uint words[1];\n};\n\nconstant uint3 gl_WorkGroupSize [[maybe_unused]] = uint3(64u, 1u, 1u);\n\nkernel void luce_compute(constant Fill& fill [[buffer(30)]], device Words& _32 [[buffer(0)]], uint3 gl_GlobalInvocationID [[thread_position_in_grid]])\n{\n    uint index = gl_GlobalInvocationID.x;\n    if (index < fill.count)\n    {\n        _32.words[fill.first + index] = fill.value;\n    }\n}\n\n"
 let fill_comp_group: u32[3] = [64, 1, 1]
 let fill_comp_bindings: u8[16] = [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+let fill_comp_fast_math: bool = false

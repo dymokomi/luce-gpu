@@ -38,15 +38,18 @@ func metal_limits(device: MetalDevice*) -> Limits:
                   group_size = [1024, 1024, 1024], group_count = [0xffffffffu32, 0xffffffffu32, 0xffffffffu32],
                   shared_bytes = (u32)metal_uint(native, metal_sel("maxThreadgroupMemoryLength")), float_atomic_add = float_atomics)
 
-func metal_kernel_create(device: MetalDevice*, msl: c.str, group: u32[3]) -> void*!:
+func metal_kernel_create(device: MetalDevice*, msl: c.str, group: u32[3], fast_math: bool) -> void*!:
     let pool = objc_autoreleasePoolPush()
     defer objc_autoreleasePoolPop(pool)
     let native = metal_required(device.device)
     # Kernels are MSL 3.0 (read-write textures, float atomics); without options
-    # Metal compiles source as an older language version.
+    # Metal compiles source as an older language version. Metal also defaults
+    # to fast math, which may drop infinities and NaNs; kernels keep IEEE
+    # rules, as on Vulkan, unless they ask for fast math.
     let options = metal_ptr(try metal_class("MTLCompileOptions"), metal_sel("new")) else error(failed, "could not create Metal compile options")
     defer metal_void(options, metal_sel("release"))
     metal_uint_arg(options, metal_sel("setLanguageVersion:"), metal_language_3_0)
+    metal_bool_arg(options, metal_sel("setFastMathEnabled:"), fast_math)
     var failure: void*? = none
     let library = metal_library(native, metal_sel("newLibraryWithSource:options:error:"), try metal_text(msl), options, &failure) else error(invalid_shader, "could not compile the kernel's Metal source")
     defer metal_void(library, metal_sel("release"))
@@ -81,7 +84,7 @@ func metal_fill_kernel(device: MetalDevice*) -> MetalKernel*!:
     let compute = metal_required_compute(device)
     if let fill = compute.fill:
         return fill
-    let fill = (MetalKernel*)try metal_kernel_create(device, fill_comp_msl, fill_comp_group)
+    let fill = (MetalKernel*)try metal_kernel_create(device, fill_comp_msl, fill_comp_group, fill_comp_fast_math)
     compute.fill = fill
     return fill
 

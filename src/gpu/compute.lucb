@@ -39,8 +39,10 @@ pub struct Kernel:
 
     ## Build a kernel from its SPIR-V words and Metal source (each backend
     ## uses its own form), its workgroup size and its binding kinds, as
-    ## embed_shaders.py emits them: `<stem>_comp_words`, `_msl`, `_group`, `_bindings`.
-    pub static func create(device: Device, spirv: const u32[], msl: c.str, group: const u32[], bindings: const u8[]) -> Kernel!:
+    ## embed_shaders.py emits them: `<stem>_comp_words`, `_msl`, `_group`,
+    ## `_bindings`, and `_fast_math`. Float math follows IEEE rules (infinities
+    ## and NaNs propagate) unless `fast_math` lets Metal relax them.
+    pub static func create(device: Device, spirv: const u32[], msl: c.str, group: const u32[], bindings: const u8[], fast_math: bool = false) -> Kernel!:
         let owner = try device.checked()
         if spirv.length < 5 or spirv[0] != 0x07230203:
             error(invalid_shader, "SPIR-V words must begin with the SPIR-V magic number")
@@ -60,7 +62,7 @@ pub struct Kernel:
                 error(unsupported, "acceleration structures are not supported yet")
             kinds[index] = bindings[index]
         var size: u32[3] = [group[0], group[1], group[2]]
-        let native = try backend_kernel_create(owner, spirv, msl, size, kinds)
+        let native = try backend_kernel_create(owner, spirv, msl, size, kinds, fast_math)
         errdefer owner.destroy_kernel(owner.native, native)
         let state = try new KernelState(device = owner, native = native, group = size, bindings = kinds) in memory.heap
         owner.references += 1
@@ -352,12 +354,12 @@ struct ComputeState:
 
 # mark: Dispatch ==============================================================================
 
-func backend_kernel_create(device: DeviceState*, spirv: const u32[], msl: c.str, group: u32[3], bindings: u8[16]) -> void*!:
+func backend_kernel_create(device: DeviceState*, spirv: const u32[], msl: c.str, group: u32[3], bindings: u8[16], fast_math: bool) -> void*!:
     if (platform.windows or platform.linux) and device.backend == Backend.vulkan:
         return (void*)try vulkan_kernel_create((VulkanDevice*)device.native, spirv, bindings)
     if platform.macos and platform.arm64:
         if device.backend == Backend.metal:
-            return try metal_kernel_create((MetalDevice*)device.native, msl, group)
+            return try metal_kernel_create((MetalDevice*)device.native, msl, group, fast_math)
     error(unsupported, "compute kernels are unavailable on this backend")
 
 func backend_kernel_destroyer(backend: Backend) -> func(void*, void*) -> unit:

@@ -1,0 +1,24 @@
+#version 450
+// IEEE float behaviour a ray-slab test relies on: division by zero gives
+// infinities, min and max order them, and NaN is detected. The inputs come
+// from a buffer so nothing folds at compile time.
+layout(local_size_x = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer In { float zero; float one; float low; float high; } v;
+layout(set = 0, binding = 1, std430) writeonly buffer Out { uint results[8]; } o;
+
+void main() {
+    float positive = v.one / v.zero;
+    float negative = -v.one / v.zero;
+    float nan = v.zero / v.zero;
+    // A slab along an axis the ray is parallel to: (low - 0) / 0 and (high - 0) / 0.
+    float near = min(v.low / v.zero, v.high / v.zero);
+    float far = max(v.low / v.zero, v.high / v.zero);
+    o.results[0] = floatBitsToUint(positive);
+    o.results[1] = floatBitsToUint(negative);
+    o.results[2] = isnan(nan) ? 1u : 0u;
+    o.results[3] = isinf(positive) ? 1u : 0u;
+    o.results[4] = (nan != nan) ? 1u : 0u;
+    o.results[5] = floatBitsToUint(near);
+    o.results[6] = floatBitsToUint(far);
+    o.results[7] = isnan(v.zero * positive) ? 1u : 0u;
+}

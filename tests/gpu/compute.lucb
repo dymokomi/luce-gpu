@@ -16,6 +16,7 @@ pub func checks(device: gpu.Device) -> !:
     try large(device, limits)
     try images(device)
     try float_atomics(device, limits)
+    try ieee(device)
     try refusals(device)
 
 func kernel(device: gpu.Device, words: const u32[], msl: c.str, group: const u32[], bindings: const u8[]) -> gpu.Kernel!:
@@ -352,6 +353,39 @@ func float_atomics(device: gpu.Device, limits: gpu.Limits) -> !:
     var result: u8[4]
     try total.read(0, result)
     assert(float_at(result, 0) == 2048.0)
+
+## Infinities and NaNs propagate as IEEE says, on Metal as on Vulkan; a fast
+## math kernel builds and runs (its results are not promised).
+func ieee(device: gpu.Device) -> !:
+    var exact = try gpu.Kernel.create(device, kernels.ieee_comp_words, kernels.ieee_comp_msl, kernels.ieee_comp_group, kernels.ieee_comp_bindings, kernels.ieee_comp_fast_math)
+    defer exact.destroy()
+    var fast = try gpu.Kernel.create(device, kernels.ieee_fast_comp_words, kernels.ieee_fast_comp_msl, kernels.ieee_fast_comp_group, kernels.ieee_fast_comp_bindings, kernels.ieee_fast_comp_fast_math)
+    defer fast.destroy()
+    var inputs: u8[16]
+    memory.write[f32]((void*)&inputs[0], 0.0)
+    memory.write[f32]((void*)&inputs[4], 1.0)
+    memory.write[f32]((void*)&inputs[8], -2.0)
+    memory.write[f32]((void*)&inputs[12], 3.0)
+    var values = try gpu.Buffer.create(device, inputs)
+    defer values.destroy()
+    var exact_out = try gpu.Buffer.allocate(device, 32)
+    defer exact_out.destroy()
+    var fast_out = try gpu.Buffer.allocate(device, 32)
+    defer fast_out.destroy()
+    var nothing: u8[]
+    var pass = try gpu.Compute.begin(device)
+    defer pass.close()
+    let exact_bindings: gpu.Binding[2] = [gpu.Binding(buffer = values), gpu.Binding(buffer = exact_out)]
+    try pass.dispatch(exact, exact_bindings, nothing, 1)
+    let fast_bindings: gpu.Binding[2] = [gpu.Binding(buffer = values), gpu.Binding(buffer = fast_out)]
+    try pass.dispatch(fast, fast_bindings, nothing, 1)
+    try pass.submit()
+    try pass.wait()
+    var results: u8[32]
+    try exact_out.read(0, results)
+    assert(word(results, 0) == 0x7f800000 and word(results, 1) == 0xff800000)
+    assert(word(results, 2) == 1 and word(results, 3) == 1 and word(results, 4) == 1)
+    assert(word(results, 5) == 0xff800000 and word(results, 6) == 0x7f800000 and word(results, 7) == 1)
 
 func close(value: i32, wanted: i32) -> bool:
     return value >= wanted - 1 and value <= wanted + 1
