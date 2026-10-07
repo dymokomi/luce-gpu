@@ -390,7 +390,11 @@ slot. `tests/readbench` times each phase on a device.
 `texture.frame()` begins a recording frame whose target is the texture (points
 equal texels). Its `present(color)` clears to `color` — alpha included — draws
 and returns `submitted` without waiting; the pass is ordered before every later
-submission, so the texture can be read or sampled at once. A texture destroyed
+submission, so the texture can be read or sampled at once. `texture.frame(keep = true)`
+draws over the texture's contents instead (its `present` color is unused): a frame adds
+to what earlier frames, uploads and copies left, as a tile that changed in one place is
+updated (Metal's load action `load`; on Vulkan a render pass that loads the attachment,
+compatible with the clearing one). A texture destroyed
 while submitted work still uses it is released when that work completes.
 `device.memory_pages()` counts the pooled memory pages textures are carved from
 (Vulkan; zero on Metal), a diagnostic for tests and memory reports. A frame

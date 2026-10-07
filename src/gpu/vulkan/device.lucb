@@ -17,6 +17,8 @@ struct VulkanFormatState:
     var format: u32
     var pass_present: u64
     var pass_texture: u64
+    # The texture pass that draws over the attachment's contents (Texture.frame(keep)).
+    var pass_load: u64
     var overlay: u64
     var depth_test: u64
     var geometry: u64

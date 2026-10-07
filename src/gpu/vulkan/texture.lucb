@@ -96,6 +96,7 @@ func vulkan_drawing_destroy(device: VulkanDevice*):
             if pipeline != 0: vkDestroyPipeline(device.device, pipeline, none)
         if state.pass_present != 0: vkDestroyRenderPass(device.device, state.pass_present, none)
         if state.pass_texture != 0: vkDestroyRenderPass(device.device, state.pass_texture, none)
+        if state.pass_load != 0: vkDestroyRenderPass(device.device, state.pass_load, none)
     device.format_count = 0
     if device.nearest != 0: vkDestroySampler(device.device, device.nearest, none)
     if device.linear != 0: vkDestroySampler(device.device, device.linear, none)
@@ -297,10 +298,10 @@ func vulkan_texture_upload(device: VulkanDevice*, state: VulkanTexture*, pixels:
 func vulkan_framebuffer_release(device: VulkanDevice*, framebuffer: u64):
     if framebuffer != 0: vkDestroyFramebuffer(device.device, framebuffer, none)
 
-## Render `canvas` into the image cleared to `color` and submit it without
-## waiting. The pass leaves the image ready for sampling; its framebuffer and
-## uploads are freed when the submission completes.
-func vulkan_texture_render(device: VulkanDevice*, state: VulkanTexture*, canvas: Canvas, color: Color) -> !:
+## Render `canvas` into the image cleared to `color` (over its contents when
+## `keep`) and submit it without waiting. The pass leaves the image ready for
+## sampling; its framebuffer and uploads are freed when the submission completes.
+func vulkan_texture_render(device: VulkanDevice*, state: VulkanTexture*, canvas: Canvas, color: Color, keep: bool) -> !:
     let formats = try vulkan_format_state(device, state.native_format)
     let depth = try vulkan_depth_for(device, state.width, state.height)
     var attachments: u64[2] = [state.view, depth]
@@ -313,9 +314,15 @@ func vulkan_texture_render(device: VulkanDevice*, state: VulkanTexture*, canvas:
     defer vulkan_upload_destroy(device, upload)
     let slot = try vulkan_begin(device)
     let serial = device.submitted + 1
-    # The pass begins from an undefined layout and clears; only the bookkeeping moves.
-    state.layout = VK_IMAGE_LAYOUT_UNDEFINED
-    try vulkan_encode(device, slot.command, formats, formats.pass_texture, framebuffer, canvas, upload, color, state.width, state.height, serial)
+    var pass = formats.pass_texture
+    if keep:
+        # The loading pass starts from the attachment layout, made ready outside it.
+        vulkan_transition(slot.command, state, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
+        pass = formats.pass_load
+    else:
+        # The pass begins from an undefined layout and clears; only the bookkeeping moves.
+        state.layout = VK_IMAGE_LAYOUT_UNDEFINED
+    try vulkan_encode(device, slot.command, formats, pass, framebuffer, canvas, upload, color, state.width, state.height, serial)
     state.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
     try vulkan_retire(slot, VulkanRetired(kind = vulkan_retired_framebuffer, handle = framebuffer))
     framebuffer = 0

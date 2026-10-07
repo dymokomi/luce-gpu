@@ -63,10 +63,14 @@ pub struct Texture:
         return (try self.checked()).storage
 
     ## Begin one recording frame whose target is this texture; its points equal
-    ## texels. The 32-bit formats are not rendered into (`invalid_geometry`). `present` clears the texture to the given color and draws, ordered
+    ## texels. The 32-bit formats are not rendered into (`invalid_geometry`).
+    ## `present` clears the texture to the given color and draws, ordered
     ## before every later submission, so the result can be read or sampled
-    ## immediately after without waiting for the GPU: only `read` waits.
-    pub func frame() -> interop.Reference[Frame]!:
+    ## immediately after without waiting for the GPU: only `read` waits. With
+    ## `keep`, `present` draws over the texture's contents instead of clearing
+    ## them (its color is then unused): a frame adds to what earlier frames,
+    ## uploads and copies left.
+    pub func frame(keep: bool = false) -> interop.Reference[Frame]!:
         let state = try self.checked()
         if not renderable(state.format):
             error(invalid_geometry, "32-bit textures are written by compute kernels, not rendered into")
@@ -86,6 +90,7 @@ pub struct Texture:
         recording.release = release_texture_frame
         state.references += 1
         state.active_frame = true
+        state.keep = keep
         return owner
 
     ## Release this handle on the main thread; recorded draws and open frames keep
@@ -114,6 +119,8 @@ struct TextureState:
     var references: usize = 1
     var closed: bool
     var active_frame: bool
+    # Whether the active frame draws over the contents rather than clearing.
+    var keep: bool
 
     func check_region(region: Region?, bytes: usize) -> Region!:
         let area = region else Region(0, 0, self.width, self.height)
@@ -158,7 +165,7 @@ func submit_texture_frame(context: void*, canvas: Canvas, color: Color) -> Prese
             if let texture = image:
                 if texture == state:
                     error(invalid_geometry, "a texture frame cannot sample the texture it renders into")
-    try backend_texture_render(state.device, state.native, canvas, color)
+    try backend_texture_render(state.device, state.native, canvas, color, state.keep)
     return PresentResult.submitted
 
 func release_texture_frame(context: void*):

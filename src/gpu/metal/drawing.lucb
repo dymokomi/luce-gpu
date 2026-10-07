@@ -213,13 +213,15 @@ func metal_drawing_destroy(state: MetalDrawing*):
     free(state) in memory.heap
 
 ## Record `canvas` into `target` (a color texture of `slot`'s format) cleared to
-## `color`, on a new command buffer that the caller commits.
-func metal_pass(device: MetalDevice*, target: void*, slot: usize, canvas: Canvas, color: Color, width: u64, height: u64) -> void*!:
+## `color`, or over its contents when `keep`, on a new command buffer that the
+## caller commits.
+func metal_pass(device: MetalDevice*, target: void*, slot: usize, canvas: Canvas, color: Color, width: u64, height: u64, keep: bool = false) -> void*!:
     let descriptor = metal_ptr(try metal_class("MTLRenderPassDescriptor"), metal_sel("renderPassDescriptor")) else error(failed, "could not create a Metal render pass")
     let attachments = metal_required(metal_ptr(descriptor, metal_sel("colorAttachments")))
     let attachment = metal_required(metal_index(attachments, metal_sel("objectAtIndexedSubscript:"), 0))
     metal_object(attachment, metal_sel("setTexture:"), target)
-    metal_uint_arg(attachment, metal_sel("setLoadAction:"), 2)
+    # MTLLoadActionLoad (1) keeps the contents, MTLLoadActionClear (2) clears.
+    metal_uint_arg(attachment, metal_sel("setLoadAction:"), 1 if keep else 2)
     metal_uint_arg(attachment, metal_sel("setStoreAction:"), 1)
     metal_color_arg(attachment, metal_sel("setClearColor:"), LuceGpuMetalClearColor(red = color.red * color.alpha, green = color.green * color.alpha, blue = color.blue * color.alpha, alpha = color.alpha))
     var masks: void*? = none

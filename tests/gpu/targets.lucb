@@ -34,6 +34,58 @@ pub func pixels(device: gpu.Device) -> !:
     let mask_root = try mask.value().target()
     defer mask_root.release()
     assert((try mask_root.value().pixel_format()) == gpu.Format.r8)
+    try kept(device)
+
+## Frames begun with `keep` draw over the texture's contents: what a cleared
+## frame left, and what an upload wrote.
+func kept(device: gpu.Device) -> !:
+    var texture = try gpu.Texture.create(device, 8, 8, gpu.Format.rgba8_linear)
+    defer texture.destroy()
+    try fill(&texture, gpu.Color(1.0, 0.0, 0.0, 1.0), false, 0.0, 0.0)
+    # The left half turns green; the right keeps the red the first frame cleared to.
+    try fill(&texture, gpu.Color(0.0, 0.0, 1.0, 1.0), true, 0.0, 1.0)
+    var texels: u8[256]
+    try texture.read(texels)
+    for y in 0..<(usize)8:
+        for x in 0..<(usize)8:
+            let at = (y * 8 + x) * 4
+            if x < 4:
+                assert(texels[at] == 0 and texels[at + 1] == 255 and texels[at + 2] == 0 and texels[at + 3] == 255)
+            else:
+                assert(texels[at] == 255 and texels[at + 1] == 0 and texels[at + 2] == 0 and texels[at + 3] == 255)
+    # Over an upload, twice in a row: blue left half, uploaded grey right half.
+    var grey: u8[256]
+    for index in 0..<(usize)256:
+        grey[index] = 100
+    try texture.upload(grey)
+    try fill(&texture, gpu.Color(), true, 0.0, 0.0, 1.0)
+    try fill(&texture, gpu.Color(), true, 0.0, 0.0, 1.0)
+    try texture.read(texels)
+    assert(texels[0] == 0 and texels[2] == 255 and texels[28] == 100 and texels[31] == 100)
+    # Without keep the clear color returns.
+    try fill(&texture, gpu.Color(0.0, 0.0, 0.0, 0.0), false, 0.0, 0.0)
+    try texture.read(texels)
+    assert(texels[0] == 0 and texels[3] == 0 and texels[28] == 0 and texels[31] == 0)
+
+## One frame of `texture`, cleared to `color` unless `keep`, with the left half
+## drawn opaque (`green`, `blue`) when either is nonzero.
+func fill(texture: gpu.Texture*, color: gpu.Color, keep: bool, red: f32, green: f32, blue: f32 = 0.0) -> !:
+    let frame = try texture.frame(keep)
+    defer frame.release()
+    if green > 0.0 or blue > 0.0:
+        let root = try frame.value().target()
+        defer root.release()
+        let half = try root.value().region(gpu.Rect(width = 4.0, height = 8.0))
+        defer half.release()
+        let a = gpu.Vertex(x = -1.0, y = 1.0, red = red, green = green, blue = blue)
+        var b = a
+        b.x = 1.0
+        var c = b
+        c.y = -1.0
+        var d = a
+        d.y = -1.0
+        try half.value().triangles([a, b, c, a, c, d])
+    assert((try frame.value().present(color)) == gpu.PresentResult.submitted)
 
 ## Two clip-space triangles covering the pixel at (`x`, `y`) of a `side`-pixel
 ## square target, in a straight linear color.

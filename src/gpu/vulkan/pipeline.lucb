@@ -32,6 +32,7 @@ func vulkan_format_state(device: VulkanDevice*, pixel_format: u32) -> VulkanForm
     errdefer vulkan_format_state_destroy(device, state)
     state.pass_present = try vulkan_render_pass(device, pixel_format, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR)
     state.pass_texture = try vulkan_render_pass(device, pixel_format, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+    state.pass_load = try vulkan_render_pass(device, pixel_format, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, true)
     try vulkan_pipelines(device, state)
     device.format_count += 1
     return state
@@ -44,12 +45,18 @@ func vulkan_format_state_destroy(device: VulkanDevice*, state: VulkanFormatState
         if pipeline != 0: vkDestroyPipeline(device.device, pipeline, none)
     if state.pass_present != 0: vkDestroyRenderPass(device.device, state.pass_present, none)
     if state.pass_texture != 0: vkDestroyRenderPass(device.device, state.pass_texture, none)
+    if state.pass_load != 0: vkDestroyRenderPass(device.device, state.pass_load, none)
     *state = VulkanFormatState()
 
-func vulkan_render_pass(device: VulkanDevice*, pixel_format: u32, final_layout: u32) -> u64!:
+## A render pass into color attachments of `format` ending in `final_layout`:
+## cleared, or with `load` drawing over what the attachment holds (which then
+## starts in the attachment layout). Passes of one format differ only in these,
+## so they are compatible: one pipeline and one framebuffer serve them all.
+func vulkan_render_pass(device: VulkanDevice*, pixel_format: u32, final_layout: u32, load: bool = false) -> u64!:
     var attachments: VkAttachmentDescription[2] = [
-        VkAttachmentDescription(format = pixel_format, samples = VK_SAMPLE_COUNT_1_BIT, loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR, storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-                                stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE, stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE, finalLayout = final_layout),
+        VkAttachmentDescription(format = pixel_format, samples = VK_SAMPLE_COUNT_1_BIT, loadOp = VK_ATTACHMENT_LOAD_OP_LOAD if load else VK_ATTACHMENT_LOAD_OP_CLEAR,
+                                storeOp = VK_ATTACHMENT_STORE_OP_STORE, stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE, stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+                                initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL if load else VK_IMAGE_LAYOUT_UNDEFINED, finalLayout = final_layout),
         VkAttachmentDescription(format = VK_FORMAT_D32_SFLOAT, samples = VK_SAMPLE_COUNT_1_BIT, loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR, storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
                                 stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE, stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE, finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)]
     var color_attachment = VkAttachmentReference(attachment = 0, layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
@@ -66,7 +73,7 @@ func vulkan_render_pass(device: VulkanDevice*, pixel_format: u32, final_layout: 
         VkSubpassDependency(srcSubpass = VK_SUBPASS_EXTERNAL, dstSubpass = 0, srcStageMask = outside, dstStageMask = graphics,
                             srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT |
                                             VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-                            dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT),
+                            dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT),
         VkSubpassDependency(srcSubpass = 0, dstSubpass = VK_SUBPASS_EXTERNAL, srcStageMask = graphics, dstStageMask = outside,
                             srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
                             dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT)]
