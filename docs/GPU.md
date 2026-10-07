@@ -401,6 +401,18 @@ while submitted work still uses it is released when that work completes.
 cannot sample the texture it renders into (`invalid_geometry`), and a texture
 sampled by a frame must belong to the frame's device (`wrong_device`).
 
+`copy_texture(source, region, target, x, y)` copies texels between two textures of
+one device and one format exactly as stored, with `region`'s top left landing at
+(`x`, `y`). It is a blit on the queue, like `upload`: outside any frame, ordered after
+every earlier submission and before every later one, without waiting (Metal's blit
+encoder `copyFromTexture`, Vulkan's `vkCmdCopyImage`). Scrolling by a few pixels can
+move the previous frame's texture into another this way and draw only the strip it
+uncovers, and an atlas can be compacted without a round trip through the CPU. A copy
+within one texture is refused (`invalid_geometry`), as are different formats
+(`invalid_pixels`) and textures of two devices (`wrong_device`). Do not confuse it with
+`copy_image` below, which is a draw: it puts a texture into a frame's target, scaled
+and filtered, among the frame's other draws.
+
 `draw_image(target, texture, rectangle, source?, opacity, filter)` draws a texel
 region scaled onto a rectangle of a `RenderTarget`, clipped like every other
 draw, with `nearest` or `linear` sampling. Its texels are straight alpha and

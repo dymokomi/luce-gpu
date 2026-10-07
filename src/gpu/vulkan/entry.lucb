@@ -98,6 +98,8 @@ struct VulkanFunctions:
     var vkCmdPipelineBarrier: (func(u64, u32, u32, u32, u32, void*?, u32, void*?, u32, VkImageMemoryBarrier*?) -> unit)?
     var vkCmdCopyBufferToImage: (func(u64, u64, u64, u32, u32, VkBufferImageCopy*?) -> unit)?
     var vkCmdCopyImageToBuffer: (func(u64, u64, u32, u64, u32, VkBufferImageCopy*?) -> unit)?
+    var vkCmdCopyImage: (func(u64, u64, u32, u64, u32, u32, VkImageCopy*?) -> unit)?
+    var vkCmdBlitImage: (func(u64, u64, u32, u64, u32, u32, VkImageBlit*?, u32) -> unit)?
     var vkCmdCopyBuffer: (func(u64, u64, u64, u32, VkBufferCopy*?) -> unit)?
     var vkCreateXlibSurfaceKHR: (func(u64, VkXlibSurfaceCreateInfoKHR*?, void*?, u64*?) -> i32)?
     var vkEnumerateInstanceVersion: (func(u32*?) -> i32)?
@@ -279,6 +281,10 @@ func vulkan_load() -> !:
         table.vkCmdCopyBufferToImage = (func(u64, u64, u64, u32, u32, VkBufferImageCopy*?) -> unit)found
     if let found = vulkan_symbol(library, "vkCmdCopyImageToBuffer"):
         table.vkCmdCopyImageToBuffer = (func(u64, u64, u32, u64, u32, VkBufferImageCopy*?) -> unit)found
+    if let found = vulkan_symbol(library, "vkCmdCopyImage"):
+        table.vkCmdCopyImage = (func(u64, u64, u32, u64, u32, u32, VkImageCopy*?) -> unit)found
+    if let found = vulkan_symbol(library, "vkCmdBlitImage"):
+        table.vkCmdBlitImage = (func(u64, u64, u32, u64, u32, u32, VkImageBlit*?, u32) -> unit)found
     if let found = vulkan_symbol(library, "vkCmdCopyBuffer"):
         table.vkCmdCopyBuffer = (func(u64, u64, u64, u32, VkBufferCopy*?) -> unit)found
     if let found = vulkan_symbol(library, "vkCreateXlibSurfaceKHR"):
@@ -642,6 +648,14 @@ func vkCmdCopyBufferToImage(commandBuffer: u64, srcBuffer: u64, dstImage: u64, d
 func vkCmdCopyImageToBuffer(commandBuffer: u64, srcImage: u64, srcImageLayout: u32, dstBuffer: u64, regionCount: u32, pRegions: VkBufferImageCopy*?):
     let call = vulkan_entry().vkCmdCopyImageToBuffer else trap("the Vulkan loader lacks vkCmdCopyImageToBuffer")
     call(commandBuffer, srcImage, srcImageLayout, dstBuffer, regionCount, pRegions)
+
+func vkCmdCopyImage(commandBuffer: u64, srcImage: u64, srcImageLayout: u32, dstImage: u64, dstImageLayout: u32, regionCount: u32, pRegions: VkImageCopy*?):
+    let call = vulkan_entry().vkCmdCopyImage else trap("the Vulkan loader lacks vkCmdCopyImage")
+    call(commandBuffer, srcImage, srcImageLayout, dstImage, dstImageLayout, regionCount, pRegions)
+
+func vkCmdBlitImage(commandBuffer: u64, srcImage: u64, srcImageLayout: u32, dstImage: u64, dstImageLayout: u32, regionCount: u32, pRegions: VkImageBlit*?, filter: u32):
+    let call = vulkan_entry().vkCmdBlitImage else trap("the Vulkan loader lacks vkCmdBlitImage")
+    call(commandBuffer, srcImage, srcImageLayout, dstImage, dstImageLayout, regionCount, pRegions, filter)
 
 func vkCmdCopyBuffer(commandBuffer: u64, srcBuffer: u64, dstBuffer: u64, regionCount: u32, pRegions: VkBufferCopy*?):
     let call = vulkan_entry().vkCmdCopyBuffer else trap("the Vulkan loader lacks vkCmdCopyBuffer")

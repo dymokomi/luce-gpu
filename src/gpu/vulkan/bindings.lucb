@@ -400,6 +400,19 @@ extern struct VkGraphicsPipelineCreateInfo:
 
 let VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO: u32 = 28
 
+extern struct VkImageBlit:
+    srcSubresource: VkImageSubresourceLayers
+    srcOffsets: VkOffset3D[2]
+    dstSubresource: VkImageSubresourceLayers
+    dstOffsets: VkOffset3D[2]
+
+extern struct VkImageCopy:
+    srcSubresource: VkImageSubresourceLayers
+    srcOffset: VkOffset3D
+    dstSubresource: VkImageSubresourceLayers
+    dstOffset: VkOffset3D
+    extent: VkExtent3D
+
 extern struct VkImageCreateInfo:
     sType: u32
     pNext: void*?
@@ -1199,6 +1212,8 @@ let VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR: u32 = 1000004000
 # func vkCmdCopyBufferToImage(commandBuffer: u64, srcBuffer: u64, dstImage: u64, dstImageLayout: u32, regionCount: u32, pRegions: VkBufferImageCopy*?)
 # func vkCmdCopyImageToBuffer(commandBuffer: u64, srcImage: u64, srcImageLayout: u32, dstBuffer: u64, regionCount: u32, pRegions: VkBufferImageCopy*?)
 # func vkCmdCopyBuffer(commandBuffer: u64, srcBuffer: u64, dstBuffer: u64, regionCount: u32, pRegions: VkBufferCopy*?)
+# func vkCmdCopyImage(commandBuffer: u64, srcImage: u64, srcImageLayout: u32, dstImage: u64, dstImageLayout: u32, regionCount: u32, pRegions: VkImageCopy*?)
+# func vkCmdBlitImage(commandBuffer: u64, srcImage: u64, srcImageLayout: u32, dstImage: u64, dstImageLayout: u32, regionCount: u32, pRegions: VkImageBlit*?, filter: u32)
 # func vkCreateXlibSurfaceKHR(instance: u64, pCreateInfo: VkXlibSurfaceCreateInfoKHR*?, pAllocator: void*?, pSurface: u64*?) -> i32
 # func vkEnumerateInstanceVersion(pApiVersion: u32*?) -> i32
 # func vkGetPhysicalDeviceProperties2(physicalDevice: u64, pProperties: VkPhysicalDeviceProperties2*?)

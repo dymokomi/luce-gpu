@@ -294,6 +294,23 @@ func vulkan_texture_upload(device: VulkanDevice*, state: VulkanTexture*, pixels:
     staging = VulkanStaging()
     state.last_use = try vulkan_end(device, slot)
 
+## Copy `region` of `source` to (`x`, `y`) of `target` and submit without
+## waiting; both images are ready for sampling again after it.
+func vulkan_texture_copy(device: VulkanDevice*, source: VulkanTexture*, region: Region, target: VulkanTexture*, x: u32, y: u32) -> !:
+    let slot = try vulkan_begin(device)
+    vulkan_transition(slot.command, source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL)
+    vulkan_transition(slot.command, target, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
+    let layers = VkImageSubresourceLayers(aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, layerCount = 1)
+    var copy = VkImageCopy(srcSubresource = layers, srcOffset = VkOffset3D(x = (i32)region.x, y = (i32)region.y, z = 0),
+                           dstSubresource = layers, dstOffset = VkOffset3D(x = (i32)x, y = (i32)y, z = 0),
+                           extent = VkExtent3D(width = region.width, height = region.height, depth = 1))
+    vkCmdCopyImage(slot.command, source.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, target.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy)
+    vulkan_transition(slot.command, source, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+    vulkan_transition(slot.command, target, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+    let serial = try vulkan_end(device, slot)
+    source.last_use = serial
+    target.last_use = serial
+
 ## Destroy a framebuffer this call still owns; zero once it has been retired.
 func vulkan_framebuffer_release(device: VulkanDevice*, framebuffer: u64):
     if framebuffer != 0: vkDestroyFramebuffer(device.device, framebuffer, none)

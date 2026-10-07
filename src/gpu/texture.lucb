@@ -130,6 +130,32 @@ struct TextureState:
             error(invalid_pixels, "pixel data must be tightly packed for the region and the texture's format")
         return area
 
+# mark: Copies between textures ==============================================================
+## Copy `region` of `source` into `target` with its top left at (`x`, `y`): a
+## blit on the device's queue, like `upload`, outside any frame, of texels
+## exactly as stored. Ordered after every earlier submission and before every
+## later one, without waiting. Both textures belong to one device
+## (`wrong_device`), share a format (`invalid_pixels`), and are two textures
+## (`invalid_geometry`); both rectangles lie inside their textures. Only the
+## first mip level is written: call `generate_mipmaps` after.
+##
+## This is not `copy_image`, which draws a texture into a frame's target,
+## scaled and filtered, as one of the frame's draws.
+pub func copy_texture(source: Texture, region: Region, target: Texture, x: u32, y: u32) -> !:
+    let copied = try source.checked()
+    let written = try target.checked()
+    if copied.device != written.device:
+        error(wrong_device, "copied textures must belong to one GPU device")
+    if copied.format != written.format:
+        error(invalid_pixels, "copied textures must share a format")
+    if copied == written:
+        error(invalid_geometry, "copy_texture copies between two textures")
+    if region.width == 0 or region.height == 0 or region.width > copied.width or region.height > copied.height or region.x > copied.width - region.width or region.y > copied.height - region.height:
+        error(invalid_geometry, "a copied region must lie inside its source texture and be non-empty")
+    if region.width > written.width or region.height > written.height or x > written.width - region.width or y > written.height - region.height:
+        error(invalid_geometry, "a copied region must land inside its target texture")
+    try backend_texture_copy(copied.device, copied.native, region, written.native, x, y)
+
 func release_texture(state: TextureState*):
     state.references -= 1
     if state.references == 0:

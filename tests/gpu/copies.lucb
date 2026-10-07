@@ -1,0 +1,65 @@
+from luce_gpu import gpu
+
+## copy_texture: texels exactly as stored, queue-ordered with uploads, frames
+## and reads, and refused between formats, devices' textures or one texture.
+pub func pixels(device: gpu.Device) -> !:
+    var source = try gpu.Texture.create(device, 8, 8, gpu.Format.rgba8)
+    defer source.destroy()
+    var target = try gpu.Texture.create(device, 8, 8, gpu.Format.rgba8)
+    defer target.destroy()
+    var pattern: u8[256]
+    for index in 0..<(usize)64:
+        pattern[index * 4] = (u8)index
+        pattern[index * 4 + 1] = (u8)(255 - index)
+        pattern[index * 4 + 2] = 7
+        pattern[index * 4 + 3] = (u8)(index * 4)
+    try source.upload(pattern)
+    var zero: u8[256]
+    try target.upload(zero)
+    # A 3x2 block from (1, 2) lands at (4, 5); nothing else changes.
+    try gpu.copy_texture(source, gpu.Region(1, 2, 3, 2), target, 4, 5)
+    var texels: u8[256]
+    try target.read(texels)
+    for y in 0..<(usize)8:
+        for x in 0..<(usize)8:
+            let at = (y * 8 + x) * 4
+            if x >= 4 and x < 7 and y >= 5 and y < 7:
+                let at_source = ((y - 3) * 8 + (x - 3)) * 4
+                for channel in 0..<(usize)4:
+                    assert(texels[at + channel] == pattern[at_source + channel])
+            else:
+                assert(texels[at] == 0 and texels[at + 3] == 0)
+
+    # Ordered after a frame that drew the source and before a frame sampling the target.
+    let frame = try source.frame()
+    assert((try frame.value().present(gpu.Color(0.0, 1.0, 0.0, 1.0))) == gpu.PresentResult.submitted)
+    frame.release()
+    try gpu.copy_texture(source, gpu.Region(0, 0, 8, 8), target, 0, 0)
+    var shown = try gpu.Texture.create(device, 8, 8, gpu.Format.rgba8_linear)
+    defer shown.destroy()
+    let view = try shown.frame()
+    let root = try view.value().target()
+    try gpu.draw_image(root.value(), target, gpu.Rect(width = 8.0, height = 8.0), filter = gpu.Filter.nearest)
+    root.release()
+    assert((try view.value().present(gpu.Color(0.0, 0.0, 0.0, 0.0))) == gpu.PresentResult.submitted)
+    view.release()
+    try shown.read(texels)
+    assert(texels[0] == 0 and texels[1] == 255 and texels[3] == 255 and texels[252] == 0 and texels[253] == 255)
+
+    # Refusals: another format, one texture, regions outside either texture.
+    var other = try gpu.Texture.create(device, 8, 8, gpu.Format.rgba8_linear)
+    defer other.destroy()
+    assert(refused(source, gpu.Region(0, 0, 2, 2), other, 0, 0) == gpu.invalid_pixels)
+    assert(refused(source, gpu.Region(0, 0, 2, 2), source, 4, 4) == gpu.invalid_geometry)
+    assert(refused(source, gpu.Region(7, 0, 2, 2), target, 0, 0) == gpu.invalid_geometry)
+    assert(refused(source, gpu.Region(0, 0, 0, 2), target, 0, 0) == gpu.invalid_geometry)
+    assert(refused(source, gpu.Region(0, 0, 4, 4), target, 5, 0) == gpu.invalid_geometry)
+    var closed = try gpu.Texture.create(device, 8, 8, gpu.Format.rgba8)
+    closed.destroy()
+    assert(refused(source, gpu.Region(0, 0, 2, 2), closed, 0, 0) == gpu.closed)
+
+## The error copy_texture returns for these arguments.
+func refused(source: gpu.Texture, region: gpu.Region, target: gpu.Texture, x: u32, y: u32) -> ErrorCode:
+    gpu.copy_texture(source, region, target, x, y) catch failure:
+        return failure.code
+    trap("copy_texture accepted a copy it should refuse")

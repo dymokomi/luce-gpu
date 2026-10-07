@@ -37,6 +37,16 @@ func backend_texture_render(device: DeviceState*, native: void*, canvas: Canvas,
             return
     error(unsupported, "the GPU backend is not implemented")
 
+func backend_texture_copy(device: DeviceState*, source: void*, region: Region, target: void*, x: u32, y: u32) -> !:
+    if (platform.windows or platform.linux) and device.backend == Backend.vulkan:
+        try vulkan_texture_copy((VulkanDevice*)device.native, (VulkanTexture*)source, region, (VulkanTexture*)target, x, y)
+        return
+    if platform.macos and platform.arm64:
+        if device.backend == Backend.metal:
+            try metal_texture_copy((MetalDevice*)device.native, (MetalTexture*)source, region, (MetalTexture*)target, x, y)
+            return
+    error(unsupported, "the GPU backend is not implemented")
+
 func backend_texture_destroy(device: DeviceState*, native: void*):
     device.destroy_texture((void*)device.native, native)
 
