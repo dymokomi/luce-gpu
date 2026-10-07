@@ -191,78 +191,14 @@ func metal_compute_submit(device: MetalDevice*, commands: const ComputeCommand[]
         stamped = new MetalStamps(commands = kept) in memory.heap catch failure:
             metal_release_buffers(kept, stamps)
             error(failure.code, failure.message)
-    device.serial += 1
-    metal_submission_record(device, device.serial, buffers, count)
+    let serial = metal_record_all(device, buffers, count)
     var native: void*? = none
     if let kept = stamped: native = (void*)kept
-    return ComputeSubmitted(serial = device.serial, native = native)
-
-# mark: Submissions ===========================================================================
-
-## A recent submission: its serial and its retained command buffers, in order.
-struct MetalSubmission:
-    var serial: u64
-    var commands: void*[]
-    var count: usize
+    return ComputeSubmitted(serial = serial, native = native)
 
 ## A pass's timestamps: the retained command buffers each stamp ends.
 struct MetalStamps:
     var commands: void*[]
-
-func metal_release_buffers(buffers: void*[], count: usize):
-    for index in 0..<count:
-        metal_void(buffers[index], metal_sel("release"))
-    free(buffers) in memory.heap
-
-## Keep a submission's command buffers in its ring slot. The submission the
-## slot held is waited for first, so one that left the ring has finished.
-func metal_submission_record(device: MetalDevice*, serial: u64, buffers: void*[], count: usize):
-    let slot = &device.submissions[(usize)(serial % (u64)timed_submissions)]
-    metal_submission_clear(slot)
-    *slot = MetalSubmission(serial = serial, commands = buffers, count = count)
-
-func metal_submission_clear(slot: MetalSubmission*):
-    if slot.count == 0: return
-    for index in 0..<slot.count:
-        metal_void(slot.commands[index], metal_sel("waitUntilCompleted"))
-    metal_release_buffers(slot.commands, slot.count)
-    *slot = MetalSubmission()
-
-func metal_submissions_destroy(device: MetalDevice*):
-    for index in 0..<timed_submissions:
-        metal_submission_clear(&device.submissions[index])
-
-## The ring slot holding `serial`, or none once it left the ring (finished).
-func metal_submission_slot(device: MetalDevice*, serial: u64) -> MetalSubmission*?:
-    if serial == 0: return none
-    let slot = &device.submissions[(usize)(serial % (u64)timed_submissions)]
-    return slot if slot.serial == serial and slot.count > 0 else none
-
-func metal_submission_done(device: MetalDevice*, serial: u64) -> bool:
-    let slot = metal_submission_slot(device, serial) else return true
-    for index in 0..<slot.count:
-        # MTLCommandBufferStatusCompleted (4) or Error (5).
-        if metal_uint(slot.commands[index], metal_sel("status")) < 4: return false
-    return true
-
-func metal_submission_wait(device: MetalDevice*, serial: u64) -> !:
-    let slot = metal_submission_slot(device, serial) else return
-    var failed_any = false
-    for index in 0..<slot.count:
-        metal_void(slot.commands[index], metal_sel("waitUntilCompleted"))
-        if metal_uint(slot.commands[index], metal_sel("status")) != 4: failed_any = true
-    if failed_any:
-        error(execution_failed, "the GPU failed while running submitted work")
-
-## The first command buffer's GPU start and the last one's end, from the
-## host-time seconds Metal reports.
-func metal_submission_time(device: MetalDevice*, serial: u64) -> GpuTime?:
-    let slot = metal_submission_slot(device, serial) else return none
-    return GpuTime(start = metal_nanoseconds(metal_double(slot.commands[0], metal_sel("GPUStartTime"))),
-                   end = metal_nanoseconds(metal_double(slot.commands[slot.count - 1], metal_sel("GPUEndTime"))))
-
-func metal_nanoseconds(seconds: f64) -> u64:
-    return (u64)(seconds * 1000000000.0) if seconds > 0.0 else 0
 
 func metal_compute_stamps(native: void*?, out: u64[]) -> !:
     let stamps = (MetalStamps*)(native else error(invalid_geometry, "the pass recorded no timestamps"))

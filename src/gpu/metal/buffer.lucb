@@ -34,7 +34,7 @@ func metal_buffer_allocate(device: MetalDevice*, bytes: usize, memory_kind: Memo
     let blit = metal_ptr(command, metal_sel("blitCommandEncoder")) else error(failed, "could not create a Metal blit encoder")
     metal_fill_buffer(blit, metal_sel("fillBuffer:range:value:"), buffer, LuceGpuMetalRange(0, (u64)bytes), 0)
     metal_void(blit, metal_sel("endEncoding"))
-    metal_submit(command)
+    metal_submit(device, command)
     return buffer
 
 ## A shared buffer's mapping.
@@ -52,7 +52,7 @@ func metal_buffer_upload(device: MetalDevice*, native: void*, offset: usize, dat
     let blit = metal_ptr(command, metal_sel("blitCommandEncoder")) else error(failed, "could not create a Metal blit encoder")
     metal_copy_buffer(blit, metal_sel("copyFromBuffer:sourceOffset:toBuffer:destinationOffset:size:"), staging, 0, native, (u64)offset, (u64)data.length)
     metal_void(blit, metal_sel("endEncoding"))
-    metal_submit(command)
+    metal_submit(device, command)
 
 func metal_buffer_release(device: void*, native: void*):
     _ = device

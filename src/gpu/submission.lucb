@@ -6,8 +6,9 @@
 #       Work reaches a device's one queue as numbered submissions. A Submission is that number:
 #       a plain value, not a resource, so it can be kept, copied and compared freely. The device
 #       answers whether it has finished, waits for it, and, for the most recent submissions,
-#       reports when the GPU started and finished it. Compute passes hand out their submission
-#       now; frames will too.
+#       reports when the GPU started and finished it. Every submission luce-gpu makes is
+#       numbered and timed: frames on surfaces and textures, uploads, copies, reads and compute
+#       passes. Frames and compute passes hand out theirs.
 #
 #==============================================================================================
 
@@ -29,6 +30,15 @@ pub struct GpuTime:
 
 ## How many recent submissions keep their GPU times.
 pub let timed_submissions: usize = 32
+
+## The device's newest submission: a frame's, right after its present.
+func backend_latest_submission(device: DeviceState*) -> Submission:
+    if (platform.windows or platform.linux) and device.backend == Backend.vulkan:
+        return Submission(serial = ((VulkanDevice*)device.native).submitted)
+    if platform.macos and platform.arm64:
+        if device.backend == Backend.metal:
+            return Submission(serial = ((MetalDevice*)device.native).serial)
+    return Submission()
 
 func backend_submission_done(device: DeviceState*, submission: Submission) -> bool:
     if (platform.windows or platform.linux) and device.backend == Backend.vulkan:

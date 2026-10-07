@@ -76,6 +76,7 @@ let frame_state_type: interop.Type[FrameState] = interop.Type[FrameState]("GPU f
 pub struct Frame:
     var state: interop.Reference[FrameState]?
     var lease: interop.Lease?
+    var submitted: Submission
 
     ## Begin a standalone frame recording commands for `size`.
     pub func init(size: window.Size) -> !:
@@ -88,6 +89,7 @@ pub struct Frame:
         let lease = try state.lease()
         self.state = state
         self.lease = lease
+        self.submitted = Submission()
 
     func state_value() -> interop.Reference[FrameState]!:
         return self.state else error(frame_finished, "the recording frame is finished")
@@ -118,7 +120,16 @@ pub struct Frame:
         let submit = state.submit else trap("frame presentation has no submit operation")
         (self.lease else trap("an open frame has no lease")).invalidate()
         state.ended = true
-        return try submit(context, state.canvas, color)
+        let result = try submit(context, state.canvas, color)
+        if result == PresentResult.submitted:
+            if let device = state.device: self.submitted = backend_latest_submission(device)
+        return result
+
+    ## The frame's submission on its device's queue once `present` submitted
+    ## it, for `Device.done`, `wait` and `gpu_time`; none (zero) for a skipped
+    ## or standalone frame.
+    pub func submission() -> Submission:
+        return self.submitted
 
     ## End the recording scope, releasing its resources.
     pub func close():

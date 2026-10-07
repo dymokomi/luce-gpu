@@ -768,7 +768,9 @@ copy source or destination, indirect arguments, or mesh data.
 
 ### Completion and GPU time
 
-Every submission on a device's queue has a serial. A `Submission` holds one:
+Every submission luce-gpu makes on a device's queue has a serial: frames on
+surfaces and textures (keep frames too), uploads, `copy_texture`, reads and
+compute passes. A `Submission` holds one:
 a plain value you can keep and compare, like a CUDA event or a Vulkan
 timeline-semaphore value. `device.done(submission)` polls it,
 `device.wait(submission)` blocks until it finishes (reporting
@@ -798,7 +800,24 @@ let span = (try device.gpu_time(try pass.submission())) else return
 # span.start ≤ stamps[0] ≤ stamps[1] ≤ span.end
 ```
 
-Compute passes hand out submissions now; frames will as well.
+Frames hand out theirs: after `present` returns `submitted`,
+`frame.value().submission()` is the frame's submission (zero for a skipped or
+standalone frame). A benchmark measuring how long the GPU spends on each frame
+waits for it and reads its time:
+
+```luce
+_ = try frame.value().present(background)
+let submission = frame.value().submission()
+...
+try device.wait(submission)          # or poll device.done(submission)
+if let time = try device.gpu_time(submission):
+    record(time.elapsed())           # GPU nanoseconds for this frame
+```
+
+On Vulkan a surface frame already waits for the queue before `present`
+returns, so its submission is finished at once. On Metal it runs while the
+next frame records. Metal keeps a submission's command buffers only while they
+run, so drawables go back to their layer as before.
 
 ### Long-running work
 

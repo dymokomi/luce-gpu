@@ -263,18 +263,23 @@ func vulkan_render(device: VulkanDevice*, host: window.Presentation, state: Vulk
     errdefer vulkan_poison(state)
     # A failure after queue submission still waits before releasing upload memory.
     errdefer vulkan_drain(device)
+    # The frame takes the next serial and fence of the device's ring, and is
+    # timed like every submission.
+    let slot = try vulkan_reserve(device)
     var begin = VkCommandBufferBeginInfo(sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT)
     try vulkan_check(vkBeginCommandBuffer(state.command, &begin), "Vulkan command recording could not begin")
+    vulkan_time_start(device, state.command)
     # Presentation waits for the queue below, so the images it samples need no serial.
     try vulkan_encode(device, state.command, formats, formats.pass_present, state.images[(usize)index].framebuffer, canvas, upload,
                       Color(color.red, color.green, color.blue, 1.0), state.width, state.height, 0, state.encoded)
+    vulkan_time_end(device, state.command)
     try vulkan_check(vkEndCommandBuffer(state.command), "Vulkan command recording could not finish")
     var wait_stage: u32 = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
     var signal = state.images[(usize)index].presented
     var submit = VkSubmitInfo(sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, waitSemaphoreCount = 1, pWaitSemaphores = &state.acquired,
                               pWaitDstStageMask = &wait_stage, commandBufferCount = 1, pCommandBuffers = &state.command,
                               signalSemaphoreCount = 1, pSignalSemaphores = &signal)
-    try vulkan_check(vkQueueSubmit(device.queue, 1, &submit, 0), "Vulkan command submission failed")
+    _ = try vulkan_submit_reserved(device, slot, &submit)
     var present = VkPresentInfoKHR(sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, waitSemaphoreCount = 1, pWaitSemaphores = &signal,
                                    swapchainCount = 1, pSwapchains = &state.swapchain, pImageIndices = &index)
     let result = vkQueuePresentKHR(device.queue, &present)

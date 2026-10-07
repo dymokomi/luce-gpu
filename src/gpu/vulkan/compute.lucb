@@ -185,9 +185,9 @@ func vulkan_compute_barrier(command: u64, source: u32, target: u32):
 
 let vulkan_compute_stages: u32 = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT
 
-## Record `commands` into one submission and submit it without waiting. Its
-## start and end are timed in the device's timing queries; a pass with
-## timestamps gets a query pool of its own, which it keeps for reading them.
+## Record `commands` into one submission and submit it without waiting. Like
+## every submission its start and end are timed (vulkan_begin, vulkan_end); a
+## pass with timestamps gets a query pool of its own, kept for reading them.
 func vulkan_compute_submit(device: VulkanDevice*, commands: const ComputeCommand[], stamps: usize, addressed: BufferState*[]) -> ComputeSubmitted!:
     try vulkan_drawing(device)
     var dispatches: u32 = 0
@@ -197,16 +197,9 @@ func vulkan_compute_submit(device: VulkanDevice*, commands: const ComputeCommand
     if stamps > 0:
         stamped = try vulkan_query_pool(device, (u32)stamps)
     errdefer vulkan_query_pool_drop(device, stamped)
-    let timed = device.timestamp_bits > 0
-    if timed and device.timing == 0:
-        device.timing = try vulkan_query_pool(device, (u32)(vulkan_slot_limit * 2))
     let slot = try vulkan_begin(device)
-    let first_query = (u32)((device.submitted + 1) % (u64)vulkan_slot_limit) * 2
     var pool: u64 = 0
     errdefer vulkan_compute_abandon(device, slot, pool)
-    if timed:
-        vkCmdResetQueryPool(slot.command, device.timing, first_query, 2)
-        vkCmdWriteTimestamp(slot.command, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, device.timing, first_query)
     if stamped != 0:
         vkCmdResetQueryPool(slot.command, stamped, 0, (u32)stamps)
     if dispatches > 0:
@@ -242,13 +235,10 @@ func vulkan_compute_submit(device: VulkanDevice*, commands: const ComputeCommand
             if let texture = bound: vulkan_transition(slot.command, (VulkanTexture*)texture.native, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
     # The results, to whatever is submitted next: frames, reads, other passes.
     vulkan_compute_barrier(slot.command, vulkan_compute_stages, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT)
-    if timed:
-        vkCmdWriteTimestamp(slot.command, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, device.timing, first_query + 1)
     if pool != 0:
         try vulkan_retire(slot, VulkanRetired(kind = vulkan_retired_descriptors, handle = pool))
         pool = 0
     let serial = try vulkan_end(device, slot)
-    if timed: device.timing_serial[(usize)(serial % (u64)vulkan_slot_limit)] = serial
     for recorded in commands:
         if let kernel = recorded.kernel: ((VulkanKernel*)kernel.native).last_use = serial
         for bound in recorded.buffers:

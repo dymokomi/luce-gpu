@@ -88,6 +88,7 @@ func metal_render(device: MetalDevice*, host: window.Presentation, state: MetalS
     # Our +1 keeps status queryable after this call's autorelease pool is drained.
     state.pending = metal_ptr(command, metal_sel("retain"))
     metal_void(command, metal_sel("commit"))
+    metal_record(device, command)
     return PresentResult.submitted
 
 func metal_surface_destroy(state: MetalSurface*, host: window.Presentation):

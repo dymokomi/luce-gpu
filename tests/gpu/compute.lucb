@@ -1,5 +1,6 @@
 import c
 from luce_gpu import gpu
+from luce_window import window
 import memory
 import kernels
 
@@ -19,6 +20,7 @@ pub func checks(device: gpu.Device) -> !:
     try ieee(device)
     try subgroups(device, limits)
     try timing(device, limits)
+    try frame_timing(device, limits)
     try addresses(device, limits)
     try tables(device, limits)
     try refusals(device)
@@ -472,6 +474,41 @@ func timing(device: gpu.Device, limits: gpu.Limits) -> !:
     assert(try device.done(submission))
     assert((try device.gpu_time(submission)) == none)
     assert((try device.gpu_time(newest)) != none)
+
+## Texture frames (plain and keep) hand out their submissions, in queue
+## order with a texture copy between them; waiting on the last finishes all,
+## and each has a GPU time, started in order.
+func frame_timing(device: gpu.Device, limits: gpu.Limits) -> !:
+    var texture = try gpu.Texture.create(device, 16, 16, gpu.Format.rgba8_linear)
+    defer texture.destroy()
+    var other = try gpu.Texture.create(device, 16, 16, gpu.Format.rgba8_linear)
+    defer other.destroy()
+    let first = try texture.frame()
+    defer first.release()
+    assert(first.value().submission().serial == 0)
+    assert((try first.value().present(gpu.Color(1.0, 0.0, 0.0, 1.0))) == gpu.PresentResult.submitted)
+    let painted = first.value().submission()
+    try gpu.copy_texture(texture, gpu.Region(0, 0, 16, 16), other, 0, 0)
+    let kept = try texture.frame(true)
+    defer kept.release()
+    assert((try kept.value().present(gpu.Color(0.0, 0.0, 0.0, 0.0))) == gpu.PresentResult.submitted)
+    let drawn = kept.value().submission()
+    # The copy took a serial of its own between the two frames.
+    assert(painted.serial > 0 and drawn.serial > painted.serial + 1)
+    try device.wait(drawn)
+    assert((try device.done(painted)) and (try device.done(drawn)))
+    if not limits.timestamps:
+        return
+    let painted_time = (try device.gpu_time(painted)) else error(gpu.failed, "a finished frame has no GPU time")
+    let drawn_time = (try device.gpu_time(drawn)) else error(gpu.failed, "a finished frame has no GPU time")
+    assert(painted_time.start <= painted_time.end and drawn_time.start <= drawn_time.end and painted_time.start <= drawn_time.start)
+    # A standalone frame submits nothing.
+    var standalone = try gpu.Frame(window.Size(width = 4.0, height = 4.0, pixel_width = 4.0, pixel_height = 4.0, scale = 1.0))
+    defer standalone.close()
+    _ = standalone.present() catch failure:
+        assert(failure.code == gpu.unavailable)
+        recover gpu.PresentResult.skipped
+    assert(standalone.submission().serial == 0)
 
 ## Buffers reached by GPU address: a table of addresses picks each value's
 ## source, and the push constants carry the results' address. The sources are

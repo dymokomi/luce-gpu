@@ -104,6 +104,13 @@ pub func pixels() -> !:
     native.begin("Scoped GPU frames")
     assert((try frame.value().present(gpu.Color(green = 1.0))) == gpu.PresentResult.submitted)
     assert(not target.is_valid() and not child.is_valid())
+    # A presented frame hands out its submission; a skipped one has none.
+    let shown = frame.value().submission()
+    assert(shown.serial > 0 and hidden.value().submission().serial == 0)
+    try device.wait(shown)
+    if (try device.limits()).timestamps:
+        let shown_time = (try device.gpu_time(shown)) else error(gpu.failed, "a presented frame has no GPU time")
+        assert(shown_time.end >= shown_time.start)
     try surface.wait_idle()
     native.pixel(0, 0, 0, 255, 0)
     native.pixel((u64)(size.pixel_width * 0.5), (u64)(size.pixel_height * 0.5), 255, 0, 0)

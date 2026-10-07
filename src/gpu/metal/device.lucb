@@ -15,7 +15,7 @@ struct MetalDevice:
     var reads: MetalRingSlot[3]
     # Compute state; see metal/compute.lucb.
     var compute: MetalCompute*?
-    # The newest submission's serial, and the ring of recent ones (metal/compute.lucb).
+    # The newest submission's serial, and the ring of recent ones (metal/submission.lucb).
     var serial: u64
     var submissions: MetalSubmission[32]
 

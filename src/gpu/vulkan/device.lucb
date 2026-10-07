@@ -507,6 +507,9 @@ func vulkan_slots_create(device: VulkanDevice*) -> !:
         var fence_info = VkFenceCreateInfo(sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO)
         try vulkan_check(vkCreateFence(device.device, &fence_info, none, &slot.fence), "a Vulkan fence could not be created")
         slot.retired = try new VulkanRetired[8] --- in memory.heap
+    # Two timestamp queries per slot time every submission (vulkan/compute.lucb).
+    if device.timestamp_bits > 0 and device.timing == 0:
+        device.timing = try vulkan_query_pool(device, (u32)(vulkan_slot_limit * 2))
 
 ## Wait for the device, free everything held, and destroy the ring.
 func vulkan_slots_destroy(device: VulkanDevice*):
@@ -604,16 +607,46 @@ func vulkan_idle(device: VulkanDevice*):
 
 ## Begin recording the next submission. When the ring is full this waits for the
 ## oldest submission; the serial the recording will get is `device.submitted + 1`.
+## The recording starts with the submission's start time.
 func vulkan_begin(device: VulkanDevice*) -> VulkanSlot*!:
+    let slot = try vulkan_reserve(device)
+    try vulkan_check(vkResetCommandPool(device.device, slot.pool, 0), "a Vulkan command pool could not be reset")
+    var begin = VkCommandBufferBeginInfo(sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT)
+    try vulkan_check(vkBeginCommandBuffer(slot.command, &begin), "Vulkan recording could not begin")
+    vulkan_time_start(device, slot.command)
+    return slot
+
+## The ring slot the next submission takes, once free: a submission recorded
+## in a command buffer of its own (a surface's) still takes its serial and
+## fence from the ring.
+func vulkan_reserve(device: VulkanDevice*) -> VulkanSlot*!:
     vulkan_poll(device)
     let serial = device.submitted + 1
     if serial > (u64)vulkan_slot_limit:
         try vulkan_wait(device, serial - (u64)vulkan_slot_limit)
-    let slot = &device.slots[(usize)(serial % (u64)vulkan_slot_limit)]
-    try vulkan_check(vkResetCommandPool(device.device, slot.pool, 0), "a Vulkan command pool could not be reset")
-    var begin = VkCommandBufferBeginInfo(sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT)
-    try vulkan_check(vkBeginCommandBuffer(slot.command, &begin), "Vulkan recording could not begin")
-    return slot
+    return &device.slots[(usize)(serial % (u64)vulkan_slot_limit)]
+
+## Record the next submission's start time into `command`.
+func vulkan_time_start(device: VulkanDevice*, command: u64):
+    if device.timing == 0: return
+    let first = (u32)((device.submitted + 1) % (u64)vulkan_slot_limit) * 2
+    vkCmdResetQueryPool(command, device.timing, first, 2)
+    vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, device.timing, first)
+
+## Record the next submission's end time into `command`, after all its work.
+func vulkan_time_end(device: VulkanDevice*, command: u64):
+    if device.timing == 0: return
+    let first = (u32)((device.submitted + 1) % (u64)vulkan_slot_limit) * 2
+    vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, device.timing, first + 1)
+
+## Submit `submit` with `slot`'s fence as the next serial, and return it.
+func vulkan_submit_reserved(device: VulkanDevice*, slot: VulkanSlot*, submit: VkSubmitInfo*) -> u64!:
+    try vulkan_check(vkResetFences(device.device, 1, &slot.fence), "a Vulkan fence could not be reset")
+    try vulkan_check(vkQueueSubmit(device.queue, 1, submit, slot.fence), "Vulkan submission failed")
+    device.submitted += 1
+    slot.serial = device.submitted
+    if device.timing != 0: device.timing_serial[(usize)(device.submitted % (u64)vulkan_slot_limit)] = device.submitted
+    return device.submitted
 
 ## After a failed submission: drain the device and free what the slot held.
 func vulkan_abandon(device: VulkanDevice*, slot: VulkanSlot*):
@@ -626,10 +659,7 @@ func vulkan_abandon(device: VulkanDevice*, slot: VulkanSlot*):
 ## fails, the device is drained and what the slot held is freed.
 func vulkan_end(device: VulkanDevice*, slot: VulkanSlot*) -> u64!:
     errdefer vulkan_abandon(device, slot)
+    vulkan_time_end(device, slot.command)
     try vulkan_check(vkEndCommandBuffer(slot.command), "Vulkan recording could not finish")
-    try vulkan_check(vkResetFences(device.device, 1, &slot.fence), "a Vulkan fence could not be reset")
     var submit = VkSubmitInfo(sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, commandBufferCount = 1, pCommandBuffers = &slot.command)
-    try vulkan_check(vkQueueSubmit(device.queue, 1, &submit, slot.fence), "Vulkan submission failed")
-    device.submitted += 1
-    slot.serial = device.submitted
-    return device.submitted
+    return try vulkan_submit_reserved(device, slot, &submit)

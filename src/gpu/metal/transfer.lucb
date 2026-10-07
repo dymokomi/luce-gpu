@@ -65,6 +65,7 @@ func metal_read_submit(device: MetalDevice*, index: usize, entries: const ReadEn
     # Kept past the pool: the wait needs it.
     metal_void(command, metal_sel("retain"))
     metal_void(command, metal_sel("commit"))
+    metal_record(device, command)
     return Ticket(command = command)
 
 ## Wait for a batch's command buffer and let it go, reporting execution failure.
@@ -114,4 +115,4 @@ func metal_upload_submit(device: MetalDevice*, entries: const UploadEntry[], sta
                               staging, (u64)entry.offset, row, row * (u64)entry.region.height, LuceGpuMetalExtent((u64)entry.region.width, (u64)entry.region.height, 1),
                               metal_required(texture.texture), 0, 0, LuceGpuMetalOrigin((u64)entry.region.x, (u64)entry.region.y, 0))
     metal_void(blit, metal_sel("endEncoding"))
-    metal_submit(command)
+    metal_submit(device, command)
