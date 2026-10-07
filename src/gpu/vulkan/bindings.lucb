@@ -99,15 +99,19 @@ let VK_NOT_READY: i32 = 1
 let VK_PIPELINE_BIND_POINT_COMPUTE: u32 = 1
 let VK_PIPELINE_BIND_POINT_GRAPHICS: u32 = 0
 let VK_PIPELINE_STAGE_ALL_COMMANDS_BIT: u32 = 65536
+let VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT: u32 = 8192
 let VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT: u32 = 1024
 let VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT: u32 = 2048
 let VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT: u32 = 2
 let VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT: u32 = 256
 let VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT: u32 = 128
 let VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT: u32 = 512
+let VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT: u32 = 1
 let VK_PIPELINE_STAGE_TRANSFER_BIT: u32 = 4096
 let VK_PRESENT_MODE_FIFO_KHR: u32 = 2
 let VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST: u32 = 3
+let VK_QUERY_RESULT_64_BIT: u32 = 1
+let VK_QUERY_TYPE_TIMESTAMP: u32 = 2
 let VK_QUEUE_FAMILY_IGNORED: u32 = 4294967295
 let VK_QUEUE_GRAPHICS_BIT: u32 = 1
 let VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE: u32 = 2
@@ -915,6 +919,16 @@ extern struct VkPushConstantRange:
     offset: u32
     size: u32
 
+extern struct VkQueryPoolCreateInfo:
+    sType: u32
+    pNext: void*?
+    flags: u32
+    queryType: u32
+    queryCount: u32
+    pipelineStatistics: u32
+
+let VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO: u32 = 11
+
 extern struct VkQueueFamilyProperties:
     queueFlags: u32
     queueCount: u32
@@ -1223,3 +1237,8 @@ let VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR: u32 = 1000004000
 # func vkCmdDispatch(commandBuffer: u64, groupCountX: u32, groupCountY: u32, groupCountZ: u32)
 # func vkCmdDispatchIndirect(commandBuffer: u64, buffer: u64, offset: u64)
 # func vkCmdFillBuffer(commandBuffer: u64, dstBuffer: u64, dstOffset: u64, size: u64, data: u32)
+# func vkCreateQueryPool(device: u64, pCreateInfo: VkQueryPoolCreateInfo*?, pAllocator: void*?, pQueryPool: u64*?) -> i32
+# func vkDestroyQueryPool(device: u64, queryPool: u64, pAllocator: void*?)
+# func vkCmdResetQueryPool(commandBuffer: u64, queryPool: u64, firstQuery: u32, queryCount: u32)
+# func vkCmdWriteTimestamp(commandBuffer: u64, pipelineStage: u32, queryPool: u64, query: u32)
+# func vkGetQueryPoolResults(device: u64, queryPool: u64, firstQuery: u32, queryCount: u32, dataSize: usize, pData: void*?, stride: u64, flags: u32) -> i32

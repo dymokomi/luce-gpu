@@ -54,6 +54,7 @@ let vulkan_retired_framebuffer: u8 = 2
 let vulkan_retired_descriptors: u8 = 3
 let vulkan_retired_image: u8 = 4
 let vulkan_retired_kernel: u8 = 5
+let vulkan_retired_queries: u8 = 6
 
 ## A handle released once the submission holding it has completed. A kernel
 ## keeps its pipeline in `handle`, its pipeline layout in `view` and its
@@ -87,6 +88,13 @@ struct VulkanDevice:
     # The Vulkan version in use: the lowest of the loader's, the device's and 1.2.
     var version: u32
     var limits: Limits
+    # GPU times (vulkan/compute.lucb): the queue's valid timestamp bits, the
+    # nanoseconds per tick, and two queries per ring slot with the serial
+    # whose times they hold.
+    var timestamp_bits: u32
+    var timestamp_period: f32
+    var timing: u64
+    var timing_serial: u64[32]
     var queue: u64
     var family: u32
     var memory: VkPhysicalDeviceMemoryProperties
@@ -197,6 +205,7 @@ func vulkan_device_open() -> VulkanDevice*!:
                 continue
             state.physical = physical
             state.version = version
+            state.timestamp_bits = properties[family].timestampValidBits
             state.limits = vulkan_device_limits(state, float_atomic_add)
             state.integrated = vulkan_device_rank(physical) == 1
             state.family = (u32)family
@@ -273,6 +282,7 @@ func vulkan_device_destroy(state: VulkanDevice*):
     if state.device != 0:
         _ = vkDeviceWaitIdle(state.device)
         vulkan_drawing_destroy(state)
+        if state.timing != 0: vkDestroyQueryPool(state.device, state.timing, none)
         # Textures still open when the device goes release their pages with it.
         while let page = state.pages:
             vulkan_page_destroy(state, page)
@@ -498,6 +508,8 @@ func vulkan_retired_free(device: VulkanDevice*, item: VulkanRetired):
     elif item.kind == vulkan_retired_image:
         if item.view != 0: vkDestroyImageView(device.device, item.view, none)
         if item.handle != 0: vkDestroyImage(device.device, item.handle, none)
+    elif item.kind == vulkan_retired_queries:
+        vkDestroyQueryPool(device.device, item.handle, none)
     elif item.kind == vulkan_retired_kernel:
         if item.handle != 0: vkDestroyPipeline(device.device, item.handle, none)
         if item.view != 0: vkDestroyPipelineLayout(device.device, item.view, none)

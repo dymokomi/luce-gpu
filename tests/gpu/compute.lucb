@@ -18,6 +18,7 @@ pub func checks(device: gpu.Device) -> !:
     try float_atomics(device, limits)
     try ieee(device)
     try subgroups(device, limits)
+    try timing(device, limits)
     try refusals(device)
 
 func kernel(device: gpu.Device, words: const u32[], msl: c.str, group: const u32[], bindings: const u8[]) -> gpu.Kernel!:
@@ -412,6 +413,63 @@ func subgroups(device: gpu.Device, limits: gpu.Limits) -> !:
     for index in 0..<count:
         assert(word(results, index * 4) == limits.subgroup_size and word(results, index * 4 + 1) == limits.subgroup_size)
         assert(word(results, index * 4 + 2) == limits.subgroup_size and word(results, index * 4 + 3) == 1)
+
+## A pass's submission completes through the device, its GPU time spans its
+## timestamps in order, and only recent submissions keep a time.
+func timing(device: gpu.Device, limits: gpu.Limits) -> !:
+    assert(try device.done(gpu.Submission()))
+    try device.wait(gpu.Submission())
+    if not limits.timestamps:
+        print("skip GPU timing: the device keeps no timestamps")
+        return
+    var program = try kernel(device, kernels.reduce_comp_words, kernels.reduce_comp_msl, kernels.reduce_comp_group, kernels.reduce_comp_bindings)
+    defer program.destroy()
+    var data = try gpu.Buffer.allocate(device, 1 << 20)
+    defer data.destroy()
+    let bindings: gpu.Binding[1] = [gpu.Binding(buffer = data)]
+    var uniforms: u8[4]
+    memory.write[u32]((void*)&uniforms[0], 1 << 17)
+    var pass = try gpu.Compute.begin(device)
+    defer pass.close()
+    try pass.dispatch(program, bindings, uniforms, 2048)
+    assert((try pass.timestamp()) == 0)
+    try pass.dispatch(program, bindings, uniforms, 2048)
+    assert((try pass.timestamp()) == 1)
+    try pass.fill(data, 0, 1 << 20, 7)
+    try pass.submit()
+    let submission = try pass.submission()
+    assert(submission.serial > 0)
+    var stamps: u64[2]
+    var refused = false
+    pass.timestamps(stamps) catch failure:
+        assert(failure.code == gpu.invalid_geometry)
+        refused = true
+    assert(refused or (try pass.done()))
+    try device.wait(submission)
+    assert(try device.done(submission))
+    try pass.wait()
+    try pass.timestamps(stamps)
+    let span = (try device.gpu_time(submission)) else error(gpu.failed, "a finished pass has no GPU time")
+    assert(span.start <= stamps[0] and stamps[0] <= stamps[1] and stamps[1] <= span.end and span.elapsed() == span.end - span.start)
+    var wrong: u64[1]
+    refused = false
+    pass.timestamps(wrong) catch failure:
+        assert(failure.code == gpu.invalid_geometry)
+        refused = true
+    assert(refused)
+    # More submissions than the ring keeps: the oldest has finished and has
+    # no time any more; the newest has one.
+    var newest = gpu.Submission()
+    for round in 0..<gpu.timed_submissions + 1:
+        var next = try gpu.Compute.begin(device)
+        try next.fill(data, 0, 4, (u32)round)
+        try next.submit()
+        newest = try next.submission()
+        next.close()
+    try device.wait(newest)
+    assert(try device.done(submission))
+    assert((try device.gpu_time(submission)) == none)
+    assert((try device.gpu_time(newest)) != none)
 
 func close(value: i32, wanted: i32) -> bool:
     return value >= wanted - 1 and value <= wanted + 1

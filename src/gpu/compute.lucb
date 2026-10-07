@@ -118,6 +118,10 @@ let command_dispatch: u8 = 0
 let command_indirect: u8 = 1
 let command_copy: u8 = 2
 let command_fill: u8 = 3
+let command_timestamp: u8 = 4
+
+## The most timestamps one pass records.
+pub let timestamp_limit: usize = 64
 
 ## One recorded command, with the references it holds until it is encoded.
 ## Every command is preceded by a barrier against all earlier ones; a command
@@ -218,17 +222,40 @@ pub struct Compute:
         target.references += 1
         try state.append(&command)
 
+    ## Record a timestamp: the GPU time at which every command recorded before
+    ## it has finished, read with `timestamps` once the pass has. Its index,
+    ## counting from zero; at most `timestamp_limit` per pass, where the device
+    ## has `limits().timestamps`. On Metal each one also ends a command buffer,
+    ## which costs a few microseconds.
+    pub func timestamp() -> usize!:
+        let state = try self.recording()
+        if not state.device.limits.timestamps:
+            error(unsupported, "the device keeps no GPU timestamps")
+        if state.stamps == timestamp_limit:
+            error(command_limit, "a compute pass records at most 64 timestamps")
+        var command = ComputeCommand(kind = command_timestamp, value = (u32)state.stamps)
+        try state.append(&command)
+        state.stamps += 1
+        return state.stamps - 1
+
     ## Submit the recorded commands as one submission, without waiting. Work
     ## submitted later, frames and reads included, sees their results.
     pub func submit() -> !:
         let state = try self.recording()
         defer state.release_commands()
-        state.ticket = backend_compute_submit(state.device, state.commands[..<state.count]) catch failure:
+        let submitted = backend_compute_submit(state.device, state.commands[..<state.count], state.stamps) catch failure:
             # Nothing reached the queue: the pass is over and reports the failure.
             state.phase = 2
             state.failed = true
             error(failure.code, failure.message)
+        state.submission = Submission(serial = submitted.serial)
+        state.native = submitted.native
         state.phase = 1
+
+    ## The pass's submission on the device's queue, once submitted: for
+    ## `Device.done`, `Device.wait` and `Device.gpu_time`.
+    pub func submission() -> Submission!:
+        return (try self.submitted()).submission
 
     ## Whether the submitted work has finished, without waiting; the way to keep
     ## a long render from stopping the UI: poll once a frame. An execution
@@ -237,7 +264,7 @@ pub struct Compute:
         let state = try self.submitted()
         if state.phase == 2:
             return true
-        if not (try backend_read_ready(state.device, state.ticket)):
+        if not backend_submission_done(state.device, state.submission):
             return false
         try self.wait()
         return true
@@ -249,11 +276,21 @@ pub struct Compute:
             if state.failed: error(execution_failed, "the GPU failed while running compute work")
             return
         state.phase = 2
-        let ticket = state.ticket
-        state.ticket = Ticket()
-        backend_read_wait(state.device, ticket) catch failure:
+        backend_submission_wait(state.device, state.submission) catch failure:
             state.failed = true
             error(failure.code, failure.message)
+
+    ## The pass's timestamps in nanoseconds on the GPU clock, in recording
+    ## order, once it has finished (`wait` or `done`); `out` holds exactly as
+    ## many as were recorded.
+    pub func timestamps(out: u64[]) -> !:
+        let state = try self.submitted()
+        if state.phase != 2 or state.failed:
+            error(invalid_geometry, "a pass's timestamps are there once it has finished")
+        if out.length != state.stamps:
+            error(invalid_geometry, "timestamps are read all at once, as many as were recorded")
+        if state.stamps == 0: return
+        try backend_compute_stamps(state.device, state.native, out)
 
     pub func is_open() -> bool:
         return self.state != none
@@ -267,7 +304,8 @@ pub struct Compute:
         state.release_commands()
         if state.commands.length > 0:
             free(state.commands) in memory.heap
-        backend_ticket_drop(state.device, state.ticket)
+        if let native = state.native:
+            backend_compute_release(state.device, native, state.submission)
         release_device(state.device)
         free(state) in memory.heap
 
@@ -291,7 +329,10 @@ struct ComputeState:
     var count: usize
     ## 0 recording, 1 submitted, 2 complete.
     var phase: u8
-    var ticket: Ticket
+    var stamps: usize
+    var submission: Submission
+    ## What the backend keeps for the pass's timestamps.
+    var native: void*?
     var failed: bool
 
     ## A buffer handle's state, checked to belong to this pass's device.
@@ -367,17 +408,35 @@ func backend_kernel_destroyer(backend: Backend) -> func(void*, void*) -> unit:
     if platform.macos and platform.arm64 and backend == Backend.metal: return metal_kernel_release
     trap("compute kernels are unavailable on this backend")
 
-func backend_compute_submit(device: DeviceState*, commands: const ComputeCommand[]) -> Ticket!:
+## A submitted pass: its serial, and what the backend keeps for its timestamps.
+struct ComputeSubmitted:
+    var serial: u64
+    var native: void*?
+
+func backend_compute_submit(device: DeviceState*, commands: const ComputeCommand[], stamps: usize) -> ComputeSubmitted!:
     if (platform.windows or platform.linux) and device.backend == Backend.vulkan:
-        return try vulkan_compute_submit((VulkanDevice*)device.native, commands)
+        return try vulkan_compute_submit((VulkanDevice*)device.native, commands, stamps)
     if platform.macos and platform.arm64:
         if device.backend == Backend.metal:
-            return try metal_compute_submit((MetalDevice*)device.native, commands)
+            return try metal_compute_submit((MetalDevice*)device.native, commands, stamps)
     error(unsupported, "compute work is unavailable on this backend")
 
-## Let go of a ticket nobody will wait for; its work finishes on its own.
-func backend_ticket_drop(device: DeviceState*, ticket: Ticket):
-    _ = device
+func backend_compute_stamps(device: DeviceState*, native: void*?, out: u64[]) -> !:
+    if (platform.windows or platform.linux) and device.backend == Backend.vulkan:
+        try vulkan_compute_stamps((VulkanDevice*)device.native, native, out)
+        return
     if platform.macos and platform.arm64:
-        if let command = ticket.command:
-            metal_void(command, metal_sel("release"))
+        if device.backend == Backend.metal:
+            try metal_compute_stamps(native, out)
+            return
+    error(unsupported, "compute work is unavailable on this backend")
+
+## Let go of what the backend keeps for a pass; work still running finishes
+## on its own.
+func backend_compute_release(device: DeviceState*, native: void*, submission: Submission):
+    if (platform.windows or platform.linux) and device.backend == Backend.vulkan:
+        vulkan_compute_release((VulkanDevice*)device.native, native, submission.serial)
+        return
+    if platform.macos and platform.arm64:
+        if device.backend == Backend.metal:
+            metal_compute_release(native)

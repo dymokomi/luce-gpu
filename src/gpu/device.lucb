@@ -58,6 +58,26 @@ pub struct Device:
     pub func limits() -> Limits!:
         return (try self.checked()).limits
 
+    ## Whether `submission` has finished on the GPU, without waiting.
+    pub func done(submission: Submission) -> bool!:
+        let state = try self.checked()
+        return backend_submission_done(state, submission)
+
+    ## Wait until `submission` has finished; `execution_failed` if the GPU
+    ## failed while running it.
+    pub func wait(submission: Submission) -> !:
+        let state = try self.checked()
+        try backend_submission_wait(state, submission)
+
+    ## When the GPU started and finished `submission`, once it has finished:
+    ## none while it runs, for submissions older than the last
+    ## `timed_submissions`, and where the device keeps no time (`limits().timestamps`).
+    pub func gpu_time(submission: Submission) -> GpuTime?!:
+        let state = try self.checked()
+        if not backend_submission_done(state, submission):
+            return none
+        return backend_submission_time(state, submission)
+
     ## Whether `other` is the same device.
     pub func same(other: const Device*) -> bool:
         return self.state != none and self.state == other.state
@@ -105,6 +125,9 @@ pub struct Limits:
     ## Whether kernels may use the KHR subgroup operations: basic, vote,
     ## arithmetic, ballot and shuffle (GL_KHR_shader_subgroup_*).
     pub var subgroup_ops: bool = false
+    ## Whether the device times submissions and compute passes' timestamps
+    ## (`Device.gpu_time`, `Compute.timestamp`).
+    pub var timestamps: bool = false
 
 struct DeviceState:
     var backend: Backend

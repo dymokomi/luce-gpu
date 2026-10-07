@@ -38,6 +38,7 @@ func vulkan_device_limits(device: VulkanDevice*, float_atomic_add: bool) -> Limi
     else:
         vkGetPhysicalDeviceProperties(device.physical, (void*)&properties.properties)
     let limits = properties.properties.limits
+    device.timestamp_period = limits.timestampPeriod
     var buffer_bytes = (u64)limits.maxStorageBufferRange // 4 * 4
     if largest < buffer_bytes: buffer_bytes = largest // 4 * 4
     # Basic, vote, arithmetic, ballot and shuffle, in the compute stage.
@@ -45,7 +46,7 @@ func vulkan_device_limits(device: VulkanDevice*, float_atomic_add: bool) -> Limi
     let subgroup_ops = (subgroups.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) != 0 and (subgroups.supportedOperations & operations) == operations
     return Limits(buffer_bytes = buffer_bytes, group_threads = limits.maxComputeWorkGroupInvocations, group_size = limits.maxComputeWorkGroupSize,
                   group_count = limits.maxComputeWorkGroupCount, shared_bytes = limits.maxComputeSharedMemorySize, float_atomic_add = float_atomic_add,
-                  subgroup_size = subgroups.subgroupSize, subgroup_ops = subgroup_ops)
+                  subgroup_size = subgroups.subgroupSize, subgroup_ops = subgroup_ops, timestamps = device.timestamp_bits > 0)
 
 func vulkan_limits(device: VulkanDevice*) -> Limits:
     return device.limits
@@ -155,15 +156,30 @@ func vulkan_compute_barrier(command: u64, source: u32, target: u32):
 
 let vulkan_compute_stages: u32 = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT
 
-## Record `commands` into one submission and submit it without waiting.
-func vulkan_compute_submit(device: VulkanDevice*, commands: const ComputeCommand[]) -> Ticket!:
+## Record `commands` into one submission and submit it without waiting. Its
+## start and end are timed in the device's timing queries; a pass with
+## timestamps gets a query pool of its own, which it keeps for reading them.
+func vulkan_compute_submit(device: VulkanDevice*, commands: const ComputeCommand[], stamps: usize) -> ComputeSubmitted!:
     try vulkan_drawing(device)
     var dispatches: u32 = 0
     for recorded in commands:
         if recorded.kind == command_dispatch or recorded.kind == command_indirect: dispatches += 1
+    var stamped: u64 = 0
+    if stamps > 0:
+        stamped = try vulkan_query_pool(device, (u32)stamps)
+    errdefer vulkan_query_pool_drop(device, stamped)
+    let timed = device.timestamp_bits > 0
+    if timed and device.timing == 0:
+        device.timing = try vulkan_query_pool(device, (u32)(vulkan_slot_limit * 2))
     let slot = try vulkan_begin(device)
+    let first_query = (u32)((device.submitted + 1) % (u64)vulkan_slot_limit) * 2
     var pool: u64 = 0
     errdefer vulkan_compute_abandon(device, slot, pool)
+    if timed:
+        vkCmdResetQueryPool(slot.command, device.timing, first_query, 2)
+        vkCmdWriteTimestamp(slot.command, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, device.timing, first_query)
+    if stamped != 0:
+        vkCmdResetQueryPool(slot.command, stamped, 0, (u32)stamps)
     if dispatches > 0:
         var sizes: VkDescriptorPoolSize[3] = [
             VkDescriptorPoolSize(descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, descriptorCount = dispatches * (u32)binding_limit),
@@ -177,7 +193,10 @@ func vulkan_compute_submit(device: VulkanDevice*, commands: const ComputeCommand
         let recorded = &commands[index]
         if index > 0:
             vulkan_compute_barrier(slot.command, vulkan_compute_stages, vulkan_compute_stages)
-        if recorded.kind == command_copy:
+        if recorded.kind == command_timestamp:
+            # After every earlier command has finished.
+            vkCmdWriteTimestamp(slot.command, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, stamped, recorded.value)
+        elif recorded.kind == command_copy:
             let origin = recorded.buffer else trap("a copy lost its source")
             let goal = recorded.target else trap("a copy lost its destination")
             var region = VkBufferCopy(srcOffset = (u64)recorded.offset, dstOffset = (u64)recorded.target_offset, size = (u64)recorded.bytes)
@@ -193,10 +212,13 @@ func vulkan_compute_submit(device: VulkanDevice*, commands: const ComputeCommand
             if let texture = bound: vulkan_transition(slot.command, (VulkanTexture*)texture.native, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
     # The results, to whatever is submitted next: frames, reads, other passes.
     vulkan_compute_barrier(slot.command, vulkan_compute_stages, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT)
+    if timed:
+        vkCmdWriteTimestamp(slot.command, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, device.timing, first_query + 1)
     if pool != 0:
         try vulkan_retire(slot, VulkanRetired(kind = vulkan_retired_descriptors, handle = pool))
         pool = 0
     let serial = try vulkan_end(device, slot)
+    if timed: device.timing_serial[(usize)(serial % (u64)vulkan_slot_limit)] = serial
     for recorded in commands:
         if let kernel = recorded.kernel: ((VulkanKernel*)kernel.native).last_use = serial
         for bound in recorded.buffers:
@@ -205,7 +227,56 @@ func vulkan_compute_submit(device: VulkanDevice*, commands: const ComputeCommand
             if let texture = bound: ((VulkanTexture*)texture.native).last_use = serial
         if let buffer = recorded.buffer: ((VulkanBuffer*)buffer.native).last_use = serial
         if let buffer = recorded.target: ((VulkanBuffer*)buffer.native).last_use = serial
-    return Ticket(serial = serial)
+    return ComputeSubmitted(serial = serial, native = (void*)(usize)stamped if stamped != 0 else none)
+
+# mark: Timing ================================================================================
+
+func vulkan_query_pool_drop(device: VulkanDevice*, pool: u64):
+    if pool != 0: vkDestroyQueryPool(device.device, pool, none)
+
+func vulkan_query_pool(device: VulkanDevice*, count: u32) -> u64!:
+    var info = VkQueryPoolCreateInfo(sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, queryType = VK_QUERY_TYPE_TIMESTAMP, queryCount = count)
+    var pool: u64 = 0
+    try vulkan_check(vkCreateQueryPool(device.device, &info, none, &pool), "a Vulkan timestamp query pool could not be created")
+    return pool
+
+## Finished queries in nanoseconds: the queue's valid bits, scaled by the
+## device's tick period.
+func vulkan_read_queries(device: VulkanDevice*, pool: u64, first: u32, out: u64[]) -> bool:
+    let bytes = out.length * 8
+    if vkGetQueryPoolResults(device.device, pool, first, (u32)out.length, bytes, (void*)out.data, 8, VK_QUERY_RESULT_64_BIT) != VK_SUCCESS:
+        return false
+    let mask = 0xffffffffffffffffu64 if device.timestamp_bits >= 64 else (1u64 << (u64)device.timestamp_bits) - 1
+    for index in 0..<out.length:
+        out[index] = (u64)((f64)(out[index] & mask) * (f64)device.timestamp_period)
+    return true
+
+## The start and end of a finished submission timed in the device's queries,
+## while its ring slot still holds them.
+func vulkan_submission_time(device: VulkanDevice*, serial: u64) -> GpuTime?:
+    let index = (usize)(serial % (u64)vulkan_slot_limit)
+    if serial == 0 or device.timing == 0 or device.timing_serial[index] != serial:
+        return none
+    var times: u64[2]
+    if not vulkan_read_queries(device, device.timing, (u32)index * 2, times):
+        return none
+    return GpuTime(start = times[0], end = times[1])
+
+func vulkan_compute_stamps(device: VulkanDevice*, native: void*?, out: u64[]) -> !:
+    let pool = (u64)(usize)(native else error(invalid_geometry, "the pass recorded no timestamps"))
+    if not vulkan_read_queries(device, pool, 0, out):
+        error(failed, "Vulkan timestamps could not be read")
+
+## Free a pass's query pool once its submission has finished.
+func vulkan_compute_release(device: VulkanDevice*, native: void*, serial: u64):
+    let item = VulkanRetired(kind = vulkan_retired_queries, handle = (u64)(usize)native)
+    vulkan_poll(device)
+    if serial <= device.completed:
+        vulkan_retired_free(device, item)
+        return
+    vulkan_retire(&device.slots[(usize)(serial % (u64)vulkan_slot_limit)], item) catch failure:
+        vulkan_wait(device, serial) catch waited: _ = waited
+        vulkan_retired_free(device, item)
 
 ## After a failure before submission: end the recording unsubmitted and free the pool.
 func vulkan_compute_abandon(device: VulkanDevice*, slot: VulkanSlot*, pool: u64):

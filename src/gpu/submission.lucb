@@ -1,0 +1,58 @@
+#==============================================================================================
+#
+#   submission - Completion and GPU time of work on a device's queue
+#
+#   DESCRIPTION:
+#       Work reaches a device's one queue as numbered submissions. A Submission is that number:
+#       a plain value, not a resource, so it can be kept, copied and compared freely. The device
+#       answers whether it has finished, waits for it, and, for the most recent submissions,
+#       reports when the GPU started and finished it. Compute passes hand out their submission
+#       now; frames will too.
+#
+#==============================================================================================
+
+## One submission on a device's queue; the zero value is none and counts as
+## finished. Serials grow with each submission.
+pub struct Submission:
+    pub var serial: u64 = 0
+
+## When the GPU started and finished a submission, in nanoseconds on the
+## device's GPU clock: compare times of one device with each other, not with
+## the CPU's clock.
+pub struct GpuTime:
+    pub var start: u64 = 0
+    pub var end: u64 = 0
+
+    ## The nanoseconds from start to end.
+    pub func elapsed() -> u64:
+        return self.end - self.start if self.end > self.start else 0
+
+## How many recent submissions keep their GPU times.
+pub let timed_submissions: usize = 32
+
+func backend_submission_done(device: DeviceState*, submission: Submission) -> bool:
+    if (platform.windows or platform.linux) and device.backend == Backend.vulkan:
+        let native = (VulkanDevice*)device.native
+        vulkan_poll(native)
+        return native.completed >= submission.serial
+    if platform.macos and platform.arm64:
+        if device.backend == Backend.metal:
+            return metal_submission_done((MetalDevice*)device.native, submission.serial)
+    return true
+
+func backend_submission_wait(device: DeviceState*, submission: Submission) -> !:
+    if (platform.windows or platform.linux) and device.backend == Backend.vulkan:
+        try vulkan_wait((VulkanDevice*)device.native, submission.serial)
+        return
+    if platform.macos and platform.arm64:
+        if device.backend == Backend.metal:
+            try metal_submission_wait((MetalDevice*)device.native, submission.serial)
+            return
+
+func backend_submission_time(device: DeviceState*, submission: Submission) -> GpuTime?:
+    if (platform.windows or platform.linux) and device.backend == Backend.vulkan:
+        return vulkan_submission_time((VulkanDevice*)device.native, submission.serial)
+    if platform.macos and platform.arm64:
+        if device.backend == Backend.metal:
+            return metal_submission_time((MetalDevice*)device.native, submission.serial)
+    return none

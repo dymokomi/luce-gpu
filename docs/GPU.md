@@ -579,7 +579,10 @@ try y.read(0, result)
 | `dispatch_indirect(kernel, bindings, uniforms, arguments, offset)` | Takes the three u32 workgroup counts from `arguments` at `offset`, as earlier commands left them (Vulkan's `vkCmdDispatchIndirect`, Metal's indirect threadgroups). |
 | `copy(source, source_offset, destination, destination_offset, bytes)` | Copies between buffers; ranges four-byte aligned and apart when the buffer is the same. |
 | `fill(buffer, offset, bytes, value = 0)` | Sets every 32-bit word in the range. Metal fills bytes, so a value whose four bytes differ runs a small built-in kernel. |
+| `timestamp()` | Records a GPU timestamp: when every command before it has finished. Returns its index; at most 64 per pass, where `limits().timestamps`. On Metal each one ends a command buffer, a few microseconds of overhead. |
 | `submit()` | Sends the commands as one submission and returns at once. |
+| `submission()` | The pass's `Submission`, for `Device.done`, `wait` and `gpu_time`. |
+| `timestamps(out)` | After the pass finished: its timestamps in nanoseconds, as many as were recorded. |
 | `done()` | Polls for completion without waiting. |
 | `wait()` | Waits; `execution_failed` if the GPU failed, reported again on later calls. |
 | `close()` | Ends the pass. An unsubmitted recording is dropped; submitted work finishes on its own. Idempotent. |
@@ -647,6 +650,41 @@ copy source or destination, indirect arguments, or mesh data.
 | `float_atomic_add` | `atomicAdd` on floats in buffers | Metal 3 GPUs | `VK_EXT_shader_atomic_float` |
 | `subgroup_size` | `gl_SubgroupSize` (SIMD group, wave, warp) | 32 | `VkPhysicalDeviceSubgroupProperties` |
 | `subgroup_ops` | basic, vote, arithmetic, ballot and shuffle in kernels | true | those five in the compute stage |
+| `timestamps` | submissions and passes are timed | true | the queue's `timestampValidBits` > 0 |
+
+### Completion and GPU time
+
+Every submission on a device's queue has a serial. A `Submission` holds one:
+a plain value you can keep and compare, like a CUDA event or a Vulkan
+timeline-semaphore value. `device.done(submission)` polls it,
+`device.wait(submission)` blocks until it finishes (reporting
+`execution_failed`), and `device.gpu_time(submission)` returns a `GpuTime`
+with the nanoseconds the GPU started and finished it. The zero `Submission()`
+counts as finished.
+
+Times are on the GPU's clock: compare them with each other (`elapsed()`), not
+with the CPU's clock. The device keeps them for its last `timed_submissions`
+(32) submissions; older ones report none. Metal takes them from each command
+buffer's `GPUStartTime` and `GPUEndTime`. Vulkan writes a timestamp query at
+the start and end of the submission and scales it by `timestampPeriod`.
+
+Inside a pass, `timestamp()` marks points between commands. In this pass the
+two dispatches are timed separately:
+
+```luce
+try pass.dispatch(first, bindings, uniforms, groups)
+_ = try pass.timestamp()
+try pass.dispatch(second, bindings, uniforms, groups)
+_ = try pass.timestamp()
+try pass.submit()
+try pass.wait()
+var stamps: u64[2]
+try pass.timestamps(stamps)
+let span = (try device.gpu_time(try pass.submission())) else return
+# span.start ≤ stamps[0] ≤ stamps[1] ≤ span.end
+```
+
+Compute passes hand out submissions now; frames will as well.
 
 ### Long-running work
 
@@ -678,4 +716,5 @@ atomics feeding an indirect dispatch, fills, copies, shared views, a 256 MiB
 buffer, kernels and buffers destroyed before their pass is submitted, IEEE
 infinities and NaNs (the same bits on every backend), subgroup operations, storage
 images of each 32-bit format written, sampled, read and written in place, read
-back and drawn for display, and float atomics.
+back and drawn for display, float atomics, and submissions, GPU times and
+timestamps.

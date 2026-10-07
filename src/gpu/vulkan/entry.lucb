@@ -110,6 +110,11 @@ struct VulkanFunctions:
     var vkCmdDispatch: (func(u64, u32, u32, u32) -> unit)?
     var vkCmdDispatchIndirect: (func(u64, u64, u64) -> unit)?
     var vkCmdFillBuffer: (func(u64, u64, u64, u64, u32) -> unit)?
+    var vkCreateQueryPool: (func(u64, VkQueryPoolCreateInfo*?, void*?, u64*?) -> i32)?
+    var vkDestroyQueryPool: (func(u64, u64, void*?) -> unit)?
+    var vkCmdResetQueryPool: (func(u64, u64, u32, u32) -> unit)?
+    var vkCmdWriteTimestamp: (func(u64, u32, u64, u32) -> unit)?
+    var vkGetQueryPoolResults: (func(u64, u64, u32, u32, usize, void*?, u64, u32) -> i32)?
 
 var vulkan_functions: VulkanFunctions*? = none
 
@@ -307,6 +312,16 @@ func vulkan_load() -> !:
         table.vkCmdDispatchIndirect = (func(u64, u64, u64) -> unit)found
     if let found = vulkan_symbol(library, "vkCmdFillBuffer"):
         table.vkCmdFillBuffer = (func(u64, u64, u64, u64, u32) -> unit)found
+    if let found = vulkan_symbol(library, "vkCreateQueryPool"):
+        table.vkCreateQueryPool = (func(u64, VkQueryPoolCreateInfo*?, void*?, u64*?) -> i32)found
+    if let found = vulkan_symbol(library, "vkDestroyQueryPool"):
+        table.vkDestroyQueryPool = (func(u64, u64, void*?) -> unit)found
+    if let found = vulkan_symbol(library, "vkCmdResetQueryPool"):
+        table.vkCmdResetQueryPool = (func(u64, u64, u32, u32) -> unit)found
+    if let found = vulkan_symbol(library, "vkCmdWriteTimestamp"):
+        table.vkCmdWriteTimestamp = (func(u64, u32, u64, u32) -> unit)found
+    if let found = vulkan_symbol(library, "vkGetQueryPoolResults"):
+        table.vkGetQueryPoolResults = (func(u64, u64, u32, u32, usize, void*?, u64, u32) -> i32)found
     if table.vkCreateInstance == none:
         free(table) in memory.heap
         error(unavailable, "the Vulkan loader has no vkCreateInstance")
@@ -701,6 +716,26 @@ func vkCmdDispatchIndirect(commandBuffer: u64, buffer: u64, offset: u64):
 func vkCmdFillBuffer(commandBuffer: u64, dstBuffer: u64, dstOffset: u64, size: u64, data: u32):
     let call = vulkan_entry().vkCmdFillBuffer else trap("the Vulkan loader lacks vkCmdFillBuffer")
     call(commandBuffer, dstBuffer, dstOffset, size, data)
+
+func vkCreateQueryPool(device: u64, pCreateInfo: VkQueryPoolCreateInfo*?, pAllocator: void*?, pQueryPool: u64*?) -> i32:
+    let call = vulkan_entry().vkCreateQueryPool else trap("the Vulkan loader lacks vkCreateQueryPool")
+    return call(device, pCreateInfo, pAllocator, pQueryPool)
+
+func vkDestroyQueryPool(device: u64, queryPool: u64, pAllocator: void*?):
+    let call = vulkan_entry().vkDestroyQueryPool else trap("the Vulkan loader lacks vkDestroyQueryPool")
+    call(device, queryPool, pAllocator)
+
+func vkCmdResetQueryPool(commandBuffer: u64, queryPool: u64, firstQuery: u32, queryCount: u32):
+    let call = vulkan_entry().vkCmdResetQueryPool else trap("the Vulkan loader lacks vkCmdResetQueryPool")
+    call(commandBuffer, queryPool, firstQuery, queryCount)
+
+func vkCmdWriteTimestamp(commandBuffer: u64, pipelineStage: u32, queryPool: u64, query: u32):
+    let call = vulkan_entry().vkCmdWriteTimestamp else trap("the Vulkan loader lacks vkCmdWriteTimestamp")
+    call(commandBuffer, pipelineStage, queryPool, query)
+
+func vkGetQueryPoolResults(device: u64, queryPool: u64, firstQuery: u32, queryCount: u32, dataSize: usize, pData: void*?, stride: u64, flags: u32) -> i32:
+    let call = vulkan_entry().vkGetQueryPoolResults else trap("the Vulkan loader lacks vkGetQueryPoolResults")
+    return call(device, queryPool, firstQuery, queryCount, dataSize, pData, stride, flags)
 
 ## The loader's Vulkan version: 1.0 when it predates vkEnumerateInstanceVersion.
 func vulkan_instance_version() -> u32:

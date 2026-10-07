@@ -35,6 +35,7 @@ vkGetPhysicalDeviceProperties vkCmdSetDepthBias vkCreateSampler vkDestroySampler
 vkCmdCopyBufferToImage vkCmdCopyImageToBuffer vkCmdCopyBuffer vkCmdCopyImage vkCmdBlitImage vkCreateXlibSurfaceKHR
 vkEnumerateInstanceVersion vkGetPhysicalDeviceProperties2 vkGetPhysicalDeviceFeatures2
 vkEnumerateDeviceExtensionProperties vkCreateComputePipelines vkCmdDispatch vkCmdDispatchIndirect vkCmdFillBuffer
+vkCreateQueryPool vkDestroyQueryPool vkCmdResetQueryPool vkCmdWriteTimestamp vkGetQueryPoolResults
 '''.split()
 # Structures reached only through pNext chains, which no command names.
 CHAINED = '''

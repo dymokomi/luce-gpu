@@ -39,7 +39,7 @@ func metal_limits(device: MetalDevice*) -> Limits:
     return Limits(buffer_bytes = metal_uint(native, metal_sel("maxBufferLength")), group_threads = 1024,
                   group_size = [1024, 1024, 1024], group_count = [0xffffffffu32, 0xffffffffu32, 0xffffffffu32],
                   shared_bytes = (u32)metal_uint(native, metal_sel("maxThreadgroupMemoryLength")), float_atomic_add = float_atomics,
-                  subgroup_size = 32, subgroup_ops = true)
+                  subgroup_size = 32, subgroup_ops = true, timestamps = true)
 
 func metal_kernel_create(device: MetalDevice*, msl: c.str, group: u32[3], fast_math: bool) -> void*!:
     let pool = objc_autoreleasePoolPush()
@@ -124,16 +124,31 @@ struct MetalEncoding:
             metal_void(encoder, metal_sel("endEncoding"))
         self.encoder = none
 
-## Encode `commands` into one command buffer and commit it; the ticket holds
-## the command buffer until it is waited for or dropped.
-func metal_compute_submit(device: MetalDevice*, commands: const ComputeCommand[]) -> Ticket!:
+## Encode `commands` into command buffers and commit them: one, or one more
+## per timestamp, each ending where a timestamp is. The device's submission
+## ring keeps them for completion and timing; with timestamps the pass keeps
+## them too, for their end times.
+func metal_compute_submit(device: MetalDevice*, commands: const ComputeCommand[], stamps: usize) -> ComputeSubmitted!:
     let pool = objc_autoreleasePoolPush()
     defer objc_autoreleasePoolPop(pool)
-    let command = metal_ptr(metal_required(device.queue), metal_sel("commandBuffer")) else error(failed, "could not create a Metal command buffer")
+    var buffers = try new void*[stamps + 1] --- in memory.heap
+    var count: usize = 0
+    errdefer metal_release_buffers(buffers, count)
+    var command = metal_ptr(metal_required(device.queue), metal_sel("commandBuffer")) else error(failed, "could not create a Metal command buffer")
     var encoding = MetalEncoding(command = command)
     for index in 0..<commands.length:
         let recorded = &commands[index]
-        if recorded.kind == command_copy:
+        if recorded.kind == command_timestamp:
+            # Everything before the stamp ends with this command buffer: its
+            # GPU end time is the stamp.
+            encoding.end()
+            metal_void(command, metal_sel("retain"))
+            metal_void(command, metal_sel("commit"))
+            buffers[count] = command
+            count += 1
+            command = metal_ptr(metal_required(device.queue), metal_sel("commandBuffer")) else error(failed, "could not create a Metal command buffer")
+            encoding = MetalEncoding(command = command)
+        elif recorded.kind == command_copy:
             let origin = recorded.buffer else trap("a copy lost its source")
             let goal = recorded.target else trap("a copy lost its destination")
             metal_copy_buffer(try encoding.transfer(), metal_sel("copyFromBuffer:sourceOffset:toBuffer:destinationOffset:size:"), origin.native, (u64)recorded.offset, goal.native, (u64)recorded.target_offset, (u64)recorded.bytes)
@@ -151,10 +166,101 @@ func metal_compute_submit(device: MetalDevice*, commands: const ComputeCommand[]
                 metal_dispatch(encoder, metal_sel("dispatchThreadgroups:threadsPerThreadgroup:"),
                                LuceGpuMetalExtent((u64)recorded.groups[0], (u64)recorded.groups[1], (u64)recorded.groups[2]), group)
     encoding.end()
-    # Kept past the pool: the ticket waits on it.
     metal_void(command, metal_sel("retain"))
     metal_void(command, metal_sel("commit"))
-    return Ticket(command = command)
+    buffers[count] = command
+    count += 1
+    var stamped: MetalStamps*? = none
+    if stamps > 0:
+        let kept = try new void*[stamps] --- in memory.heap
+        for index in 0..<stamps:
+            metal_void(buffers[index], metal_sel("retain"))
+            kept[index] = buffers[index]
+        stamped = new MetalStamps(commands = kept) in memory.heap catch failure:
+            metal_release_buffers(kept, stamps)
+            error(failure.code, failure.message)
+    device.serial += 1
+    metal_submission_record(device, device.serial, buffers, count)
+    var native: void*? = none
+    if let kept = stamped: native = (void*)kept
+    return ComputeSubmitted(serial = device.serial, native = native)
+
+# mark: Submissions ===========================================================================
+
+## A recent submission: its serial and its retained command buffers, in order.
+struct MetalSubmission:
+    var serial: u64
+    var commands: void*[]
+    var count: usize
+
+## A pass's timestamps: the retained command buffers each stamp ends.
+struct MetalStamps:
+    var commands: void*[]
+
+func metal_release_buffers(buffers: void*[], count: usize):
+    for index in 0..<count:
+        metal_void(buffers[index], metal_sel("release"))
+    free(buffers) in memory.heap
+
+## Keep a submission's command buffers in its ring slot. The submission the
+## slot held is waited for first, so one that left the ring has finished.
+func metal_submission_record(device: MetalDevice*, serial: u64, buffers: void*[], count: usize):
+    let slot = &device.submissions[(usize)(serial % (u64)timed_submissions)]
+    metal_submission_clear(slot)
+    *slot = MetalSubmission(serial = serial, commands = buffers, count = count)
+
+func metal_submission_clear(slot: MetalSubmission*):
+    if slot.count == 0: return
+    for index in 0..<slot.count:
+        metal_void(slot.commands[index], metal_sel("waitUntilCompleted"))
+    metal_release_buffers(slot.commands, slot.count)
+    *slot = MetalSubmission()
+
+func metal_submissions_destroy(device: MetalDevice*):
+    for index in 0..<timed_submissions:
+        metal_submission_clear(&device.submissions[index])
+
+## The ring slot holding `serial`, or none once it left the ring (finished).
+func metal_submission_slot(device: MetalDevice*, serial: u64) -> MetalSubmission*?:
+    if serial == 0: return none
+    let slot = &device.submissions[(usize)(serial % (u64)timed_submissions)]
+    return slot if slot.serial == serial and slot.count > 0 else none
+
+func metal_submission_done(device: MetalDevice*, serial: u64) -> bool:
+    let slot = metal_submission_slot(device, serial) else return true
+    for index in 0..<slot.count:
+        # MTLCommandBufferStatusCompleted (4) or Error (5).
+        if metal_uint(slot.commands[index], metal_sel("status")) < 4: return false
+    return true
+
+func metal_submission_wait(device: MetalDevice*, serial: u64) -> !:
+    let slot = metal_submission_slot(device, serial) else return
+    var failed_any = false
+    for index in 0..<slot.count:
+        metal_void(slot.commands[index], metal_sel("waitUntilCompleted"))
+        if metal_uint(slot.commands[index], metal_sel("status")) != 4: failed_any = true
+    if failed_any:
+        error(execution_failed, "the GPU failed while running submitted work")
+
+## The first command buffer's GPU start and the last one's end, from the
+## host-time seconds Metal reports.
+func metal_submission_time(device: MetalDevice*, serial: u64) -> GpuTime?:
+    let slot = metal_submission_slot(device, serial) else return none
+    return GpuTime(start = metal_nanoseconds(metal_double(slot.commands[0], metal_sel("GPUStartTime"))),
+                   end = metal_nanoseconds(metal_double(slot.commands[slot.count - 1], metal_sel("GPUEndTime"))))
+
+func metal_nanoseconds(seconds: f64) -> u64:
+    return (u64)(seconds * 1000000000.0) if seconds > 0.0 else 0
+
+func metal_compute_stamps(native: void*?, out: u64[]) -> !:
+    let stamps = (MetalStamps*)(native else error(invalid_geometry, "the pass recorded no timestamps"))
+    for index in 0..<out.length:
+        out[index] = metal_nanoseconds(metal_double(stamps.commands[index], metal_sel("GPUEndTime")))
+
+func metal_compute_release(native: void*):
+    let stamps = (MetalStamps*)native
+    metal_release_buffers(stamps.commands, stamps.commands.length)
+    free(stamps) in memory.heap
 
 func metal_group(kernel: MetalKernel*) -> LuceGpuMetalExtent:
     return LuceGpuMetalExtent((u64)kernel.group[0], (u64)kernel.group[1], (u64)kernel.group[2])
@@ -200,6 +306,7 @@ func metal_encode_fill(device: MetalDevice*, encoding: MetalEncoding*, recorded:
         metal_dispatch(encoder, metal_sel("dispatchThreadgroups:threadsPerThreadgroup:"), LuceGpuMetalExtent((u64)((count + 63) // 64), 1, 1), metal_group(kernel))
         done += count
 
+extern func metal_double as "objc_msgSend"(object: void*, selector: void*) -> f64
 extern func metal_uint_with as "objc_msgSend"(object: void*, selector: void*, value: u64) -> u64
 extern func metal_dispatch as "objc_msgSend"(object: void*, selector: void*, grid: LuceGpuMetalExtent, size: LuceGpuMetalExtent)
 extern func metal_dispatch_indirect as "objc_msgSend"(object: void*, selector: void*, arguments: void*, offset: u64, size: LuceGpuMetalExtent)
