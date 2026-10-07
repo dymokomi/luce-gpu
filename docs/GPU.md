@@ -642,6 +642,27 @@ Each specialization is a pipeline of its own: Vulkan passes a
 `VkSpecializationInfo`, and Metal builds the function with
 `MTLFunctionConstantValues`.
 
+Building a kernel compiles it, and a specialized kernel compiles anew for each
+set of values. On the M4 Max a small kernel takes about 2.5 ms (33 ms the first
+time a process compiles one); on RADV, 0.3 to 0.8 ms. Two features keep that
+off the frame:
+
+- **Background builds.** `Kernel.create(..., background = true)` returns at once
+  (about 12 µs) and builds on a thread of its own. Metal and Vulkan create
+  pipelines from any thread. `kernel.ready() -> bool!` polls it from the main
+  thread, so a renderer can keep dispatching its general kernel and swap in a
+  specialized one when it is ready. A dispatch of a kernel still building waits
+  for it, and destroying one waits for its thread.
+- **The device's kernel cache.** The device keeps its open kernels by what they
+  were built from: the code's hash, the workgroup, the bindings, the flags and
+  the constants, in any order. Creating one of them again shares it (about
+  3 µs, built or still building) instead of compiling again.
+
+Caches on disk are left to the drivers. Metal already keeps compiled functions
+between runs (a second process compiles the same kernel in 2 ms, not 33 ms), as
+do Mesa's and NVIDIA's shader caches. `MTLBinaryArchive` and a saved
+`VkPipelineCache` would add little.
+
 ### Kernels, passes and dispatches
 
 ```luce
@@ -659,7 +680,7 @@ try y.read(0, result)
 
 | Operation | Contract |
 | --- | --- |
-| `Kernel.create(device, words, msl, group, bindings, fast_math = false, table = false, constants = none)` | Builds the pipeline, specialized with `constants`. `invalid_shader` when either form is rejected or the workgroup exceeds `limits()`. `group()` returns the size. |
+| `Kernel.create(device, words, msl, group, bindings, fast_math = false, table = false, constants = none, background = false)` | Builds the pipeline, specialized with `constants`, on a thread of its own with `background`; `ready()` says when it is built. `invalid_shader` when either form is rejected or the workgroup exceeds `limits()`. `group()` returns the size. |
 | `Compute.begin(device)` | Starts recording. Commands are recorded portably and encoded at `submit`, so other work on the device (uploads, frames, reads) goes on meanwhile. |
 | `dispatch(kernel, bindings, uniforms, x, y = 1, z = 1, textures = none)` | Runs `x * y * z` workgroups. Element `n` of `bindings` is binding `n`; bindings the kernel does not use may be left closed (`Binding()`). `uniforms` fill the push-constant block (at most 128 bytes, zero-padded). A zero count records nothing. |
 | `dispatch_indirect(kernel, bindings, uniforms, arguments, offset)` | Takes the three u32 workgroup counts from `arguments` at `offset`, as earlier commands left them (Vulkan's `vkCmdDispatchIndirect`, Metal's indirect threadgroups). |

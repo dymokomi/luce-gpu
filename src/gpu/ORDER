@@ -18,6 +18,7 @@ shader.lucb
 shaders.lucb
 specialize.lucb
 compute.lucb
+kernel_build.lucb
 compute_shaders.lucb
 table.lucb
 accel.lucb

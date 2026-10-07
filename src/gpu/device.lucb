@@ -157,6 +157,9 @@ struct DeviceState:
     var destroy_kernel: func(void*, void*) -> unit
     var destroy_device: func(Backend, void*) -> unit
     var limits: Limits
+    # Open kernels, by what they were built from (kernel_build.lucb).
+    var kernels: KernelState*[]
+    var kernel_count: usize
     # Buffers whose addresses were taken (Buffer.address): every compute
     # pass counts as using them.
     var addressed: BufferState*[]
@@ -167,4 +170,5 @@ func release_device(state: DeviceState*):
     if state.references == 0:
         state.destroy_device(state.backend, state.native)
         if state.addressed.length > 0: free(state.addressed) in memory.heap
+        if state.kernels.length > 0: free(state.kernels) in memory.heap
         free(state) in memory.heap

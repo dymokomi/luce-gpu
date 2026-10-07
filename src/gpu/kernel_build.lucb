@@ -1,0 +1,124 @@
+#==============================================================================================
+#
+#   kernel_build - Kernels built in the background, and the device's kernel cache
+#
+#   DESCRIPTION:
+#       Building a kernel compiles it, which for a large specialized kernel takes milliseconds
+#       to tens of milliseconds. `Kernel.create(..., background = true)` builds it on a thread of
+#       its own instead (Metal and Vulkan create pipelines from any thread); `ready()` polls it
+#       from the main thread, and a dispatch of a kernel still building waits for it. The
+#       device also keeps every open kernel by what it was built from (the code's hash, the
+#       workgroup, bindings, flags and specialization constants), so creating the same kernel
+#       again shares the one already built or building.
+#
+#==============================================================================================
+
+import atomic
+
+## A kernel building on a thread of its own: what it is built from (copies the
+## thread owns), and its result.
+struct KernelBuild:
+    var device: DeviceState*
+    var spirv: u32[]
+    var msl: u8[]
+    var group: u32[3]
+    var bindings: u8[16]
+    var fast_math: bool
+    var table: bool
+    var constants: Constant[]
+    var native: void*?
+    var failure: ErrorCode?
+    ## 1 once the thread has finished, with `native` or `failure` set.
+    var done: @u32
+    var handle: thread.Handle
+
+func kernel_build_run(context: void*?):
+    let build = (KernelBuild*)(context else return)
+    let msl = (c.str)(const u8*)build.msl.data
+    let native = backend_kernel_create(build.device, build.spirv, msl, build.group, build.bindings, build.fast_math, build.table, build.constants) catch failure:
+        build.failure = failure.code
+        build.done.store(1, .release)
+        return
+    build.native = native
+    build.done.store(1, .release)
+
+## Start building on a thread: the build owns copies of the code and constants.
+func kernel_build_start(device: DeviceState*, spirv: const u32[], msl: c.str, group: u32[3], bindings: u8[16], fast_math: bool, table: bool, constants: const Constant[]) -> KernelBuild*!:
+    let text = (try str(msl)).bytes
+    let build = try new KernelBuild(device = device, group = group, bindings = bindings, fast_math = fast_math, table = table) in memory.heap
+    errdefer kernel_build_free(build)
+    build.spirv = try new u32[spirv.length] --- in memory.heap
+    memory.copy(build.spirv, spirv, spirv.length)
+    build.msl = try new u8[text.length + 1] in memory.heap
+    memory.copy(build.msl[..<text.length], text, text.length)
+    if constants.length > 0:
+        build.constants = try new Constant[constants.length] --- in memory.heap
+        memory.copy(build.constants, constants, constants.length)
+    try backend_kernel_prepare(device, table)
+    build.handle = try thread.spawn(kernel_build_run, (void*)build, name = "luce-gpu kernel")
+    return build
+
+## Wait for the build's thread and take its result.
+func kernel_build_finish(build: KernelBuild*) -> void*!:
+    build.handle.join() catch failure:
+        _ = failure
+    let native = build.native else error(build.failure else invalid_shader, "the kernel could not be built in the background")
+    return native
+
+func kernel_build_free(build: KernelBuild*):
+    if build.spirv.length > 0: free(build.spirv) in memory.heap
+    if build.msl.length > 0: free(build.msl) in memory.heap
+    if build.constants.length > 0: free(build.constants) in memory.heap
+    free(build) in memory.heap
+
+# mark: The cache =============================================================================
+
+## FNV-1a over the kernel's code: its SPIR-V words and its Metal source.
+func kernel_hash(spirv: const u32[], msl: c.str) -> u64!:
+    var hash: u64 = 0xcbf29ce484222325u64
+    for word in spirv:
+        hash = (hash ^ (u64)word) *% 0x100000001b3u64
+    for byte in (try str(msl)).bytes:
+        hash = (hash ^ (u64)byte) *% 0x100000001b3u64
+    return hash
+
+## An open kernel built from the same code, workgroup, bindings, flags and
+## constants (in any order), or none.
+func kernel_cached(device: DeviceState*, hash: u64, group: u32[3], bindings: u8[16], fast_math: bool, table: bool, constants: const Constant[]) -> KernelState*?:
+    for index in 0..<device.kernel_count:
+        let state = device.kernels[index]
+        if state.hash != hash or state.fast_math != fast_math or state.table != table or state.constants.length != constants.length or state.failed:
+            continue
+        if state.group[0] != group[0] or state.group[1] != group[1] or state.group[2] != group[2]:
+            continue
+        var same = true
+        for slot in 0..<binding_limit:
+            if state.bindings[slot] != bindings[slot]: same = false
+        for wanted in constants:
+            var found = false
+            for held in state.constants:
+                if held.id == wanted.id and held.kind == wanted.kind and held.bits == wanted.bits: found = true
+            if not found: same = false
+        if same: return state
+    return none
+
+func kernel_remember(device: DeviceState*, state: KernelState*) -> !:
+    if device.kernel_count == device.kernels.length:
+        let grown = try new KernelState*[device.kernels.length * 2 + 16] --- in memory.heap
+        memory.copy(grown, device.kernels, device.kernel_count)
+        if device.kernels.length > 0: free(device.kernels) in memory.heap
+        device.kernels = grown
+    device.kernels[device.kernel_count] = state
+    device.kernel_count += 1
+
+func kernel_forget(device: DeviceState*, state: KernelState*):
+    for index in 0..<device.kernel_count:
+        if device.kernels[index] == state:
+            device.kernel_count -= 1
+            device.kernels[index] = device.kernels[device.kernel_count]
+            return
+
+## What a backend sets up on the main thread before a kernel builds on another.
+func backend_kernel_prepare(device: DeviceState*, table: bool) -> !:
+    if (platform.windows or platform.linux) and device.backend == Backend.vulkan:
+        try vulkan_kernel_prepare((VulkanDevice*)device.native, table)

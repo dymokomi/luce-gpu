@@ -120,8 +120,14 @@ func vulkan_buffer_contents(buffer: VulkanBuffer*) -> u8*?:
 
 # mark: Kernels ===============================================================================
 
-func vulkan_kernel_create(device: VulkanDevice*, spirv: const u32[], bindings: u8[16], table: bool, constants: const Constant[]) -> void*!:
+## The device state kernels share, made on the main thread before a kernel
+## builds on another (vulkan_kernel_create then touches none of it).
+func vulkan_kernel_prepare(device: VulkanDevice*, table: bool) -> !:
     try vulkan_drawing(device)
+    if table: _ = try vulkan_table_layout(device)
+
+func vulkan_kernel_create(device: VulkanDevice*, spirv: const u32[], bindings: u8[16], table: bool, constants: const Constant[]) -> void*!:
+    try vulkan_kernel_prepare(device, table)
     let state = try new VulkanKernel(bindings = bindings, table = table) in memory.heap
     errdefer vulkan_kernel_destroy(device, state)
     var layout_bindings: VkDescriptorSetLayoutBinding[16]
@@ -269,7 +275,7 @@ func vulkan_compute_submit(device: VulkanDevice*, commands: const ComputeCommand
         pool = 0
     let serial = try vulkan_end(device, slot)
     for recorded in commands:
-        if let kernel = recorded.kernel: ((VulkanKernel*)kernel.native).last_use = serial
+        if let kernel = recorded.kernel: ((VulkanKernel*)kernel.built()).last_use = serial
         for bound in recorded.buffers:
             if let buffer = bound: ((VulkanBuffer*)buffer.native).last_use = serial
         for bound in recorded.textures:
@@ -348,7 +354,7 @@ func vulkan_compute_abandon(device: VulkanDevice*, slot: VulkanSlot*, pool: u64)
 ## uniforms, and dispatch it directly or from its arguments buffer.
 func vulkan_encode_dispatch(device: VulkanDevice*, command: u64, pool: u64, recorded: const ComputeCommand*) -> !:
     let program = recorded.kernel else trap("a dispatch lost its kernel")
-    let kernel = (VulkanKernel*)program.native
+    let kernel = (VulkanKernel*)program.built()
     var set: u64 = 0
     var set_info = VkDescriptorSetAllocateInfo(sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, descriptorPool = pool, descriptorSetCount = 1, pSetLayouts = &kernel.set_layout)
     try vulkan_check(vkAllocateDescriptorSets(device.device, &set_info, &set), "Vulkan compute descriptors could not be allocated")

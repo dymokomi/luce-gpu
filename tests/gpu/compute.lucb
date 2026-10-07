@@ -2,6 +2,7 @@ import c
 from luce_gpu import gpu
 from luce_window import window
 import memory
+import thread
 import kernels
 
 ## Compute contracts on a device: kernels from embedded GLSL, chained dispatches
@@ -19,6 +20,7 @@ pub func checks(device: gpu.Device) -> !:
     try float_atomics(device, limits)
     try ieee(device)
     try specialization(device)
+    try background(device)
     try subgroups(device, limits)
     try timing(device, limits)
     try frame_timing(device, limits)
@@ -665,6 +667,56 @@ func specialization(device: gpu.Device) -> !:
         refused = true
         recover gpu.Kernel()
     assert(refused)
+
+## Kernels built in the background: polled until ready and then dispatched,
+## dispatched at once (the dispatch waits), destroyed while building, and
+## created twice from the same code and constants (the device shares them).
+func background(device: gpu.Device) -> !:
+    let count: usize = 64
+    var out = try gpu.Buffer.allocate(device, count * 4)
+    defer out.destroy()
+    let negate: gpu.Constant[2] = [gpu.Constant.uint32(0, 1), gpu.Constant.int32(1, 7)]
+    var polled = try gpu.Kernel.create(device, kernels.special_comp_words, kernels.special_comp_msl, kernels.special_comp_group, kernels.special_comp_bindings,
+                                       constants = negate, background = true)
+    defer polled.destroy()
+    var spins: usize = 0
+    while not (try polled.ready()):
+        spins += 1
+        assert(spins < 100000)
+        thread.sleep(1)
+    try special_dispatch(device, polled, &out, count)
+    var values: u8[256]
+    try out.read(0, values)
+    for index in 0..<count:
+        assert(float_at(values, index) == -(2.0 * (f32)index + 7.0))
+    let flip: gpu.Constant[1] = [gpu.Constant.boolean(5, true)]
+    var waited = try gpu.Kernel.create(device, kernels.special_comp_words, kernels.special_comp_msl, kernels.special_comp_group, kernels.special_comp_bindings,
+                                       constants = flip, background = true)
+    defer waited.destroy()
+    try special_dispatch(device, waited, &out, count)
+    try out.read(0, values)
+    for index in 0..<count:
+        assert(float_at(values, index) == (2.0 * (f32)index - 1.0) * 10.0)
+    assert(try waited.ready())
+    # The same code and constants again: the cache hands out the built kernel.
+    var again = try gpu.Kernel.create(device, kernels.special_comp_words, kernels.special_comp_msl, kernels.special_comp_group, kernels.special_comp_bindings,
+                                      constants = flip, background = true)
+    assert(try again.ready())
+    again.destroy()
+    let scale: gpu.Constant[1] = [gpu.Constant.float32(2, 3.0)]
+    var abandoned = try gpu.Kernel.create(device, kernels.special_comp_words, kernels.special_comp_msl, kernels.special_comp_group, kernels.special_comp_bindings,
+                                          constants = scale, background = true)
+    abandoned.destroy()
+
+func special_dispatch(device: gpu.Device, program: gpu.Kernel, out: gpu.Buffer*, count: usize) -> !:
+    var uniforms: u8[4]
+    memory.write[u32]((void*)&uniforms[0], (u32)count)
+    var pass = try gpu.Compute.begin(device)
+    defer pass.close()
+    let bindings: gpu.Binding[1] = [gpu.Binding(buffer = *out)]
+    try pass.dispatch(program, bindings, uniforms, (u32)((count + 63) // 64))
+    try pass.submit()
+    try pass.wait()
 
 func special_run(device: gpu.Device, out: gpu.Buffer*, constants: const gpu.Constant[]?, count: usize) -> !:
     var program = try gpu.Kernel.create(device, kernels.special_comp_words, kernels.special_comp_msl, kernels.special_comp_group, kernels.special_comp_bindings, constants = constants)

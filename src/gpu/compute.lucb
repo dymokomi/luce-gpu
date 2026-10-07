@@ -48,9 +48,12 @@ pub struct Kernel:
     ## (infinities and NaNs propagate) unless `fast_math` lets Metal relax
     ## them; `table` says the kernel reads a texture table (set 1). `constants`
     ## specialize the kernel: a value for each specialization constant to
-    ## change, the others keeping their defaults.
+    ## change, the others keeping their defaults. With `background` the kernel
+    ## builds on a thread of its own: `ready()` polls it, and a dispatch waits
+    ## for it. Creating a kernel the device already holds open, from the same
+    ## code, workgroup, bindings, flags and constants, shares that one.
     pub static func create(device: Device, spirv: const u32[], msl: c.str, group: const u32[], bindings: const u8[], fast_math: bool = false, table: bool = false,
-                           constants: const Constant[]? = none) -> Kernel!:
+                           constants: const Constant[]? = none, background: bool = false) -> Kernel!:
         let owner = try device.checked()
         if spirv.length < 5 or spirv[0] != 0x07230203:
             error(invalid_shader, "SPIR-V words must begin with the SPIR-V magic number")
@@ -77,11 +80,37 @@ pub struct Kernel:
         let values: const Constant[] = constants else none_given
         try check_constants(spirv, values)
         var size: u32[3] = [group[0], group[1], group[2]]
-        let native = try backend_kernel_create(owner, spirv, msl, size, kinds, fast_math, table, values)
-        errdefer owner.destroy_kernel(owner.native, native)
-        let state = try new KernelState(device = owner, native = native, group = size, bindings = kinds, table = table) in memory.heap
+        let hash = try kernel_hash(spirv, msl)
+        if let cached = kernel_cached(owner, hash, size, kinds, fast_math, table, values):
+            cached.references += 1
+            return Kernel(state = cached)
+        let state = try new KernelState(device = owner, group = size, bindings = kinds, table = table, fast_math = fast_math, hash = hash) in memory.heap
+        errdefer free(state) in memory.heap
+        if values.length > 0:
+            state.constants = try new Constant[values.length] --- in memory.heap
+            memory.copy(state.constants, values, values.length)
+        errdefer:
+            if state.constants.length > 0: free(state.constants) in memory.heap
+        if background:
+            state.build = try kernel_build_start(owner, spirv, msl, size, kinds, fast_math, table, values)
+        else:
+            state.native = try backend_kernel_create(owner, spirv, msl, size, kinds, fast_math, table, values)
+        kernel_remember(owner, state) catch failure:
+            # Uncached is still a kernel.
+            _ = failure
         owner.references += 1
         return Kernel(state = state)
+
+    ## Whether the kernel is built: always, unless it builds in the background
+    ## and has not finished. A build that failed reports its error here (and
+    ## at its dispatch).
+    pub func ready() -> bool!:
+        let state = try self.checked()
+        if let build = state.build:
+            if build.done.load(.acquire) == 0:
+                return false
+        try state.finish()
+        return true
 
     ## The workgroup size the kernel was built with.
     pub func group() -> u32[3]!:
@@ -104,17 +133,45 @@ pub struct Kernel:
 
 struct KernelState:
     var device: DeviceState*
-    var native: void*
+    ## The built pipeline; none while a background build runs.
+    var native: void*?
     var group: u32[3]
     var bindings: u8[16]
     var table: bool
+    var fast_math: bool
+    var constants: Constant[]
+    ## The code's hash, the key of the device's kernel cache.
+    var hash: u64
     var references: usize = 1
+    ## A background build not yet taken, and whether one failed.
+    var build: KernelBuild*?
+    var failed: bool
+
+    ## The built pipeline, once `finish` has taken it (every dispatch has).
+    func built() -> void*:
+        return self.native else trap("a kernel was encoded before it was built")
+
+    ## Take a background build's result, waiting for it if it still runs.
+    func finish() -> !:
+        if self.failed:
+            error(invalid_shader, "the kernel could not be built")
+        let build = self.build else return
+        self.build = none
+        defer kernel_build_free(build)
+        self.native = kernel_build_finish(build) catch failure:
+            self.failed = true
+            error(failure.code, failure.message)
 
 func release_kernel(state: KernelState*):
     state.references -= 1
     if state.references == 0:
-        state.device.destroy_kernel(state.device.native, state.native)
+        kernel_forget(state.device, state)
+        state.finish() catch failure:
+            _ = failure
+        if let native = state.native:
+            state.device.destroy_kernel(state.device.native, native)
         release_device(state.device)
+        if state.constants.length > 0: free(state.constants) in memory.heap
         free(state) in memory.heap
 
 # mark: Bindings ==============================================================================
@@ -463,6 +520,8 @@ struct ComputeState:
     ## against what the kernel declares; it holds a reference to each.
     func bound(kind: u8, kernel: Kernel, bindings: const Binding[], uniforms: const u8[], textures: TextureTable?) -> ComputeCommand!:
         let program = try kernel.checked()
+        # A kernel still building in the background is waited for here.
+        try program.finish()
         if program.device != self.device:
             error(wrong_device, "the kernel belongs to another GPU device")
         var table: TableState*? = none

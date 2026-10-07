@@ -218,8 +218,8 @@ func metal_compute_submit(device: MetalDevice*, commands: const ComputeCommand[]
         else:
             let kernel = recorded.kernel else trap("a dispatch lost its kernel")
             let encoder = try encoding.compute()
-            try metal_encode_bindings(encoder, try metal_drawing(device), (MetalKernel*)kernel.native, recorded)
-            let group = metal_group((MetalKernel*)kernel.native)
+            try metal_encode_bindings(encoder, try metal_drawing(device), (MetalKernel*)kernel.built(), recorded)
+            let group = metal_group((MetalKernel*)kernel.built())
             if recorded.kind == command_indirect:
                 let arguments = recorded.buffer else trap("an indirect dispatch lost its arguments")
                 metal_dispatch_indirect(encoder, metal_sel("dispatchThreadgroupsWithIndirectBuffer:indirectBufferOffset:threadsPerThreadgroup:"), arguments.native, (u64)recorded.offset, group)
