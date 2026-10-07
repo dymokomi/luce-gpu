@@ -274,6 +274,8 @@ func vulkan_compute_submit(device: VulkanDevice*, commands: const ComputeCommand
     # Buffers kernels may reach by address count as used by every pass.
     for buffer in addressed:
         ((VulkanBuffer*)buffer.native).last_use = serial
+    # A pass is submitted when the program submits it, so the GPU starts now.
+    try vulkan_flush(device)
     return ComputeSubmitted(serial = serial, native = (void*)(usize)stamped if stamped != 0 else none)
 
 # mark: Timing ================================================================================

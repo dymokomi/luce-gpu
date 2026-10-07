@@ -86,6 +86,9 @@ func vulkan_sampler(device: VulkanDevice*, filter: u32, mipmapped: bool = false)
     return sampler
 
 func vulkan_drawing_destroy(device: VulkanDevice*):
+    # What is still recorded runs before the device goes.
+    vulkan_flush(device) catch failure:
+        _ = failure
     _ = vkDeviceWaitIdle(device.device)
     vulkan_idle(device)
     vulkan_mesh_destroy(device)
@@ -95,6 +98,7 @@ func vulkan_drawing_destroy(device: VulkanDevice*):
     vulkan_depth_destroy(device)
     vulkan_rings_destroy(device)
     vulkan_slots_destroy(device)
+    vulkan_ring_destroy(device)
     for state in device.formats[..<device.format_count]:
         if state.overlay != 0: vkDestroyPipeline(device.device, state.overlay, none)
         if state.depth_test != 0: vkDestroyPipeline(device.device, state.depth_test, none)

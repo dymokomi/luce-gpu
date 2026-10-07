@@ -101,6 +101,13 @@ struct VulkanDevice:
     var table_layout: u64
     # Acceleration structure functions and limits (vulkan/accel.lucb), where ray queries are enabled.
     var ray: VulkanRay*?
+    # The open recording: passes, uploads and copies recorded since the last
+    # submission (vulkan_begin), and how many.
+    var open: VulkanSlot*?
+    var open_uses: usize
+    # The draw-data ring (vulkan/ring.lucb).
+    var ring: VulkanChunk*?
+    var ring_current: VulkanChunk*?
     var queue: u64
     var family: u32
     var memory: VkPhysicalDeviceMemoryProperties
@@ -563,11 +570,12 @@ func vulkan_retire(slot: VulkanSlot*, item: VulkanRetired) -> !:
     slot.retired[slot.retired_count] = item
     slot.retired_count += 1
 
-## Queue `item` behind the newest submission, or release it now when none is in flight.
+## Queue `item` behind the newest submission (the open recording, if any), or
+## release it now when none is in flight.
 func vulkan_retire_latest(device: VulkanDevice*, item: VulkanRetired):
     vulkan_poll(device)
-    if device.submitted > device.completed:
-        let slot = &device.slots[(usize)(device.submitted % (u64)vulkan_slot_limit)]
+    if device.submitted > device.completed or device.open != none:
+        let slot = device.open else &device.slots[(usize)(device.submitted % (u64)vulkan_slot_limit)]
         vulkan_retire(slot, item) catch failure:
             _ = failure
             # Out of host memory: fall back to waiting rather than leaking or racing.
@@ -623,10 +631,13 @@ func vulkan_poll(device: VulkanDevice*):
             return
         vulkan_retire_through(device, device.completed + 1)
 
-## Wait until submission `serial` has completed, and retire it and every earlier one.
+## Wait until submission `serial` has completed, and retire it and every earlier
+## one; the open recording's serial is submitted first.
 func vulkan_wait(device: VulkanDevice*, serial: u64) -> !:
     if serial <= device.completed:
         return
+    if serial > device.submitted:
+        try vulkan_flush(device)
     let slot = &device.slots[(usize)(serial % (u64)vulkan_slot_limit)]
     let result = vkWaitForFences(device.device, 1, &slot.fence, 1, 0xffffffffffffffffu64)
     # VK_ERROR_DEVICE_LOST: the work failed on the GPU.
@@ -639,15 +650,26 @@ func vulkan_wait(device: VulkanDevice*, serial: u64) -> !:
 func vulkan_idle(device: VulkanDevice*):
     vulkan_retire_through(device, device.submitted)
 
-## Begin recording the next submission. When the ring is full this waits for the
-## oldest submission; the serial the recording will get is `device.submitted + 1`.
-## The recording starts with the submission's start time.
+## How many recordings (passes, uploads, copies) the open recording takes before
+## it is submitted on its own: what bounds the latency and the draw-data ring for
+## a program that renders offscreen without presenting or reading.
+let vulkan_open_limit: usize = 64
+
+## Record into the next submission: the open recording, or a new one. When the
+## ring is full this waits for the oldest submission; the serial the recording
+## will get is `device.submitted + 1`. A new recording starts with the
+## submission's start time.
 func vulkan_begin(device: VulkanDevice*) -> VulkanSlot*!:
+    if let open = device.open:
+        device.open_uses += 1
+        return open
     let slot = try vulkan_reserve(device)
     try vulkan_check(vkResetCommandPool(device.device, slot.pool, 0), "a Vulkan command pool could not be reset")
     var begin = VkCommandBufferBeginInfo(sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT)
     try vulkan_check(vkBeginCommandBuffer(slot.command, &begin), "Vulkan recording could not begin")
     vulkan_time_start(device, slot.command)
+    device.open = slot
+    device.open_uses = 1
     return slot
 
 ## The ring slot the next submission takes, once free: a submission recorded
@@ -688,12 +710,26 @@ func vulkan_abandon(device: VulkanDevice*, slot: VulkanSlot*):
     vulkan_retire_through(device, device.submitted)
     vulkan_slot_free(device, slot)
 
-## Submit the recording begun by `vulkan_begin` without waiting, and return its
-## serial. Later submissions on the queue are ordered after it. If submission
-## fails, the device is drained and what the slot held is freed.
+## End a piece of recording begun by `vulkan_begin` and return the serial its
+## submission gets. The recording stays open for more, and is submitted at a
+## surface's present, before a read or compute pass, when a wait asks for its
+## serial, or after `vulkan_open_limit` pieces; later work is ordered after it.
 func vulkan_end(device: VulkanDevice*, slot: VulkanSlot*) -> u64!:
+    _ = slot
+    let serial = device.submitted + 1
+    if device.open_uses >= vulkan_open_limit:
+        try vulkan_flush(device)
+    return serial
+
+## Submit the open recording, if any, without waiting. If submission fails, the
+## device is drained and what the recording held is freed.
+func vulkan_flush(device: VulkanDevice*) -> !:
+    let slot = device.open else return
+    device.open = none
+    device.open_uses = 0
     errdefer vulkan_abandon(device, slot)
     vulkan_time_end(device, slot.command)
     try vulkan_check(vkEndCommandBuffer(slot.command), "Vulkan recording could not finish")
     var submit = VkSubmitInfo(sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, commandBufferCount = 1, pCommandBuffers = &slot.command)
-    return try vulkan_submit_reserved(device, slot, &submit)
+    _ = try vulkan_submit_reserved(device, slot, &submit)
+    vulkan_ring_trim(device)

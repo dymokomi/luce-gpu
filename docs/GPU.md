@@ -882,14 +882,15 @@ returns, so its submission is finished at once. On Metal it runs while the
 next frame records. Metal keeps a submission's command buffers only while they
 run, so drawables go back to their layer as before.
 
-On Metal, one submission usually covers a whole frame. Texture frames,
-uploads, copies and mipmap generation are encoded into the device's open
-command buffer instead of a command buffer each. The open buffer is committed
-when a surface presents, a read or compute pass needs what came before, a
-`Device.done`, `wait` or `gpu_time` asks about its submission, or it has taken
-64 encodings. Texture frames and transfers since the last commit therefore
-share a submission, and the surface frame that follows them carries the whole
-frame's GPU time.
+Texture frames, uploads, copies and mipmap generation are recorded into the
+device's open command buffer instead of a command buffer each. The open buffer
+is submitted when a read or a compute pass is submitted, when `Device.done`,
+`wait` or `gpu_time` asks about its submission, or after 64 recordings. On
+Metal a surface's present also submits it, with the surface frame's own pass,
+as one submission. On Vulkan it is submitted just before the surface frame,
+which waits on the swapchain's semaphores in a submission of its own. Texture
+frames and transfers since the last submission share a submission, so a
+heavy frame is one or two submissions instead of one per pass.
 
 ### Per-draw memory
 
@@ -900,7 +901,11 @@ GPU has finished the submission that read them. A frame needing more adds a
 chunk, and a single larger request gets a chunk of its size. Committing frees
 chunks no work uses, beyond two kept for the next frames. Before the ring,
 every pass made three short-lived buffers and every upload a staging buffer,
-and the Metal driver grew its pools by 8 MiB with them and kept them.
+and the Metal driver grew its pools by 8 MiB with them and kept them. Vulkan
+keeps the same kind of ring for draw data (host-visible, mapped for good),
+where each pass used to make a buffer and a memory allocation of its own. Its
+texture uploads already went through the upload ring described under Textures
+and offscreen frames.
 
 `tests/framebench` measures a frame's CPU time and the memory the driver keeps
 on a heavy scene (16 tiles drawn into textures, an upload and about 1000

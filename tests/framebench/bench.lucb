@@ -62,7 +62,10 @@ pub func main(arguments: str[]) -> i32!:
     defer free(pixels) in memory.heap
     var vertices = try new gpu.Vertex[6 * 1024] --- in memory.heap
     defer free(vertices) in memory.heap
+    # CPU time recording and submitting a frame, and separately the surface's
+    # present, which can wait for the display (a throttled window waits long).
     var cpu: u64 = 0
+    var presenting: u64 = 0
     var shown: usize = 0
     var frame_index: usize = 0
     while shown < frames and frame_index < frames * 4:
@@ -96,16 +99,18 @@ pub func main(arguments: str[]) -> i32!:
             rectangles(vertices, 1024, frame_index)
             try root.value().triangles(vertices[..<6 * 1024])
         root.release()
+        let presented = time.now()
         let result = try frame.value().present(gpu.Color(0.2, 0.2, 0.25))
         frame.release()
-        cpu += time.now() - start
+        cpu += presented - start
+        presenting += time.now() - presented
         if result == gpu.PresentResult.submitted:
             shown += 1
         else:
             thread.sleep(10)
     try surface.wait_idle()
     let held = try device.memory()
-    print(f"{mode}: {shown} frames, CPU {(f64)cpu / ((f64)(shown if shown > 0 else 1) * 1000.0)} us per frame, device allocated {held.used // 1048576} MiB\n")
+    print(f"{mode}: {shown} frames, CPU {(f64)cpu / ((f64)(shown if shown > 0 else 1) * 1000.0)} us per frame (+ present {(f64)presenting / ((f64)(shown if shown > 0 else 1) * 1000.0)} us), device allocated {held.used // 1048576} MiB\n")
     print("sampling\n")
     thread.sleep(5000)
     for index in 0..<tile_count:

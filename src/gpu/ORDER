@@ -48,6 +48,7 @@ vulkan/compute.lucb
 vulkan/accel.lucb
 vulkan/texture.lucb
 vulkan/transfer.lucb
+vulkan/ring.lucb
 vulkan/shader.lucb
 vulkan/surface.lucb
 vulkan/pipeline.lucb

@@ -43,6 +43,10 @@ func backend_latest_submission(device: DeviceState*) -> Submission:
 func backend_submission_done(device: DeviceState*, submission: Submission) -> bool:
     if (platform.windows or platform.linux) and device.backend == Backend.vulkan:
         let native = (VulkanDevice*)device.native
+        # Asking about the open recording's work submits it.
+        if submission.serial > native.submitted:
+            vulkan_flush(native) catch failure:
+                _ = failure
         vulkan_poll(native)
         return native.completed >= submission.serial
     if platform.macos and platform.arm64:

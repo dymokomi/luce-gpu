@@ -1,0 +1,104 @@
+#==============================================================================================
+#
+#   ring - The Vulkan draw-data ring
+#
+#   DESCRIPTION:
+#       A pass's vertices, coverage words, instances and per-draw parameters are written into
+#       large host-visible buffers made once and kept mapped, instead of a buffer and a memory
+#       allocation of their own each: vkAllocateMemory per pass is slow and counted against a
+#       small per-process limit. A chunk is filled front to back for the next submission and
+#       recorded as used by its serial; once that submission has finished, the chunk is filled
+#       again from the front. A frame needing more adds a chunk (a larger one for a single
+#       large request), and each submission trims chunks no work uses beyond two.
+#
+#==============================================================================================
+
+struct VulkanChunk:
+    var buffer: u64
+    var memory: u64
+    var mapped: u8*?
+    var size: u64
+    var used: u64
+    ## The newest submission whose work reads the chunk.
+    var serial: u64
+    var next: VulkanChunk*?
+
+## A region of a chunk: the buffer, its offset, and where the CPU writes it.
+struct VulkanSpan:
+    var buffer: u64
+    var offset: u64
+    var data: u8*
+
+let vulkan_chunk_bytes: u64 = 8u64 << 20
+let vulkan_spare_chunks: usize = 2
+## Offsets every span starts at: at least any device's storage-buffer offset alignment.
+let vulkan_span_alignment: u64 = 256
+
+## Room for `bytes`, for work of the next submission (the open one, if any).
+func vulkan_ring_take(device: VulkanDevice*, bytes: u64) -> VulkanSpan!:
+    let serial = device.submitted + 1
+    let wanted = bytes if bytes > 0 else 4
+    if let chunk = device.ring_current:
+        if let span = vulkan_chunk_take(chunk, wanted, serial): return span
+    vulkan_poll(device)
+    var cursor = device.ring
+    while let chunk = cursor:
+        cursor = chunk.next
+        if chunk.size >= wanted and chunk.serial <= device.completed:
+            chunk.used = 0
+            device.ring_current = chunk
+            return (vulkan_chunk_take(chunk, wanted, serial)) else trap("an emptied chunk lost its room")
+    let size = vulkan_chunk_bytes if wanted <= vulkan_chunk_bytes else (wanted + vulkan_chunk_bytes - 1) // vulkan_chunk_bytes * vulkan_chunk_bytes
+    let chunk = try new VulkanChunk(size = size, next = device.ring) in memory.heap
+    errdefer vulkan_chunk_destroy(device, chunk)
+    var info = VkBufferCreateInfo(sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, size = size,
+                                  usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT)
+    try vulkan_check(vkCreateBuffer(device.device, &info, none, &chunk.buffer), "a Vulkan draw-data buffer could not be created")
+    var requirements: VkMemoryRequirements
+    vkGetBufferMemoryRequirements(device.device, chunk.buffer, &requirements)
+    chunk.memory = try vulkan_memory(device, requirements, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+    try vulkan_check(vkBindBufferMemory(device.device, chunk.buffer, chunk.memory, 0), "Vulkan draw-data memory could not be bound")
+    var mapped: void*? = none
+    try vulkan_check(vkMapMemory(device.device, chunk.memory, 0, size, 0, &mapped), "Vulkan draw-data memory could not be mapped")
+    chunk.mapped = (u8*)(mapped else error(failed, "Vulkan returned an empty memory mapping"))
+    device.ring = chunk
+    device.ring_current = chunk
+    return (vulkan_chunk_take(chunk, wanted, serial)) else trap("a fresh chunk lost its room")
+
+func vulkan_chunk_take(chunk: VulkanChunk*, bytes: u64, serial: u64) -> VulkanSpan?:
+    let start = (chunk.used + vulkan_span_alignment - 1) // vulkan_span_alignment * vulkan_span_alignment
+    if start + bytes > chunk.size: return none
+    chunk.used = start + bytes
+    chunk.serial = serial
+    let base = chunk.mapped else trap("a Vulkan draw-data chunk lost its mapping")
+    return VulkanSpan(buffer = chunk.buffer, offset = start, data = base + (usize)start)
+
+func vulkan_chunk_destroy(device: VulkanDevice*, chunk: VulkanChunk*):
+    if chunk.buffer != 0: vkDestroyBuffer(device.device, chunk.buffer, none)
+    # Freeing the memory unmaps it.
+    if chunk.memory != 0: vkFreeMemory(device.device, chunk.memory, none)
+    free(chunk) in memory.heap
+
+## Free chunks no submitted work uses, beyond two standard ones kept for the
+## next frames (a large chunk made for one big frame goes first).
+func vulkan_ring_trim(device: VulkanDevice*):
+    var kept: usize = 0
+    var previous: VulkanChunk*? = none
+    var cursor = device.ring
+    while let chunk = cursor:
+        cursor = chunk.next
+        let idle = chunk != device.ring_current and chunk.serial <= device.completed
+        if idle and (chunk.size != vulkan_chunk_bytes or kept >= vulkan_spare_chunks):
+            if let before = previous: before.next = chunk.next
+            else: device.ring = chunk.next
+            vulkan_chunk_destroy(device, chunk)
+            continue
+        if idle: kept += 1
+        previous = chunk
+
+## After the device is idle.
+func vulkan_ring_destroy(device: VulkanDevice*):
+    while let chunk = device.ring:
+        device.ring = chunk.next
+        vulkan_chunk_destroy(device, chunk)
+    device.ring_current = none

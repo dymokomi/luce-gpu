@@ -118,6 +118,8 @@ func vulkan_read_submit(device: VulkanDevice*, index: usize, entries: const Read
         if let buffer = entry.buffer: ((VulkanBuffer*)buffer.native).last_use = serial
         if entry.texture != none: vulkan_entry_texture(entry).last_use = serial
     ring.serial = serial
+    # Reads are waited for or polled next: they go to the GPU now.
+    try vulkan_flush(device)
     return Ticket(serial = serial)
 
 ## The image a texture read copies from.
