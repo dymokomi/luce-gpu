@@ -916,11 +916,24 @@ and offscreen frames.
 
 `tests/framebench` measures a frame's CPU time and the memory the driver keeps
 on a heavy scene (16 tiles drawn into textures, an upload and about 1000
-rectangles a frame) and a blank one. Note that on Apple silicon the driver
-itself takes a fixed amount once a process first uses each kind of encoder:
-about 230 MB for render passes and 160 MB more for blit or compute work
-(`footprint` lists it as "IOAccelerator (graphics)", and a 20-line
-Objective-C program shows the same). That baseline is not luce-gpu's to free.
+rectangles a frame), an app-like one (text-like coverage masks, a mipmapped
+image uploaded, regenerated and read back now and then) and a blank one.
+
+On Apple silicon the driver itself keeps memory once a process first uses each
+kind of encoder: about 230 MB for render passes, and 160 MB more for blit or
+compute work. It is dirty, resident memory (`footprint` lists it as
+"IOAccelerator (graphics)"), and a 20-line Objective-C program shows the same.
+So drawing work on Metal never opens a blit or compute encoder. Texture
+uploads, `copy_texture`, mipmap generation, buffer uploads and clears, and
+readback are render passes: a pass into the texture's region, through an unorm
+view of an sRGB texture so bytes are written as they are, reads texels from
+the upload ring, another texture or the level above. Readback and buffer work
+are passes with no attachments whose fragments write a buffer. Only explicit
+compute (`Compute` passes and acceleration structure builds) opens compute and
+blit encoders. On the M4 Max the heavy scene keeps 266 MB and the app-like one
+292 MB, against 427 MB and 450 MB with blits. The rest above the 229 MB baseline
+is luce-gpu's own allocations: the upload ring, the readback ring and the depth
+attachment.
 
 ### Long-running work
 

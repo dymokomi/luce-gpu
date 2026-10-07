@@ -33,6 +33,7 @@ metal/compute.lucb
 metal/accel.lucb
 metal/submission.lucb
 metal/ring.lucb
+metal/copies.lucb
 metal/texture.lucb
 metal/transfer.lucb
 metal/surface.lucb

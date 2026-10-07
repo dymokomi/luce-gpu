@@ -2,7 +2,7 @@
 ## on a heavy scene (tiles drawn into textures, uploads, a window full of
 ## triangles and images) or a blank one (a cleared window). For profiling the
 ## drawing paths' allocations. Not a check: build and run it by hand.
-##   luc build (in this directory), then build/framebench heavy|tiles|draws|blank|idle [frames]
+##   luc build (in this directory), then build/framebench heavy|tiles|draws|app|blank|idle [frames]
 ## It prints "sampling" and then holds its memory for five seconds, so a
 ## footprint (macOS `footprint`, Linux /proc/PID/status) can be taken.
 from luce_gpu import gpu
@@ -38,6 +38,9 @@ func parse_count(text: str) -> usize!:
 pub func main(arguments: str[]) -> i32!:
     let mode = arguments[1] if arguments.length > 1 else "heavy"
     let heavy = mode == "heavy" or mode == "tiles" or mode == "draws"
+    # app: what a luce-ui window does: coverage masks (text), rectangles, a
+    # mipmapped image uploaded and regenerated now and then, and a readback.
+    let app = mode == "app"
     # tiles: only the tile passes; draws: only the window's draws.
     let tiles_on = mode == "heavy" or mode == "tiles"
     let draws_on = mode == "heavy" or mode == "draws"
@@ -56,8 +59,11 @@ pub func main(arguments: str[]) -> i32!:
     defer free(tiles) in memory.heap
     for index in 0..<tile_count:
         tiles[index] = try gpu.Texture.create(device, tile_size, tile_size, gpu.Format.rgba8)
-    var picture = try gpu.Texture.create(device, 64, 64, gpu.Format.rgba8)
+    var picture = try gpu.Texture.create(device, 64, 64, gpu.Format.rgba8, mipmaps = app)
     defer picture.destroy()
+    var glyph: u8[256]
+    for index in 0..<glyph.length:
+        glyph[index] = (u8)((index * 37) % 256)
     var pixels = try new u8[64 * 64 * 4] in memory.heap
     defer free(pixels) in memory.heap
     var vertices = try new gpu.Vertex[6 * 1024] --- in memory.heap
@@ -92,9 +98,22 @@ pub func main(arguments: str[]) -> i32!:
             # A picture uploaded every frame.
             pixels[(frame_index * 4) % pixels.length] = (u8)(frame_index % 256)
             try picture.upload(pixels)
+        if app and frame_index % 60 == 1:
+            pixels[(frame_index * 4) % pixels.length] = (u8)(frame_index % 256)
+            try picture.upload(pixels)
+            try picture.generate_mipmaps()
+            try picture.read(pixels)
         let frame = try surface.frame()
         let root = try frame.value().target()
         let size = try root.value().size()
+        if app:
+            for index in 0..<(usize)200:
+                let x = (f64)(index % 20) * 20.0
+                let y = (f64)(index // 20) * 20.0
+                try root.value().mask(glyph, 16, 16, gpu.Rect(x = x, y = y, width = 16.0, height = 16.0), gpu.Color(0.9, 0.9, 0.9))
+            try gpu.draw_image(root.value(), picture, gpu.Rect(x = 420.0, width = 32.0, height = 32.0), filter = gpu.Filter.trilinear)
+            rectangles(vertices, 64, frame_index)
+            try root.value().triangles(vertices[..<6 * 64])
         if draws_on:
             for index in 0..<tile_count:
                 let x = (f64)(index % 4) * size.width / 4.0

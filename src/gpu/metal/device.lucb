@@ -22,6 +22,8 @@ struct MetalDevice:
     var open: void*?
     var open_serial: u64
     var open_uses: usize
+    # Render-pass uploads, copies and readback (metal/copies.lucb).
+    var copies: MetalCopies*?
     # The upload ring (metal/ring.lucb).
     var ring: MetalChunk*?
     var ring_current: MetalChunk*?
@@ -51,6 +53,7 @@ func metal_device_destroy(state: MetalDevice*):
     metal_compute_destroy(state)
     metal_submissions_destroy(state)
     metal_ring_destroy(state)
+    if let copies = state.copies: metal_copies_destroy(copies)
     if let queue = state.queue:
         metal_void(queue, metal_sel("release"))
     if let device = state.device:

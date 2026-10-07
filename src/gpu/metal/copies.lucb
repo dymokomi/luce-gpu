@@ -1,0 +1,249 @@
+#==============================================================================================
+#
+#   copies - Metal uploads, copies, readback and mipmaps with render passes
+#
+#   DESCRIPTION:
+#       Drawing work never uses a blit or compute encoder on Metal: the driver keeps about 160 MB
+#       for the rest of a process once it first runs either, on top of the 230 MB a render pass
+#       costs. Texture uploads, texture copies, mipmap levels, buffer uploads and fills, and
+#       readback are render passes instead. A pass into the texture's region (through an unorm
+#       view of an sRGB texture, so bytes are written as they are) reads texels from the upload
+#       ring, another texture or the level above; readback and buffer work are passes with no
+#       attachments whose fragments write a buffer. Explicit compute (Compute passes, ray
+#       builds) still uses compute and acceleration structure encoders.
+#
+#==============================================================================================
+
+## The shaders: a full-viewport triangle and one fragment function per job.
+let metal_copy_source: c.str = "#include <metal_stdlib>\nusing namespace metal;\n\n// origin: the target region's corner; source: the source region's corner;\n// row: bytes per buffer row; offset: the buffer's first byte; kind: the texel\n// layout; count and value: a word copy's or fill's length and value; size: a\n// mip level's size; width: texels a buffer pass covers per row.\nstruct CopyParams { uint2 origin; uint2 source; uint row; uint offset; uint kind; uint count; uint value; uint width; float2 size; };\n\nvertex float4 luce_copy_vertex(uint id [[vertex_id]]) {\n    float2 p = float2(float((id << 1) & 2), float(id & 2));\n    return float4(p * 2.0 - 1.0, 0.0, 1.0);\n}\n\n// Kinds: 0 four unorm bytes, 1 one unorm byte, 2 four halves, 3 four floats,\n// 4 one float, 6 two floats; 5 one uint (the _uint functions).\nfragment float4 luce_upload(float4 at [[position]], constant CopyParams& p [[buffer(0)]], const device uchar* bytes [[buffer(1)]]) {\n    uint2 xy = uint2(at.xy) - p.origin;\n    const device uchar* row = bytes + p.offset + xy.y * p.row;\n    switch (p.kind) {\n        case 0: return float4(((const device uchar4*)row)[xy.x]) / 255.0;\n        case 1: return float4(float(row[xy.x]) / 255.0, 0.0, 0.0, 1.0);\n        case 2: return float4(((const device half4*)row)[xy.x]);\n        case 3: return ((const device float4*)row)[xy.x];\n        case 4: return float4(((const device float*)row)[xy.x], 0.0, 0.0, 1.0);\n        default: return float4(((const device float2*)row)[xy.x], 0.0, 1.0);\n    }\n}\n\nfragment uint4 luce_upload_uint(float4 at [[position]], constant CopyParams& p [[buffer(0)]], const device uchar* bytes [[buffer(1)]]) {\n    uint2 xy = uint2(at.xy) - p.origin;\n    return uint4(((const device uint*)(bytes + p.offset + xy.y * p.row))[xy.x], 0u, 0u, 1u);\n}\n\nfragment float4 luce_copy(float4 at [[position]], constant CopyParams& p [[buffer(0)]], texture2d<float, access::read> image [[texture(0)]]) {\n    return image.read(uint2(at.xy) - p.origin + p.source);\n}\n\nfragment uint4 luce_copy_uint(float4 at [[position]], constant CopyParams& p [[buffer(0)]], texture2d<uint, access::read> image [[texture(0)]]) {\n    return image.read(uint2(at.xy) - p.origin + p.source);\n}\n\n// One level from the level above: a bilinear sample at the texel's centre\n// averages the four texels it covers.\nfragment float4 luce_mip(float4 at [[position]], constant CopyParams& p [[buffer(0)]], texture2d<float> above [[texture(0)]], sampler smooth [[sampler(0)]]) {\n    return above.sample(smooth, at.xy / p.size, level(0.0));\n}\n\n// Readback: no attachments; each fragment writes its texel's bytes.\nfragment void luce_read(float4 at [[position]], constant CopyParams& p [[buffer(0)]], device uchar* bytes [[buffer(1)]], texture2d<float, access::read> image [[texture(0)]]) {\n    uint2 xy = uint2(at.xy);\n    float4 v = image.read(xy + p.source);\n    device uchar* row = bytes + p.offset + xy.y * p.row;\n    switch (p.kind) {\n        case 0: ((device uchar4*)row)[xy.x] = uchar4(rint(clamp(v, 0.0, 1.0) * 255.0)); break;\n        case 1: row[xy.x] = uchar(rint(clamp(v.x, 0.0, 1.0) * 255.0)); break;\n        case 2: ((device half4*)row)[xy.x] = half4(v); break;\n        case 3: ((device float4*)row)[xy.x] = v; break;\n        case 4: ((device float*)row)[xy.x] = v.x; break;\n        default: ((device float2*)row)[xy.x] = v.xy; break;\n    }\n}\n\nfragment void luce_read_uint(float4 at [[position]], constant CopyParams& p [[buffer(0)]], device uchar* bytes [[buffer(1)]], texture2d<uint, access::read> image [[texture(0)]]) {\n    uint2 xy = uint2(at.xy);\n    ((device uint*)(bytes + p.offset + xy.y * p.row))[xy.x] = image.read(xy + p.source).x;\n}\n\n// Words: each fragment copies one 32-bit word, or (kind 1) sets it to value.\nfragment void luce_words(float4 at [[position]], constant CopyParams& p [[buffer(0)]], const device uint* source [[buffer(1)]], device uint* target [[buffer(2)]]) {\n    uint index = uint(at.y) * p.width + uint(at.x);\n    if (index < p.count)\n        target[index] = p.kind == 1u ? p.value : source[index];\n}\n"
+
+## The parameters every copy shader reads (`CopyParams`), 48 bytes.
+struct MetalCopyParams:
+    var origin_x: u32
+    var origin_y: u32
+    var source_x: u32
+    var source_y: u32
+    var row: u32
+    var offset: u32
+    var kind: u32
+    var count: u32
+    var value: u32
+    var width: u32
+    var size_x: f32
+    var size_y: f32
+
+## Pipelines by fragment function and attachment format, built on first use.
+struct MetalCopyPipeline:
+    var function: u8
+    var format: u64
+    var pipeline: void*?
+
+struct MetalCopies:
+    var library: void*?
+    var pipelines: MetalCopyPipeline[32]
+    var count: usize
+    var linear: void*?
+
+let metal_copy_upload: u8 = 0
+let metal_copy_upload_uint: u8 = 1
+let metal_copy_copy: u8 = 2
+let metal_copy_copy_uint: u8 = 3
+let metal_copy_mip: u8 = 4
+let metal_copy_read: u8 = 5
+let metal_copy_read_uint: u8 = 6
+let metal_copy_word_fill: u8 = 7
+## No attachment: the readback and buffer passes.
+let metal_copy_no_format: u64 = 0
+
+func metal_copy_function(function: u8) -> c.str:
+    if function == metal_copy_upload: return "luce_upload"
+    if function == metal_copy_upload_uint: return "luce_upload_uint"
+    if function == metal_copy_copy: return "luce_copy"
+    if function == metal_copy_copy_uint: return "luce_copy_uint"
+    if function == metal_copy_mip: return "luce_mip"
+    if function == metal_copy_read: return "luce_read"
+    if function == metal_copy_read_uint: return "luce_read_uint"
+    return "luce_words"
+
+## The texel layout the shaders read and write for `format` (CopyParams.kind).
+func metal_copy_kind(pixel_format: Format) -> u32:
+    if pixel_format == Format.r8: return 1
+    if pixel_format == Format.rgba16_float: return 2
+    if pixel_format == Format.rgba32_float: return 3
+    if pixel_format == Format.r32_float: return 4
+    if pixel_format == Format.r32_uint: return 5
+    if pixel_format == Format.rg32_float: return 6
+    return 0
+
+func metal_copies(device: MetalDevice*) -> MetalCopies*!:
+    if let copies = device.copies: return copies
+    let copies = try new MetalCopies() in memory.heap
+    errdefer metal_copies_destroy(copies)
+    # MSL 3.0: fragments that write device buffers.
+    copies.library = try metal_compile(metal_required(device.device), metal_copy_source, false, 3u64 << 16)
+    copies.linear = try metal_sampler(metal_required(device.device), 1)
+    device.copies = copies
+    return copies
+
+func metal_copies_destroy(copies: MetalCopies*):
+    for entry in copies.pipelines[..<copies.count]:
+        metal_release_optional(entry.pipeline)
+    metal_release_optional(copies.library)
+    metal_release_optional(copies.linear)
+    free(copies) in memory.heap
+
+## The pipeline of `function` drawing into attachments of `format` (none: no attachment).
+func metal_copy_pipeline(device: MetalDevice*, copies: MetalCopies*, function: u8, format: u64) -> void*!:
+    for entry in copies.pipelines[..<copies.count]:
+        if entry.function == function and entry.format == format:
+            return metal_required(entry.pipeline)
+    if copies.count == copies.pipelines.length:
+        error(failed, "too many Metal copy pipelines")
+    let library = metal_required(copies.library)
+    let vertex = metal_with_object(library, metal_sel("newFunctionWithName:"), try metal_text("luce_copy_vertex")) else error(failed, "the copy vertex stage is missing")
+    defer metal_void(vertex, metal_sel("release"))
+    let fragment = metal_with_object(library, metal_sel("newFunctionWithName:"), try metal_text(metal_copy_function(function))) else error(failed, "a copy fragment stage is missing")
+    defer metal_void(fragment, metal_sel("release"))
+    let descriptor = metal_ptr(try metal_class("MTLRenderPipelineDescriptor"), metal_sel("new")) else error(failed, "could not create a GPU pipeline descriptor")
+    defer metal_void(descriptor, metal_sel("release"))
+    metal_object(descriptor, metal_sel("setVertexFunction:"), vertex)
+    metal_object(descriptor, metal_sel("setFragmentFunction:"), fragment)
+    if format != metal_copy_no_format:
+        let attachments = metal_required(metal_ptr(descriptor, metal_sel("colorAttachments")))
+        let attachment = metal_required(metal_index(attachments, metal_sel("objectAtIndexedSubscript:"), 0))
+        metal_uint_arg(attachment, metal_sel("setPixelFormat:"), format)
+    var failure: void*? = none
+    let pipeline = metal_pipeline(metal_required(device.device), metal_sel("newRenderPipelineStateWithDescriptor:error:"), descriptor, &failure) else error(failed, "could not build a Metal copy pipeline")
+    copies.pipelines[copies.count] = MetalCopyPipeline(function = function, format = format, pipeline = pipeline)
+    copies.count += 1
+    return pipeline
+
+## A view of `texture` that reads and writes bytes as stored: an sRGB texture
+## through its unorm format, others as they are (+1, the caller releases it).
+func metal_raw_view(texture: MetalTexture*) -> void*!:
+    let native = metal_required(texture.texture)
+    let format = 70u64 if texture.format == Format.rgba8 else metal_pixel_format(texture.format)
+    return metal_with_u64(native, metal_sel("newTextureViewWithPixelFormat:"), format) else error(failed, "could not view a Metal texture")
+
+## A render pass of `command` into `level` of `target` (a view or texture of
+## `format`), loading what is there, drawing only `region`.
+func metal_copy_pass(command: void*, target: void*, level: u64, region: Region) -> void*!:
+    let descriptor = metal_ptr(try metal_class("MTLRenderPassDescriptor"), metal_sel("renderPassDescriptor")) else error(failed, "could not create a Metal render pass")
+    let attachments = metal_required(metal_ptr(descriptor, metal_sel("colorAttachments")))
+    let attachment = metal_required(metal_index(attachments, metal_sel("objectAtIndexedSubscript:"), 0))
+    metal_object(attachment, metal_sel("setTexture:"), target)
+    metal_uint_arg(attachment, metal_sel("setLevel:"), level)
+    metal_uint_arg(attachment, metal_sel("setLoadAction:"), 1)
+    metal_uint_arg(attachment, metal_sel("setStoreAction:"), 1)
+    let encoder = metal_with_object(command, metal_sel("renderCommandEncoderWithDescriptor:"), descriptor) else error(failed, "could not create a Metal render encoder")
+    metal_copy_region(encoder, region)
+    return encoder
+
+## A render pass of `command` with no attachments, `width` by `height` fragments.
+func metal_buffer_pass(command: void*, width: u32, height: u32) -> void*!:
+    let descriptor = metal_ptr(try metal_class("MTLRenderPassDescriptor"), metal_sel("renderPassDescriptor")) else error(failed, "could not create a Metal render pass")
+    metal_uint_arg(descriptor, metal_sel("setRenderTargetWidth:"), (u64)width)
+    metal_uint_arg(descriptor, metal_sel("setRenderTargetHeight:"), (u64)height)
+    metal_uint_arg(descriptor, metal_sel("setDefaultRasterSampleCount:"), 1)
+    let encoder = metal_with_object(command, metal_sel("renderCommandEncoderWithDescriptor:"), descriptor) else error(failed, "could not create a Metal render encoder")
+    metal_copy_region(encoder, Region(0, 0, width, height))
+    return encoder
+
+func metal_copy_region(encoder: void*, region: Region):
+    metal_viewport(encoder, metal_sel("setViewport:"), LuceGpuMetalViewport(x = (f64)region.x, y = (f64)region.y, width = (f64)region.width, height = (f64)region.height, near = 0.0, far = 1.0))
+    metal_scissor(encoder, metal_sel("setScissorRect:"), LuceGpuMetalScissor(x = (u64)region.x, y = (u64)region.y, width = (u64)region.width, height = (u64)region.height))
+
+## Draw the full-viewport triangle with `pipeline` and `params`, and end the pass.
+func metal_copy_draw(encoder: void*, pipeline: void*, params: MetalCopyParams):
+    var bytes = params
+    metal_object(encoder, metal_sel("setRenderPipelineState:"), pipeline)
+    metal_inline_bytes(encoder, metal_sel("setFragmentBytes:length:atIndex:"), &bytes, 48, 0)
+    metal_draw(encoder, metal_sel("drawPrimitives:vertexStart:vertexCount:"), 3, 0, 3)
+    metal_void(encoder, metal_sel("endEncoding"))
+
+# mark: Textures ===============================================================================
+
+## Write `region` of `texture` from tightly packed texels at `span` in the upload ring.
+func metal_copy_upload_texture(device: MetalDevice*, command: void*, texture: MetalTexture*, region: Region, buffer: void*, offset: u64) -> !:
+    let copies = try metal_copies(device)
+    let view = try metal_raw_view(texture)
+    defer metal_void(view, metal_sel("release"))
+    let integer = texture.format == Format.r32_uint
+    let pipeline = try metal_copy_pipeline(device, copies, metal_copy_upload_uint if integer else metal_copy_upload, metal_uint(view, metal_sel("pixelFormat")))
+    let encoder = try metal_copy_pass(command, view, 0, region)
+    metal_bind_buffer(encoder, metal_sel("setFragmentBuffer:offset:atIndex:"), buffer, offset, 1)
+    metal_copy_draw(encoder, pipeline, MetalCopyParams(origin_x = region.x, origin_y = region.y, row = region.width * (u32)texel_bytes(texture.format), kind = metal_copy_kind(texture.format)))
+
+## Copy `region` of `source` to (`x`, `y`) of `target` (the same format).
+func metal_copy_texture_pass(device: MetalDevice*, command: void*, source: MetalTexture*, region: Region, target: MetalTexture*, x: u32, y: u32) -> !:
+    let copies = try metal_copies(device)
+    let from_view = try metal_raw_view(source)
+    defer metal_void(from_view, metal_sel("release"))
+    let to_view = try metal_raw_view(target)
+    defer metal_void(to_view, metal_sel("release"))
+    let integer = target.format == Format.r32_uint
+    let pipeline = try metal_copy_pipeline(device, copies, metal_copy_copy_uint if integer else metal_copy_copy, metal_uint(to_view, metal_sel("pixelFormat")))
+    let encoder = try metal_copy_pass(command, to_view, 0, Region(x, y, region.width, region.height))
+    metal_bind_texture(encoder, metal_sel("setFragmentTexture:atIndex:"), from_view, 0)
+    metal_copy_draw(encoder, pipeline, MetalCopyParams(origin_x = x, origin_y = y, source_x = region.x, source_y = region.y))
+
+## Fill every level after the first from the one above, a render pass each.
+func metal_copy_mipmaps(device: MetalDevice*, command: void*, texture: MetalTexture*, levels: u32) -> !:
+    let copies = try metal_copies(device)
+    let native = metal_required(texture.texture)
+    let format = metal_uint(native, metal_sel("pixelFormat"))
+    let pipeline = try metal_copy_pipeline(device, copies, metal_copy_mip, format)
+    var width = texture.width
+    var height = texture.height
+    for level in 1..<levels:
+        width = width // 2 if width > 1 else 1
+        height = height // 2 if height > 1 else 1
+        # The level above alone, so the pass never samples what it writes.
+        let above = metal_level_view(native, format, (u64)level - 1) else error(failed, "could not view a Metal texture level")
+        let encoder = try metal_copy_pass(command, native, (u64)level, Region(0, 0, width, height))
+        metal_bind_texture(encoder, metal_sel("setFragmentTexture:atIndex:"), above, 0)
+        metal_bind_texture(encoder, metal_sel("setFragmentSamplerState:atIndex:"), metal_required(copies.linear), 0)
+        metal_copy_draw(encoder, pipeline, MetalCopyParams(size_x = (f32)width, size_y = (f32)height))
+        metal_void(above, metal_sel("release"))
+
+## Read `region` of `texture` into `buffer` from `offset`, rows `row` bytes apart.
+func metal_copy_read_texture(device: MetalDevice*, command: void*, texture: MetalTexture*, region: Region, buffer: void*, offset: u64, row: u64) -> !:
+    let copies = try metal_copies(device)
+    let view = try metal_raw_view(texture)
+    defer metal_void(view, metal_sel("release"))
+    let integer = texture.format == Format.r32_uint
+    let pipeline = try metal_copy_pipeline(device, copies, metal_copy_read_uint if integer else metal_copy_read, metal_copy_no_format)
+    let encoder = try metal_buffer_pass(command, region.width, region.height)
+    metal_bind_texture(encoder, metal_sel("setFragmentTexture:atIndex:"), view, 0)
+    metal_bind_buffer(encoder, metal_sel("setFragmentBuffer:offset:atIndex:"), buffer, offset, 1)
+    metal_copy_draw(encoder, pipeline, MetalCopyParams(source_x = region.x, source_y = region.y, row = (u32)row, kind = metal_copy_kind(texture.format)))
+
+# mark: Buffers ================================================================================
+
+## Words a buffer pass covers per row, and the most rows it has.
+let metal_words_width: u64 = 4096
+let metal_words_rows: u64 = 16384
+
+## Copy `bytes` (a multiple of four) from `source` at `source_offset` to
+## `target` at `target_offset`, or, with no source, set every word to `value`.
+func metal_copy_words(device: MetalDevice*, command: void*, source: void*?, source_offset: u64, target: void*, target_offset: u64, bytes: u64, value: u32) -> !:
+    let copies = try metal_copies(device)
+    let pipeline = try metal_copy_pipeline(device, copies, metal_copy_word_fill, metal_copy_no_format)
+    let most = metal_words_width * metal_words_rows
+    var done: u64 = 0
+    let words = bytes // 4
+    while done < words:
+        let count = most if words - done > most else words - done
+        let rows = (count + metal_words_width - 1) // metal_words_width
+        let encoder = try metal_buffer_pass(command, (u32)(count if count < metal_words_width else metal_words_width), (u32)rows)
+        metal_bind_buffer(encoder, metal_sel("setFragmentBuffer:offset:atIndex:"), source else target, source_offset + done * 4 if source != none else target_offset, 1)
+        metal_bind_buffer(encoder, metal_sel("setFragmentBuffer:offset:atIndex:"), target, target_offset + done * 4, 2)
+        metal_copy_draw(encoder, pipeline, MetalCopyParams(kind = 0 if source != none else 1, count = (u32)count, value = value, width = (u32)metal_words_width))
+        done += count
+
+extern func metal_with_u64 as "objc_msgSend"(object: void*, selector: void*, value: u64) -> void*?
+extern func metal_level_view_call as "objc_msgSend"(object: void*, selector: void*, format: u64, kind: u64, levels: LuceGpuMetalRange, slices: LuceGpuMetalRange) -> void*?
+
+func metal_level_view(texture: void*, format: u64, level: u64) -> void*?:
+    # MTLTextureType2D (2).
+    return metal_level_view_call(texture, metal_sel("newTextureViewWithPixelFormat:textureType:levels:slices:"), format, 2, LuceGpuMetalRange(level, 1), LuceGpuMetalRange(0, 1))

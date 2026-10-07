@@ -40,8 +40,9 @@ func metal_read_acquire(device: MetalDevice*) -> ReadSlot!:
         return ReadSlot(index = index, data = (u8*)data, capacity = (usize)slot.size)
     error(failed, "every Metal readback slot is held; finish a read batch first")
 
-## Blit every region of a batch into slot `index` in one command buffer, and
-## commit it; the ticket holds the command buffer until it is waited for.
+## Copy every region of a batch into slot `index` (render passes whose
+## fragments write the slot) and commit; the ticket holds the command buffer
+## until it is waited for.
 func metal_read_submit(device: MetalDevice*, index: usize, entries: const ReadEntry[]) -> Ticket!:
     let pool = objc_autoreleasePoolPush()
     defer objc_autoreleasePoolPop(pool)
@@ -49,21 +50,15 @@ func metal_read_submit(device: MetalDevice*, index: usize, entries: const ReadEn
     # The copies join the open command buffer, committed now: what they read was
     # encoded before them.
     let command = try metal_open(device)
-    let blit = metal_ptr(command, metal_sel("blitCommandEncoder")) else error(failed, "could not create a Metal blit encoder")
     for entry in entries:
         if let buffer = entry.buffer:
-            metal_copy_buffer(blit, metal_sel("copyFromBuffer:sourceOffset:toBuffer:destinationOffset:size:"), buffer.native, (u64)entry.source_offset,
-                              metal_required(ring.buffer), (u64)entry.offset, (u64)entry.bytes)
+            try metal_copy_words(device, command, buffer.native, (u64)entry.source_offset, metal_required(ring.buffer), (u64)entry.offset, (u64)entry.bytes, 0)
             continue
         let source = entry.texture else trap("a read entry has no source")
         let texture = (MetalTexture*)source.native
         let texel = (u64)texel_bytes(texture.format)
         let row = (u64)(entry.row_texels if entry.row_texels > 0 else entry.region.width) * texel
-        metal_copy_from_texture(blit, metal_sel("copyFromTexture:sourceSlice:sourceLevel:sourceOrigin:sourceSize:toBuffer:destinationOffset:destinationBytesPerRow:destinationBytesPerImage:"),
-                                metal_required(texture.texture), 0, 0, LuceGpuMetalOrigin((u64)entry.region.x, (u64)entry.region.y, 0),
-                                LuceGpuMetalExtent((u64)entry.region.width, (u64)entry.region.height, 1),
-                                metal_required(ring.buffer), (u64)entry.offset, row, row * (u64)entry.region.height)
-    metal_void(blit, metal_sel("endEncoding"))
+        try metal_copy_read_texture(device, command, texture, entry.region, metal_required(ring.buffer), (u64)entry.offset, row)
     # Kept past the pool: the wait needs it.
     metal_void(command, metal_sel("retain"))
     metal_flush(device)
@@ -100,19 +95,13 @@ func metal_rings_destroy(device: MetalDevice*):
             metal_void(buffer, metal_sel("release"))
         device.reads[index] = MetalRingSlot()
 
-## Blit every staged copy of an upload batch from `staged`, copied into the
-## upload ring, in the open command buffer.
+## Write every staged copy of an upload batch from `staged`, copied into the
+## upload ring, with render passes in the open command buffer.
 func metal_upload_submit(device: MetalDevice*, entries: const UploadEntry[], staged: const u8[]) -> !:
     let pool = objc_autoreleasePoolPush()
     defer objc_autoreleasePoolPop(pool)
     let command = try metal_open(device)
     let staging = try metal_ring_stage(device, staged)
-    let blit = metal_ptr(command, metal_sel("blitCommandEncoder")) else error(failed, "could not create a Metal blit encoder")
     for entry in entries:
-        let texture = (MetalTexture*)entry.texture.native
-        let row = (u64)entry.region.width * (u64)texel_bytes(texture.format)
-        metal_copy_to_texture(blit, metal_sel("copyFromBuffer:sourceOffset:sourceBytesPerRow:sourceBytesPerImage:sourceSize:toTexture:destinationSlice:destinationLevel:destinationOrigin:"),
-                              staging.buffer, staging.offset + (u64)entry.offset, row, row * (u64)entry.region.height, LuceGpuMetalExtent((u64)entry.region.width, (u64)entry.region.height, 1),
-                              metal_required(texture.texture), 0, 0, LuceGpuMetalOrigin((u64)entry.region.x, (u64)entry.region.y, 0))
-    metal_void(blit, metal_sel("endEncoding"))
+        try metal_copy_upload_texture(device, command, (MetalTexture*)entry.texture.native, entry.region, staging.buffer, staging.offset + (u64)entry.offset)
     metal_encoded(device)

@@ -129,10 +129,13 @@ func metal_drawing(device: MetalDevice*) -> MetalDrawing*!:
 ## keep IEEE rules, as on Vulkan, unless they ask for fast math; the built-in
 ## drawing shaders, which do no inf- or NaN-sensitive work, use fast math (IEEE
 ## rules cost the fill shader about 12% of a heavy frame's GPU time).
-func metal_compile(native: void*, source: c.str, fast_math: bool) -> void*!:
+## A nonzero `version` (an MTLLanguageVersion) asks for that language version,
+## which source using newer features needs.
+func metal_compile(native: void*, source: c.str, fast_math: bool, version: u64 = 0) -> void*!:
     let options = metal_ptr(try metal_class("MTLCompileOptions"), metal_sel("new")) else error(failed, "could not create Metal compile options")
     defer metal_void(options, metal_sel("release"))
     metal_bool_arg(options, metal_sel("setFastMathEnabled:"), fast_math)
+    if version != 0: metal_uint_arg(options, metal_sel("setLanguageVersion:"), version)
     var failure: void*? = none
     return metal_library(native, metal_sel("newLibraryWithSource:options:error:"), try metal_text(source), options, &failure) else error(invalid_shader, "could not compile the Metal shader source")
 

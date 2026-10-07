@@ -3,8 +3,9 @@
 #   texture - Metal textures, uploads, readback and offscreen passes
 #
 #   DESCRIPTION:
-#       Private-storage Metal textures. Uploads go through a blit on the device's queue, ordered
-#       after earlier submissions on any storage mode; readbacks are metal/transfer.lucb's. An offscreen pass renders a canvas into the texture and waits for completion.
+#       Private-storage Metal textures. Uploads, copies and mipmaps are render passes in the
+#       device's open command buffer (metal/copies.lucb), ordered after earlier work; readbacks
+#       are metal/transfer.lucb's. An offscreen pass renders a canvas into the texture.
 #
 #==============================================================================================
 
@@ -32,10 +33,10 @@ func metal_texture_create(device: MetalDevice*, width: u32, height: u32, pixel_f
     metal_uint_arg(descriptor, metal_sel("setWidth:"), (u64)width)
     metal_uint_arg(descriptor, metal_sel("setHeight:"), (u64)height)
     metal_uint_arg(descriptor, metal_sel("setMipmapLevelCount:"), (u64)levels)
-    # MTLStorageModePrivate; MTLTextureUsageShaderRead (1), and RenderTarget (4)
-    # for formats frames render into, ShaderWrite (2) for storage images.
+    # MTLStorageModePrivate; MTLTextureUsageShaderRead (1) and RenderTarget (4):
+    # uploads and copies render into every texture; ShaderWrite (2) for storage images.
     metal_uint_arg(descriptor, metal_sel("setStorageMode:"), 2)
-    metal_uint_arg(descriptor, metal_sel("setUsage:"), 1u64 | (4u64 if renderable(pixel_format) else 0u64) | (2u64 if storage else 0u64))
+    metal_uint_arg(descriptor, metal_sel("setUsage:"), 5u64 | (2u64 if storage else 0u64))
     state.texture = metal_with_object(metal_required(device.device), metal_sel("newTextureWithDescriptor:"), descriptor) else error(out_of_memory, "could not allocate GPU texture storage")
     return state
 
@@ -59,36 +60,26 @@ func metal_texture_upload(device: MetalDevice*, state: MetalTexture*, pixels: co
     let command = try metal_open(device)
     # The bytes are copied into the upload ring, so the caller may reuse them at once.
     let staged = try metal_ring_stage(device, pixels)
-    let blit = metal_ptr(command, metal_sel("blitCommandEncoder")) else error(failed, "could not create a Metal blit encoder")
-    metal_copy_to_texture(blit, metal_sel("copyFromBuffer:sourceOffset:sourceBytesPerRow:sourceBytesPerImage:sourceSize:toTexture:destinationSlice:destinationLevel:destinationOrigin:"),
-                          staged.buffer, staged.offset, row, row * (u64)region.height, LuceGpuMetalExtent((u64)region.width, (u64)region.height, 1),
-                          metal_required(state.texture), 0, 0, LuceGpuMetalOrigin((u64)region.x, (u64)region.y, 0))
-    metal_void(blit, metal_sel("endEncoding"))
+    _ = row
+    try metal_copy_upload_texture(device, command, state, region, staged.buffer, staged.offset)
     metal_encoded(device)
 
 extern func metal_copy_texture as "objc_msgSend"(object: void*, selector: void*, source: void*, source_slice: u64, source_level: u64, origin: LuceGpuMetalOrigin,
                                                  size: LuceGpuMetalExtent, target: void*, target_slice: u64, target_level: u64, target_origin: LuceGpuMetalOrigin)
 
-## Blit `region` of `source` to (`x`, `y`) of `target`.
+## Copy `region` of `source` to (`x`, `y`) of `target`, a render pass.
 func metal_texture_copy(device: MetalDevice*, source: MetalTexture*, region: Region, target: MetalTexture*, x: u32, y: u32) -> !:
     let pool = objc_autoreleasePoolPush()
     defer objc_autoreleasePoolPop(pool)
-    let command = try metal_open(device)
-    let blit = metal_ptr(command, metal_sel("blitCommandEncoder")) else error(failed, "could not create a Metal blit encoder")
-    metal_copy_texture(blit, metal_sel("copyFromTexture:sourceSlice:sourceLevel:sourceOrigin:sourceSize:toTexture:destinationSlice:destinationLevel:destinationOrigin:"),
-                       metal_required(source.texture), 0, 0, LuceGpuMetalOrigin((u64)region.x, (u64)region.y, 0), LuceGpuMetalExtent((u64)region.width, (u64)region.height, 1),
-                       metal_required(target.texture), 0, 0, LuceGpuMetalOrigin((u64)x, (u64)y, 0))
-    metal_void(blit, metal_sel("endEncoding"))
+    try metal_copy_texture_pass(device, try metal_open(device), source, region, target, x, y)
     metal_encoded(device)
 
-## Fill the levels after the first with a blit encoder's mipmap generation.
+## Fill the levels after the first, a render pass each from the level above.
 func metal_texture_mipmaps(device: MetalDevice*, state: MetalTexture*) -> !:
     let pool = objc_autoreleasePoolPush()
     defer objc_autoreleasePoolPop(pool)
-    let command = try metal_open(device)
-    let blit = metal_ptr(command, metal_sel("blitCommandEncoder")) else error(failed, "could not create a Metal blit encoder")
-    metal_object(blit, metal_sel("generateMipmapsForTexture:"), metal_required(state.texture))
-    metal_void(blit, metal_sel("endEncoding"))
+    let levels = (u32)metal_uint(metal_required(state.texture), metal_sel("mipmapLevelCount"))
+    try metal_copy_mipmaps(device, try metal_open(device), state, levels)
     metal_encoded(device)
 
 func metal_texture_render(device: MetalDevice*, state: MetalTexture*, canvas: Canvas, color: Color, keep: bool) -> !:

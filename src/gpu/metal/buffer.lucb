@@ -5,8 +5,8 @@
 #   DESCRIPTION:
 #       Buffers made from data live in shared storage; allocated ones in private storage
 #       (`Memory.device`) or shared storage (`Memory.shared`), whose contents the CPU maps.
-#       Uploads blit from a staging copy on the device's queue, so work still reading the old
-#       contents finishes with them. Every buffer is hazard-tracked, which is what orders
+#       Uploads and the first clear are render passes on the device's queue (metal/copies.lucb),
+#       so work still reading the old contents finishes with them. Every buffer is hazard-tracked, which is what orders
 #       compute dispatches that share it.
 #
 #==============================================================================================
@@ -30,10 +30,7 @@ func metal_buffer_allocate(device: MetalDevice*, bytes: usize, memory_kind: Memo
         let contents = metal_ptr(buffer, metal_sel("contents")) else error(failed, "Metal shared buffer storage is inaccessible")
         memory.set(u8[]((u8*)contents, bytes), 0)
         return buffer
-    let command = try metal_open(device)
-    let blit = metal_ptr(command, metal_sel("blitCommandEncoder")) else error(failed, "could not create a Metal blit encoder")
-    metal_fill_buffer(blit, metal_sel("fillBuffer:range:value:"), buffer, LuceGpuMetalRange(0, (u64)bytes), 0)
-    metal_void(blit, metal_sel("endEncoding"))
+    try metal_copy_words(device, try metal_open(device), none, 0, buffer, 0, (u64)bytes, 0)
     metal_encoded(device)
     return buffer
 
@@ -42,16 +39,14 @@ func metal_buffer_contents(native: void*) -> u8*?:
     let contents = metal_ptr(native, metal_sel("contents")) else return none
     return (u8*)contents
 
-## Stage `data` in the upload ring and blit it in, ordered after everything
+## Stage `data` in the upload ring and copy it in, ordered after everything
 ## encoded before.
 func metal_buffer_upload(device: MetalDevice*, native: void*, offset: usize, data: const u8[]) -> !:
     let pool = objc_autoreleasePoolPush()
     defer objc_autoreleasePoolPop(pool)
     let command = try metal_open(device)
     let staged = try metal_ring_stage(device, data)
-    let blit = metal_ptr(command, metal_sel("blitCommandEncoder")) else error(failed, "could not create a Metal blit encoder")
-    metal_copy_buffer(blit, metal_sel("copyFromBuffer:sourceOffset:toBuffer:destinationOffset:size:"), staged.buffer, staged.offset, native, (u64)offset, (u64)data.length)
-    metal_void(blit, metal_sel("endEncoding"))
+    try metal_copy_words(device, command, staged.buffer, staged.offset, native, (u64)offset, (u64)data.length, 0)
     metal_encoded(device)
 
 func metal_buffer_release(device: void*, native: void*):
