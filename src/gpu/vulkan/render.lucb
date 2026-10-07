@@ -147,9 +147,10 @@ func vulkan_upload(device: VulkanDevice*, canvas: Canvas) -> VulkanUpload!:
 ## `serial` is the submission the commands belong to: every sampled image
 ## records it as its last use.
 func vulkan_encode(device: VulkanDevice*, command: u64, formats: VulkanFormatState*, pass: u64, framebuffer: u64,
-                   canvas: Canvas, upload: VulkanUpload, color: Color, width: u32, height: u32, serial: u64) -> !:
+                   canvas: Canvas, upload: VulkanUpload, color: Color, width: u32, height: u32, serial: u64, encoded: bool = false) -> !:
     var clears: VkClearValue[2]
-    clears[0].color = [(f32)(color.red * color.alpha), (f32)(color.green * color.alpha), (f32)(color.blue * color.alpha), (f32)color.alpha]
+    let clear = Color(srgb_encoded(color.red), srgb_encoded(color.green), srgb_encoded(color.blue), color.alpha) if encoded else color
+    clears[0].color = [(f32)(clear.red * clear.alpha), (f32)(clear.green * clear.alpha), (f32)(clear.blue * clear.alpha), (f32)clear.alpha]
     clears[1].color[0] = 1.0
     # Images sampled before anything was drawn into them get a defined layout
     # here, outside the pass.
@@ -212,6 +213,8 @@ func vulkan_encode(device: VulkanDevice*, command: u64, formats: VulkanFormatSta
                 vkCmdPushConstants(command, device.layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, (u32)uniform_limit, &uniforms)
             else:
                 var params = draw.params
+                if encoded:
+                    params.mode = params.mode | draw_encoded
                 vkCmdPushConstants(command, device.layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 48, &params)
             if draw.instanced:
                 # Six vertices per rectangle, the draw's run of instances.
@@ -264,7 +267,7 @@ func vulkan_render(device: VulkanDevice*, host: window.Presentation, state: Vulk
     try vulkan_check(vkBeginCommandBuffer(state.command, &begin), "Vulkan command recording could not begin")
     # Presentation waits for the queue below, so the images it samples need no serial.
     try vulkan_encode(device, state.command, formats, formats.pass_present, state.images[(usize)index].framebuffer, canvas, upload,
-                      Color(color.red, color.green, color.blue, 1.0), state.width, state.height, 0)
+                      Color(color.red, color.green, color.blue, 1.0), state.width, state.height, 0, state.encoded)
     try vulkan_check(vkEndCommandBuffer(state.command), "Vulkan command recording could not finish")
     var wait_stage: u32 = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
     var signal = state.images[(usize)index].presented

@@ -32,9 +32,11 @@ struct VulkanSurface:
     var depth_view: u64
     var dirty: bool = true
     var poisoned: bool
+    # A UNORM swapchain in the sRGB color space: blending on encoded values.
+    var encoded: bool
 
-func vulkan_surface_open(device: VulkanDevice*, host: window.Presentation) -> VulkanSurface*!:
-    let state = try new VulkanSurface() in memory.heap
+func vulkan_surface_open(device: VulkanDevice*, host: window.Presentation, encoded: bool) -> VulkanSurface*!:
+    let state = try new VulkanSurface(encoded = encoded) in memory.heap
     errdefer vulkan_surface_destroy(device, state)
     state.surface = try vulkan_presentation_surface(device.instance, host)
     var can_present: u32 = 0
@@ -78,16 +80,20 @@ func vulkan_swapchain(device: VulkanDevice*, state: VulkanSurface*, width: u32, 
     let formats = try new VkSurfaceFormatKHR[(usize)count] ---
     defer free(formats)
     try vulkan_check(vkGetPhysicalDeviceSurfaceFormatsKHR(device.physical, state.surface, &count, formats.data), "Vulkan surface formats changed")
+    # sRGB formats for a linear surface; UNORM ones in the sRGB color space for
+    # an encoded surface, so values are written and blended as encoded.
+    let bgra = VK_FORMAT_B8G8R8A8_UNORM if state.encoded else VK_FORMAT_B8G8R8A8_SRGB
+    let rgba = VK_FORMAT_R8G8B8A8_UNORM if state.encoded else VK_FORMAT_R8G8B8A8_SRGB
     var pixel_format: u32 = 0
     for index in 0..<(usize)count:
         if formats[index].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR:
-            if formats[index].format == VK_FORMAT_B8G8R8A8_SRGB or formats[index].format == VK_FORMAT_R8G8B8A8_SRGB:
+            if formats[index].format == bgra or formats[index].format == rgba:
                 pixel_format = formats[index].format
                 break
             if formats[index].format == VK_FORMAT_UNDEFINED:
-                pixel_format = VK_FORMAT_B8G8R8A8_SRGB
+                pixel_format = bgra
     if pixel_format == 0:
-        error(unavailable, "the Vulkan surface has no sRGB render target")
+        error(unavailable, "the Vulkan surface has no 8-bit sRGB render target")
     var desired = capabilities.minImageCount + 1
     if capabilities.maxImageCount > 0 and desired > capabilities.maxImageCount:
         desired = capabilities.maxImageCount

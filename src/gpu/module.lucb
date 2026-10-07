@@ -103,6 +103,17 @@ pub enum Format as u8:
     r32_uint = 6
     rg32_float = 7
 
+## How a presentation surface blends. `linear`: an sRGB attachment, so blending
+## happens in linear light and the hardware encodes on write. `encoded`: an
+## 8-bit attachment tagged sRGB, so blending happens on the encoded values, as
+## web content and most 2D drawing blend. luce-gpu's own draws (triangles,
+## masks, images, clears) look the same on both: their linear-light colors are
+## encoded before they are written. A client shader writes its output as is,
+## so on an encoded surface it writes encoded values.
+pub enum Blending as u8:
+    linear = 0
+    encoded = 1
+
 ## How a draw combines with what is already in the target. Shaders emit
 ## premultiplied color: `over` composites it, `replace` writes it as is, and
 ## `add` sums it.
@@ -168,6 +179,12 @@ func require_thread():
     check_thread() catch failure:
         _ = failure
         trap("GPU destruction requires the main thread")
+
+## `value` (linear light, 0..1) in the sRGB encoding.
+func srgb_encoded(value: f64) -> f64:
+    if value <= 0.0031308:
+        return value * 12.92
+    return 1.055 * math.pow(value, 1.0 / 2.4) - 0.055
 
 func check_color(color: Color) -> !:
     # Positive comparisons also reject NaNs, without depending on math linkage.

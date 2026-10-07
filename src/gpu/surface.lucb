@@ -14,16 +14,21 @@
 pub struct Surface:
     var state: SurfaceState*?
 
-    ## Open a surface presenting `device` onto `target`'s window.
-    pub static func open(device: Device, target: window.Window) -> Surface!:
+    ## Open a surface presenting `device` onto `target`'s window, blending in
+    ## linear light or on encoded values (see `Blending`).
+    pub static func open(device: Device, target: window.Window, blending: Blending = Blending.linear) -> Surface!:
         let device_state = try device.checked()
         var host = try target.acquire_presentation()
         errdefer host.destroy()
-        let native = try backend_surface_open(device_state, host)
+        let native = try backend_surface_open(device_state, host, blending)
         errdefer backend_surface_destroy(device_state, host, native)
-        let state = try new SurfaceState(device = device_state, host = host, native = native) in memory.heap
+        let state = try new SurfaceState(device = device_state, host = host, native = native, blending = blending) in memory.heap
         device_state.references += 1
         return Surface(state = state)
+
+    ## How the surface blends.
+    pub func blending() -> Blending!:
+        return (try self.checked()).blending
 
     ## Extent in logical points and backing pixels; refresh after resized events.
     pub func size() -> window.Size!:
@@ -56,6 +61,7 @@ pub struct Surface:
             error(frame_in_use, "finish the active frame before presenting")
         try check_canvas_device(canvas, state.device)
         try check_canvas_target(canvas, none)
+        try check_canvas_blending(canvas, state.blending)
         return try backend_render(state.device, state.host, state.native, canvas, color)
 
     ## Begin one scoped recording frame. Resize, parent closure, presentation or
@@ -71,6 +77,7 @@ pub struct Surface:
         let recording = (try native.state_value()).value()
         recording.presentation = (void*)state
         recording.device = state.device
+        recording.blending = state.blending
         recording.validate = check_surface_frame
         recording.submit = submit_surface_frame
         recording.release = release_surface_frame
@@ -105,6 +112,7 @@ struct SurfaceState:
     var device: DeviceState*
     var host: window.Presentation
     var native: void*
+    var blending: Blending
     var references: usize = 1
     var closed: bool
     var active_frame: bool
@@ -133,7 +141,16 @@ func submit_surface_frame(context: void*, canvas: Canvas, color: Color) -> Prese
     let state = (SurfaceState*)context
     try check_canvas_device(canvas, state.device)
     try check_canvas_target(canvas, none)
+    try check_canvas_blending(canvas, state.blending)
     return try backend_render(state.device, state.host, state.native, canvas, color)
+
+## Mesh draws write linear light from their own fragment stages, so an encoded
+## surface refuses them rather than show them too dark.
+func check_canvas_blending(canvas: Canvas, blending: Blending) -> !:
+    if blending == Blending.encoded:
+        for draw in canvas.draws[..<canvas.draw_count]:
+            if draw.mesh != none:
+                error(wrong_target, "mesh draws need a linear surface, not an encoded one")
 
 func release_surface_frame(context: void*):
     require_thread()

@@ -43,6 +43,8 @@ struct FrameState:
     var device: DeviceState*?
     # A texture frame's texel format; none for a surface or standalone frame.
     var format: Format?
+    # How a surface frame's target blends; linear for the others.
+    var blending: Blending
     var validate: (func(void*, window.Size) -> unit!)?
     var submit: (func(void*, Canvas, Color) -> PresentResult!)?
     var release: (func(void*) -> unit)?
@@ -202,6 +204,12 @@ pub struct RenderTarget:
     pub func allow_draws(count: usize) -> !:
         try self.frame.check()
         try self.frame.canvas.allow_draws(count)
+
+    ## How the target blends: `encoded` on an encoded surface, `linear` on a
+    ## linear one and on textures (whose formats say how they store values).
+    pub func blending() -> Blending!:
+        try self.frame.check()
+        return self.frame.blending
 
     ## The texel format of the texture this target draws into, or none for a
     ## presentation surface (or a standalone frame): the format a client

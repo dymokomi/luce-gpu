@@ -30,6 +30,9 @@ let draw_coverage: u32 = 1
 let draw_sampled: u32 = 2
 let draw_copied: u32 = 3
 let draw_straightened: u32 = 4
+## Or'd into the mode on an encoded target: the shader encodes its linear-light
+## color (straight) before premultiplying it.
+let draw_encoded: u32 = 16
 
 ## The pixel-space parameters for `rectangle` mapped onto a texture's `source`.
 func image_params(rectangle: Rect, source: Region, texture_width: u32, texture_height: u32, mode: u32 = draw_sampled) -> DrawParams:

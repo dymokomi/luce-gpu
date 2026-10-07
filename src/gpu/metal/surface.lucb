@@ -11,6 +11,8 @@ struct MetalSurface:
     var layer: void*?
     var pending: void*?
     var faulted: bool
+    # A UNORM drawable tagged sRGB: blending on encoded values.
+    var encoded: bool
 
 ## Conservative 2D texture baseline across the supported Mac GPU families.
 ## Some newer devices allow larger textures; a later capability API can expose
@@ -18,17 +20,19 @@ struct MetalSurface:
 ## pixels can exceed this limit after a perfectly valid Window.resize call.
 let metal_surface_limit: f64 = 16384.0
 
-func metal_surface_open(device: MetalDevice*, host: window.Presentation) -> MetalSurface*!:
+func metal_surface_open(device: MetalDevice*, host: window.Presentation, encoded: bool) -> MetalSurface*!:
     let pool = objc_autoreleasePoolPush()
     defer objc_autoreleasePoolPop(pool)
     let view = try host.macos_view()
-    let state = try new MetalSurface() in memory.heap
+    let state = try new MetalSurface(encoded = encoded) in memory.heap
     errdefer metal_surface_destroy(state, host)
     let layer = metal_ptr(try metal_class("CAMetalLayer"), metal_sel("new")) else error(failed, "could not create a Metal presentation layer")
     state.layer = layer
     metal_object(layer, metal_sel("setDevice:"), device.device)
-    # MTLPixelFormatBGRA8Unorm_sRGB, framebuffer-only, opaque, display synchronized.
-    metal_uint_arg(layer, metal_sel("setPixelFormat:"), 81)
+    # MTLPixelFormatBGRA8Unorm_sRGB (BGRA8Unorm for an encoded surface; the sRGB
+    # color space below tells the compositor what its values mean either way),
+    # framebuffer-only, opaque, display synchronized.
+    metal_uint_arg(layer, metal_sel("setPixelFormat:"), metal_slot_format(metal_encoded_slot if encoded else 0))
     metal_bool_arg(layer, metal_sel("setFramebufferOnly:"), true)
     metal_bool_arg(layer, metal_sel("setOpaque:"), true)
     metal_bool_arg(layer, metal_sel("setDisplaySyncEnabled:"), false)
@@ -78,7 +82,7 @@ func metal_render(device: MetalDevice*, host: window.Presentation, state: MetalS
     # would exhaust CAMetalLayer's small pool even if commands had completed.
     let drawable = metal_ptr(layer, metal_sel("nextDrawable")) else return PresentResult.skipped
     let texture = metal_ptr(drawable, metal_sel("texture")) else error(failed, "Metal returned a drawable without a texture")
-    let command = try metal_pass(device, texture, 0, canvas, Color(color.red, color.green, color.blue, 1.0), (u64)size.pixel_width, (u64)size.pixel_height)
+    let command = try metal_pass(device, texture, metal_encoded_slot if state.encoded else 0, canvas, Color(color.red, color.green, color.blue, 1.0), (u64)size.pixel_width, (u64)size.pixel_height)
     metal_object(command, metal_sel("presentDrawable:"), drawable)
     # Default command buffers retain referenced resources through completion.
     # Our +1 keeps status queryable after this call's autorelease pool is drained.

@@ -229,6 +229,7 @@ pub func main(arguments: str[]) -> i32!:
         try gui()
         assert(tracker.live == 0)
         try drawing.pixels()
+        try drawing.encoded()
         try wire_depth.pixels()
         ownership.collect()
         assert(tracker.live == 0)

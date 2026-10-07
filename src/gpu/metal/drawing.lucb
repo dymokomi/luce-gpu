@@ -12,16 +12,19 @@
 #
 #==============================================================================================
 
-## Pipeline slots: 0 is the BGRA8 sRGB presentation format, 1.. follow `Format`.
-let metal_slot_count: usize = 5
+## Pipeline slots: 0 is the BGRA8 sRGB presentation format, 1..4 follow the
+## renderable `Format`s, and 5 is the BGRA8 presentation format of an encoded
+## surface.
+let metal_slot_count: usize = 6
+let metal_encoded_slot: usize = 5
 
 struct MetalDrawing:
     # The vertex library and the built-in fill fragment library.
     var library: void*?
     var fill: void*?
-    var pipelines: void*?[5]
+    var pipelines: void*?[6]
     var geometry_library: void*?
-    var geometry_pipelines: void*?[5]
+    var geometry_pipelines: void*?[6]
     # Mesh stages (metal/mesh.lucb): pipelines per MeshKind and slot, and a
     # buffer bound where a draw leaves one out.
     var mesh_library: void*?
@@ -29,7 +32,7 @@ struct MetalDrawing:
     var mesh_fragment_library: void*?
     var mesh_id_library: void*?
     var mesh_placeholder: void*?
-    var mesh_pipelines: void*?[15]
+    var mesh_pipelines: void*?[18]
     var depth_on: void*?
     var depth_off: void*?
     var nearest: void*?
@@ -48,6 +51,7 @@ func metal_slot_format(slot: usize) -> u64:
     if slot == 2: return 70  # RGBA8Unorm
     if slot == 3: return 115  # RGBA16Float
     if slot == 4: return 10  # R8Unorm
+    if slot == 5: return 80  # BGRA8Unorm
     return 81  # BGRA8Unorm_sRGB
 
 ## The pipeline slot of a renderable format.
@@ -177,7 +181,7 @@ func metal_shader_destroy(library: void*):
 struct MetalClientPipeline:
     var library: void*
     var blend: Blend
-    var states: void*?[10]
+    var states: void*?[12]
 
 func metal_pipeline_create(device: MetalDevice*, library: void*, blend: Blend, pixel_format: Format?) -> void*!:
     let pool = objc_autoreleasePoolPush()
@@ -246,8 +250,10 @@ func metal_drawing_destroy(state: MetalDrawing*):
 
 ## Record `canvas` into `target` (a color texture of `slot`'s format) cleared to
 ## `color`, or over its contents when `keep`, on a new command buffer that the
-## caller commits.
+## caller commits. The encoded slot clears to the encoded color and has the
+## built-in draws encode theirs.
 func metal_pass(device: MetalDevice*, target: void*, slot: usize, canvas: Canvas, color: Color, width: u64, height: u64, keep: bool = false) -> void*!:
+    let encoded = slot == metal_encoded_slot
     let descriptor = metal_ptr(try metal_class("MTLRenderPassDescriptor"), metal_sel("renderPassDescriptor")) else error(failed, "could not create a Metal render pass")
     let attachments = metal_required(metal_ptr(descriptor, metal_sel("colorAttachments")))
     let attachment = metal_required(metal_index(attachments, metal_sel("objectAtIndexedSubscript:"), 0))
@@ -255,7 +261,8 @@ func metal_pass(device: MetalDevice*, target: void*, slot: usize, canvas: Canvas
     # MTLLoadActionLoad (1) keeps the contents, MTLLoadActionClear (2) clears.
     metal_uint_arg(attachment, metal_sel("setLoadAction:"), 1 if keep else 2)
     metal_uint_arg(attachment, metal_sel("setStoreAction:"), 1)
-    metal_color_arg(attachment, metal_sel("setClearColor:"), LuceGpuMetalClearColor(red = color.red * color.alpha, green = color.green * color.alpha, blue = color.blue * color.alpha, alpha = color.alpha))
+    let clear = Color(srgb_encoded(color.red), srgb_encoded(color.green), srgb_encoded(color.blue), color.alpha) if encoded else color
+    metal_color_arg(attachment, metal_sel("setClearColor:"), LuceGpuMetalClearColor(red = clear.red * clear.alpha, green = clear.green * clear.alpha, blue = clear.blue * clear.alpha, alpha = clear.alpha))
     var masks: void*? = none
     defer metal_release_slot(&masks)
     var buffer: void*? = none
@@ -345,6 +352,8 @@ func metal_encode(encoder: void*, drawing: MetalDrawing*, pipeline: void*, geome
             metal_inline_bytes(encoder, metal_sel("setFragmentBytes:length:atIndex:"), &uniforms, (u64)uniform_limit, 0)
         else:
             var params = draw.params
+            if slot == metal_encoded_slot:
+                params.mode = params.mode | draw_encoded
             metal_inline_bytes(encoder, metal_sel("setFragmentBytes:length:atIndex:"), &params, 48, 0)
         let sampler = metal_required(drawing.linear if draw.filter == Filter.linear else drawing.nearest)
         for index in 0..<image_limit:

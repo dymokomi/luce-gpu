@@ -75,7 +75,8 @@ pub func begin(title: str, unavailable: bool = false):
     assert(replaced == none and captured == none)
     let view = msg(find(title), sel("contentView"))
     let layer = msg(view, sel("layer"))
-    assert(uint(layer, sel("pixelFormat")) == 81)
+    # BGRA8Unorm_sRGB, or BGRA8Unorm for an encoded surface ("GPU encoded").
+    assert(uint(layer, sel("pixelFormat")) == (80 if title == "GPU encoded" else 81))
     # Permit a test readback; production surfaces remain framebuffer-only.
     boolean(layer, sel("setFramebufferOnly:"), false)
     let method = class_getInstanceMethod(object_getClass(layer), sel("nextDrawable"))

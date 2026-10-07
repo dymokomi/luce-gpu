@@ -8,12 +8,12 @@
 #
 #==============================================================================================
 
-func backend_surface_open(device: DeviceState*, host: window.Presentation) -> void*!:
+func backend_surface_open(device: DeviceState*, host: window.Presentation, blending: Blending) -> void*!:
     if (platform.windows or platform.linux) and device.backend == Backend.vulkan:
-        return (void*)try vulkan_surface_open((VulkanDevice*)device.native, host)
+        return (void*)try vulkan_surface_open((VulkanDevice*)device.native, host, blending == Blending.encoded)
     if platform.macos and platform.arm64:
         if device.backend == Backend.metal:
-            return (void*)try metal_surface_open((MetalDevice*)device.native, host)
+            return (void*)try metal_surface_open((MetalDevice*)device.native, host, blending == Blending.encoded)
     error(unsupported, "the GPU backend is not implemented")
 
 func backend_clear_present(device: DeviceState*, host: window.Presentation, native: void*, color: Color) -> PresentResult!:

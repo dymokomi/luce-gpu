@@ -139,7 +139,7 @@ library and example normally compile through the native backend.
 | `supported(backend)` | Reports implementation availability for this build, not hardware availability. |
 | `Device.open()` | Selects the implemented native backend. On arm64 macOS this is Metal. A machine without an available device returns `unavailable`. |
 | `Device.open(Backend.metal)` | Explicit backend selection. Unsupported selections fail without fallback. `Backend.vulkan` is reserved and currently returns `unsupported`. |
-| `Surface.open(device, window)` | Creates one exclusive presentation surface for the window. A second attachment returns `window.presentation_in_use`. |
+| `Surface.open(device, window, blending)` | Creates one exclusive presentation surface for the window. A second attachment returns `window.presentation_in_use`. `blending` is `Blending.linear` (the default) or `Blending.encoded`; see Encoded surfaces. |
 | `Color` | Three finite linear-light sRGB components in 0..1. Presentation is opaque with alpha one. Invalid components, including NaN and infinities, return `invalid_color`. |
 | `Surface.size()` | Returns logical points, backing pixels, and scale using `window.Size`. |
 | `clear_present(color)` | Refreshes backing dimensions, clears the full surface, and queues display-synchronized presentation. Returns `submitted` or `skipped`. |
@@ -180,6 +180,28 @@ Drawable acquisition may block: Metal's timeout is approximately one second, and
 GPU completion waits have no application deadline. This API is not a nonblocking
 render loop or a latency guarantee. Pipelined frames and explicit synchronization
 belong with the later command/resource API.
+
+## Encoded surfaces
+
+A surface opened with `Blending.encoded` blends on encoded values rather than in
+linear light. Web content blends that way (Skia's raster, Chrome and the browser's CPU
+player do), as does most 2D drawing, so a page's layers can be composited straight onto
+the window instead of into a linear frame texture that a last pass decodes.
+
+| | `Blending.linear` | `Blending.encoded` |
+| --- | --- | --- |
+| Attachment | 8-bit sRGB (Metal `BGRA8Unorm_sRGB`; Vulkan `B8G8R8A8_SRGB`) | 8-bit UNORM in the sRGB color space (Metal `BGRA8Unorm` on a layer whose color space is sRGB; Vulkan `B8G8R8A8_UNORM` with `SRGB_NONLINEAR`) |
+| Blending | in linear light; the hardware encodes on write | on the stored, encoded values |
+| luce-gpu's draws (`triangles`, `mask`, `draw_image`, `copy_image`, clears) | linear colors, encoded by the hardware | the built-in shader encodes its straight linear color before premultiplying; the clear color is encoded on the CPU |
+| Client shaders (`shade`, `shade_instances`) | output is linear, encoded by the hardware | output is written as is: encoded values |
+
+So solid colors and opaque images look the same on either surface; only what blends
+differs (half-alpha white over black is 188 on a linear surface, 128 on an encoded one).
+A pipeline made for surfaces (`format` none) draws on both; Metal builds its state for
+the UNORM format the first time it draws there, Vulkan a pipeline per swapchain format.
+Mesh draws, whose fragment stages write linear light, are refused on an encoded surface
+(`wrong_target`). `Surface.blending()` and `RenderTarget.blending()` say which a target
+is (texture targets report `linear`; their format says how they store values).
 
 ## Scoped recording and composition
 

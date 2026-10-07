@@ -3,6 +3,7 @@ from luce_window import window
 import native
 import allocation
 import memory
+import shaders
 
 func full(color: gpu.Vertex) -> gpu.Vertex[6]:
     var a = color
@@ -195,3 +196,62 @@ pub func pixels() -> !:
     try surface.wait_idle()
     native.pixel((u64)resized.pixel_width // 2, (u64)resized.pixel_height // 2, 0, 255, 0)
     native.pixel((u64)resized.pixel_width // 2, 0, 255, 0, 0)
+
+## An encoded surface blends on encoded values: half-alpha red over blue is 128
+## where a linear surface shows 188, while a clear and opaque draws look the
+## same; client pipelines made for surfaces draw there too.
+pub func encoded() -> !:
+    var device = try gpu.Device.open()
+    defer device.destroy()
+    var target = try window.Window.open(window.Options(title = "GPU encoded", width = 96, height = 64))
+    defer target.destroy()
+    var surface = try gpu.Surface.open(device, target, gpu.Blending.encoded)
+    defer surface.destroy()
+    assert((try surface.blending()) == gpu.Blending.encoded)
+    try target.show()
+    while (try target.poll()) != none:
+        _ = 0
+    let size = try surface.size()
+    let width = (u32)size.pixel_width
+    let height = (u32)size.pixel_height
+    # A linear-light clear of 0.5 is encoded to 188, as on a linear surface.
+    native.begin("GPU encoded")
+    assert((try surface.clear_present(gpu.Color(0.5, 0.5, 0.5))) == gpu.PresentResult.submitted)
+    try surface.wait_idle()
+    native.pixels((u64)width, (u64)height, 188, 188, 188)
+    native.end()
+    # Half-alpha red over the left half of a blue clear: 128, 0, 128.
+    let frame = try surface.frame()
+    let root = try frame.value().target()
+    assert((try root.value().blending()) == gpu.Blending.encoded and (try root.value().pixel_format()) == none)
+    let left = try root.value().region(gpu.Rect(width = size.width / 2.0, height = size.height))
+    try left.value().triangles(full(gpu.Vertex(red = 1.0, alpha = 0.5)))
+    left.release()
+    root.release()
+    native.begin("GPU encoded")
+    assert((try frame.value().present(gpu.Color(blue = 1.0))) == gpu.PresentResult.submitted)
+    frame.release()
+    try surface.wait_idle()
+    native.pixel(0, 0, 128, 0, 128)
+    native.pixel((u64)width - 1, 0, 0, 0, 255)
+    native.end()
+    # A client pipeline made for surfaces writes its output as is: (1, 0.5, 0.5)
+    # premultiplied stays 255, 128, 128.
+    var shader = try gpu.Shader.create(device, shaders.tint_frag_words, shaders.tint_frag_msl)
+    defer shader.destroy()
+    var pipeline = try gpu.Pipeline.create(device, shader, gpu.Blend.over)
+    defer pipeline.destroy()
+    var white = try gpu.Texture.create(device, 1, 1, gpu.Format.rgba8_linear)
+    defer white.destroy()
+    try white.upload([(u8)255, (u8)255, (u8)255, (u8)255])
+    var uniforms: f32[9] = [1.0, 0.5, 0.5, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0]
+    let shaded = try surface.frame()
+    let whole = try shaded.value().target()
+    try gpu.shade(whole.value(), pipeline, gpu.Rect(width = size.width, height = size.height), u8[]((u8*)&uniforms[0], 36), [white, white])
+    whole.release()
+    native.begin("GPU encoded")
+    assert((try shaded.value().present()) == gpu.PresentResult.submitted)
+    shaded.release()
+    try surface.wait_idle()
+    native.pixel(1, 1, 255, 128, 128)
+    native.end()
