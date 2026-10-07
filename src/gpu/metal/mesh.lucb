@@ -14,10 +14,10 @@ func metal_mesh_pipeline(device: MetalDevice*, drawing: MetalDrawing*, kind: Mes
     if let pipeline = drawing.mesh_pipelines[index]: return pipeline
     let native = metal_required(device.device)
     if drawing.mesh_library == none:
-        drawing.mesh_library = try metal_compile(native, mesh_vert_msl)
-        drawing.mesh_wire_library = try metal_compile(native, mesh_wire_vert_msl)
-        drawing.mesh_fragment_library = try metal_compile(native, mesh_frag_msl)
-        drawing.mesh_id_library = try metal_compile(native, mesh_id_frag_msl)
+        drawing.mesh_library = try metal_compile(native, mesh_vert_msl, true)
+        drawing.mesh_wire_library = try metal_compile(native, mesh_wire_vert_msl, true)
+        drawing.mesh_fragment_library = try metal_compile(native, mesh_frag_msl, true)
+        drawing.mesh_id_library = try metal_compile(native, mesh_id_frag_msl, true)
         var zeros: u8[16]
         drawing.mesh_placeholder = metal_buffer(native, metal_sel("newBufferWithBytes:length:options:"), &zeros[0], 16, 0) else error(out_of_memory, "could not allocate a GPU buffer")
     let vertex_library = metal_required(drawing.mesh_wire_library if kind == MeshKind.wires else drawing.mesh_library)

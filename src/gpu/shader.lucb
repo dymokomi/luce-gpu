@@ -21,11 +21,14 @@ pub struct Shader:
 
     ## Compile a fragment program from its SPIR-V words and its Metal source.
     ## Each backend uses its own form and ignores the other.
-    pub static func create(device: Device, spirv: const u32[], msl: c.str) -> Shader!:
+    ## Float math follows IEEE rules (infinities, NaNs, no reassociation) unless
+    ## `fast_math` lets Metal relax them (`<stem>_frag_fast_math`, embedded with
+    ## `--fast-math STEM`); Vulkan ignores it.
+    pub static func create(device: Device, spirv: const u32[], msl: c.str, fast_math: bool = false) -> Shader!:
         let device_state = try device.checked()
         if spirv.length < 5 or spirv[0] != 0x07230203:
             error(invalid_shader, "SPIR-V words must begin with the SPIR-V magic number")
-        let native = try backend_shader_create(device_state, spirv, msl)
+        let native = try backend_shader_create(device_state, spirv, msl, fast_math)
         errdefer device_state.destroy_shader(device_state.native, native)
         let state = try new ShaderState(device = device_state, native = native) in memory.heap
         device_state.references += 1

@@ -79,8 +79,8 @@ func metal_drawing_open(device: MetalDevice*) -> MetalDrawing*!:
     let state = try new MetalDrawing() in memory.heap
     errdefer metal_drawing_destroy(state)
     let native = metal_required(device.device)
-    state.library = try metal_compile(native, metal_vertex_source)
-    state.fill = try metal_compile(native, fill_frag_msl)
+    state.library = try metal_compile(native, metal_vertex_source, true)
+    state.fill = try metal_compile(native, fill_frag_msl, true)
     let depth = metal_ptr(try metal_class("MTLDepthStencilDescriptor"), metal_sel("new")) else error(failed, "could not create a GPU depth descriptor")
     defer metal_void(depth, metal_sel("release"))
     metal_uint_arg(depth, metal_sel("setDepthCompareFunction:"), 1)
@@ -124,10 +124,17 @@ func metal_drawing(device: MetalDevice*) -> MetalDrawing*!:
     device.drawing = drawing
     return drawing
 
-## Compile one Metal source into a library.
-func metal_compile(native: void*, source: c.str) -> void*!:
+## Compile one Metal source into a library. Metal defaults to fast math, which
+## may drop infinities and NaNs and reorder float operations. Client shaders
+## keep IEEE rules, as on Vulkan, unless they ask for fast math; the built-in
+## drawing shaders, which do no inf- or NaN-sensitive work, use fast math (IEEE
+## rules cost the fill shader about 12% of a heavy frame's GPU time).
+func metal_compile(native: void*, source: c.str, fast_math: bool) -> void*!:
+    let options = metal_ptr(try metal_class("MTLCompileOptions"), metal_sel("new")) else error(failed, "could not create Metal compile options")
+    defer metal_void(options, metal_sel("release"))
+    metal_bool_arg(options, metal_sel("setFastMathEnabled:"), fast_math)
     var failure: void*? = none
-    return metal_library(native, metal_sel("newLibraryWithSource:options:error:"), try metal_text(source), none, &failure) else error(invalid_shader, "could not compile the Metal shader source")
+    return metal_library(native, metal_sel("newLibraryWithSource:options:error:"), try metal_text(source), options, &failure) else error(invalid_shader, "could not compile the Metal shader source")
 
 ## The built-in pipeline rendering into color attachments of `slot`, built on first use.
 func metal_pipeline_for(device: MetalDevice*, drawing: MetalDrawing*, slot: usize) -> void*!:
@@ -172,10 +179,10 @@ func metal_stage_pipeline(device: MetalDevice*, vertex_library: void*, vertex_na
 
 # mark: Client shaders and pipelines ===========================================================
 
-func metal_shader_create(device: MetalDevice*, msl: c.str) -> void*!:
+func metal_shader_create(device: MetalDevice*, msl: c.str, fast_math: bool) -> void*!:
     let pool = objc_autoreleasePoolPush()
     defer objc_autoreleasePoolPop(pool)
-    return try metal_compile(metal_required(device.device), msl)
+    return try metal_compile(metal_required(device.device), msl, fast_math)
 
 func metal_shader_destroy(library: void*):
     metal_void(library, metal_sel("release"))

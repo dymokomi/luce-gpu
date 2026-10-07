@@ -66,6 +66,11 @@ pub func main(arguments: str[]) -> i32!:
     # present, which can wait for the display (a throttled window waits long).
     var cpu: u64 = 0
     var presenting: u64 = 0
+    # GPU time of the frames (each frame's submission covers its tile passes on
+    # Metal), read a frame later, when the GPU has finished it.
+    var gpu_total: u64 = 0
+    var timed: usize = 0
+    var previous = gpu.Submission()
     var shown: usize = 0
     var frame_index: usize = 0
     while shown < frames and frame_index < frames * 4:
@@ -101,7 +106,12 @@ pub func main(arguments: str[]) -> i32!:
         root.release()
         let presented = time.now()
         let result = try frame.value().present(gpu.Color(0.2, 0.2, 0.25))
+        let submission = frame.value().submission()
         frame.release()
+        if let spent = try device.gpu_time(previous):
+            gpu_total += spent.elapsed()
+            timed += 1
+        previous = submission
         cpu += presented - start
         presenting += time.now() - presented
         if result == gpu.PresentResult.submitted:
@@ -110,7 +120,7 @@ pub func main(arguments: str[]) -> i32!:
             thread.sleep(10)
     try surface.wait_idle()
     let held = try device.memory()
-    print(f"{mode}: {shown} frames, CPU {(f64)cpu / ((f64)(shown if shown > 0 else 1) * 1000.0)} us per frame (+ present {(f64)presenting / ((f64)(shown if shown > 0 else 1) * 1000.0)} us), device allocated {held.used // 1048576} MiB\n")
+    print(f"{mode}: {shown} frames, CPU {(f64)cpu / ((f64)(shown if shown > 0 else 1) * 1000.0)} us per frame (+ present {(f64)presenting / ((f64)(shown if shown > 0 else 1) * 1000.0)} us, GPU {(f64)gpu_total / ((f64)(timed if timed > 0 else 1) * 1000.0)} us), device allocated {held.used // 1048576} MiB\n")
     print("sampling\n")
     thread.sleep(5000)
     for index in 0..<tile_count:

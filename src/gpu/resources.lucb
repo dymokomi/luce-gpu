@@ -80,12 +80,12 @@ func metal_texture_release(device: void*, native: void*):
 
 # mark: Shaders and pipelines =================================================================
 
-func backend_shader_create(device: DeviceState*, spirv: const u32[], msl: c.str) -> void*!:
+func backend_shader_create(device: DeviceState*, spirv: const u32[], msl: c.str, fast_math: bool) -> void*!:
     if (platform.windows or platform.linux) and device.backend == Backend.vulkan:
         return (void*)try vulkan_shader_create((VulkanDevice*)device.native, spirv)
     if platform.macos and platform.arm64:
         if device.backend == Backend.metal:
-            return (void*)try metal_shader_create((MetalDevice*)device.native, msl)
+            return (void*)try metal_shader_create((MetalDevice*)device.native, msl, fast_math)
     error(unsupported, "the GPU backend is not implemented")
 
 func backend_pipeline_create(device: DeviceState*, shader: void*, blend: Blend, pixel_format: Format?) -> void*!:

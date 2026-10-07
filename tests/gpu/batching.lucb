@@ -4,6 +4,7 @@ import thread
 import depth_slope
 import mesh_pixels
 import compute
+import textures
 import rays
 import targets
 import copies
@@ -24,6 +25,7 @@ pub func main(arguments: str[]) -> i32!:
     try depth_slope.pixels(device)
     try mesh_pixels.pixels(device)
     try compute.checks(device)
+    try textures.ieee_fragments(device)
     try rays.checks(device)
     try targets.pixels(device)
     try copies.pixels(device)

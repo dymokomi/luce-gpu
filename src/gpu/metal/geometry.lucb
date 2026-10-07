@@ -8,7 +8,7 @@ func metal_geometry_release(device: void*, native: void*):
 func metal_geometry_pipeline(device: MetalDevice*, drawing: MetalDrawing*, slot: usize) -> void*!:
     if let pipeline = drawing.geometry_pipelines[slot]: return pipeline
     if drawing.geometry_library == none:
-        drawing.geometry_library = try metal_compile(metal_required(device.device), geometry_vert_msl)
+        drawing.geometry_library = try metal_compile(metal_required(device.device), geometry_vert_msl, true)
     let pipeline = try metal_build_pipeline(device, drawing, metal_required(drawing.fill), Blend.over, slot, true)
     drawing.geometry_pipelines[slot] = pipeline
     return pipeline

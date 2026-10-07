@@ -500,8 +500,15 @@ layout(set = 0, binding = 1) uniform sampler2D first;  // bindings 1..4
 `gl_FragCoord` is in backing pixels of the target. Binding 5 is reserved for
 the built-in coverage buffer.
 
-`Shader.create(device, words, msl)` compiles the program (`invalid_shader` when
-either form is rejected). `Pipeline.create(device, shader, blend, format?)`
+`Shader.create(device, words, msl, fast_math = false)` compiles the program
+(`invalid_shader` when either form is rejected). Built-in drawing uses fast
+math; client shaders are IEEE unless they opt in. A client shader keeps IEEE
+float rules on Metal as on Vulkan: no infinities or NaNs dropped, no
+reassociation, so an edge on an exact pixel diagonal lands where Skia puts it.
+Embedding with `--fast-math STEM` records `<stem>_frag_fast_math = true`;
+passing it lets Metal relax those rules for speed. The built-in fill shader
+does no inf- or NaN-sensitive work and keeps fast math, which saves about 12%
+of a heavy frame's GPU time. `Pipeline.create(device, shader, blend, format?)`
 binds it to a `Blend` — `over` (One / OneMinusSourceAlpha), `replace` (no
 blending) or `add` (One / One) — and a target: a texture `Format`, or `none`
 for presentation surfaces. `shade(target, pipeline, rectangle, uniforms?,

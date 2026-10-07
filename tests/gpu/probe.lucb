@@ -214,6 +214,7 @@ pub func main(arguments: str[]) -> i32!:
         try textures.batches(device)
         try textures.upload_batches(device)
         try textures.programs(device)
+        try textures.ieee_fragments(device)
         try compute.checks(device)
         try rays.checks(device)
         try targets.pixels(device)

@@ -151,6 +151,35 @@ pub func pixels(device: gpu.Device) -> !:
     # r8 samples as (r, 0, 0, 1): stored red 200 straight into the linear target.
     assert(result[0] >= 199 and result[0] <= 201 and result[1] == 0 and result[3] == 255)
 
+## Fragment shaders keep IEEE float rules unless they ask for fast math: NaN
+## from 0/0, an infinity from 1/0, and an infinity ordered above every float,
+## on Metal as on Vulkan. A fast-math shader builds and draws (its results are
+## not promised).
+pub func ieee_fragments(device: gpu.Device) -> !:
+    var exact = try gpu.Shader.create(device, shaders.ieee_frag_words, shaders.ieee_frag_msl, shaders.ieee_frag_fast_math)
+    defer exact.destroy()
+    var fast = try gpu.Shader.create(device, shaders.ieee_fast_frag_words, shaders.ieee_fast_frag_msl, shaders.ieee_fast_frag_fast_math)
+    defer fast.destroy()
+    var exact_pipeline = try gpu.Pipeline.create(device, exact, gpu.Blend.replace, gpu.Format.rgba8_linear)
+    defer exact_pipeline.destroy()
+    var fast_pipeline = try gpu.Pipeline.create(device, fast, gpu.Blend.replace, gpu.Format.rgba8_linear)
+    defer fast_pipeline.destroy()
+    var target = try gpu.Texture.create(device, 2, 1, gpu.Format.rgba8_linear)
+    defer target.destroy()
+    var uniforms: u8[8]
+    memory.write[f32]((void*)&uniforms[0], 0.0)
+    memory.write[f32]((void*)&uniforms[4], 1.0)
+    let frame = try target.frame()
+    defer frame.release()
+    let root = try frame.value().target()
+    defer root.release()
+    try gpu.shade(root.value(), exact_pipeline, gpu.Rect(width = 1.0, height = 1.0), uniforms)
+    try gpu.shade(root.value(), fast_pipeline, gpu.Rect(x = 1.0, width = 1.0, height = 1.0), uniforms)
+    assert((try frame.value().present(gpu.Color(0.0, 0.0, 0.0, 0.0))) == gpu.PresentResult.submitted)
+    var result: u8[8]
+    try target.read(result)
+    assert(result[0] == 255 and result[1] == 255 and result[2] == 255 and result[3] == 255)
+
 ## Client fragment shaders: uniforms, two sampled images, the three blend
 ## modes, and the refusals for wrong targets and devices.
 pub func programs(device: gpu.Device) -> !:
