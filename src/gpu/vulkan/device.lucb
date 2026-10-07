@@ -3,11 +3,14 @@
 #   device - Vulkan instance, device and queues
 #
 #   DESCRIPTION:
-#       Vulkan 1.0: VK_MAKE_API_VERSION(0, 1, 0, 0).
+#       Vulkan 1.2 where the loader and device have it, else 1.0: VK_MAKE_API_VERSION(0, 1, 2, 0).
+#       Optional device features (float atomics) are enabled when the device offers them.
 #
 #==============================================================================================
 
 let vulkan_api_version_1_0: u32 = 1u32 << 22
+let vulkan_api_version_1_1: u32 = (1u32 << 22) | (1u32 << 12)
+let vulkan_api_version_1_2: u32 = (1u32 << 22) | (2u32 << 12)
 
 ## One render pass pair and pipeline pair per color format in use.
 struct VulkanFormatState:
@@ -48,12 +51,16 @@ let vulkan_retired_buffer: u8 = 1
 let vulkan_retired_framebuffer: u8 = 2
 let vulkan_retired_descriptors: u8 = 3
 let vulkan_retired_image: u8 = 4
+let vulkan_retired_kernel: u8 = 5
 
-## A handle released once the submission holding it has completed.
+## A handle released once the submission holding it has completed. A kernel
+## keeps its pipeline in `handle`, its pipeline layout in `view` and its
+## descriptor set layout in `extra`.
 struct VulkanRetired:
     var kind: u8
     var handle: u64
     var view: u64
+    var extra: u64
     var allocation: VulkanAllocation
 
 ## One in-flight submission: its own command pool and buffer, the fence it
@@ -75,6 +82,9 @@ struct VulkanDevice:
     var instance: u64
     var physical: u64
     var device: u64
+    # The Vulkan version in use: the lowest of the loader's, the device's and 1.2.
+    var version: u32
+    var limits: Limits
     var queue: u64
     var family: u32
     var memory: VkPhysicalDeviceMemoryProperties
@@ -125,8 +135,11 @@ func vulkan_device_open() -> VulkanDevice*!:
     try vulkan_load()
     let state = try new VulkanDevice() in memory.heap
     errdefer vulkan_device_destroy(state)
+    # Vulkan 1.2 when the loader knows 1.1 or later (a 1.0 loader refuses higher
+    # versions); what is used is then capped again by each device's own version.
+    let requested = vulkan_api_version_1_2 if vulkan_instance_version() >= vulkan_api_version_1_1 else vulkan_api_version_1_0
     var application = VkApplicationInfo(sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
-                                        pApplicationName = "Luce", pEngineName = "Luce", apiVersion = vulkan_api_version_1_0)
+                                        pApplicationName = "Luce", pEngineName = "Luce", apiVersion = requested)
     let extensions = try vulkan_presentation_extensions()
     var instance_info = VkInstanceCreateInfo(sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
                                              pApplicationInfo = &application, enabledExtensionCount = (u32)extensions.length, ppEnabledExtensionNames = (c.str*)extensions.data)
@@ -162,19 +175,65 @@ func vulkan_device_open() -> VulkanDevice*!:
             var priority: f32 = 1.0
             var queue_info = VkDeviceQueueCreateInfo(sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
                                                      queueFamilyIndex = (u32)family, queueCount = 1, pQueuePriorities = &priority)
-            var device_extension: c.str = VK_KHR_SWAPCHAIN_EXTENSION_NAME
+            let version = vulkan_device_version(physical, requested)
+            var device_extensions: c.str[2] = [VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME]
             var device_info = VkDeviceCreateInfo(sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
                                                  queueCreateInfoCount = 1, pQueueCreateInfos = &queue_info,
-                                                 enabledExtensionCount = 1, ppEnabledExtensionNames = &device_extension)
+                                                 enabledExtensionCount = 1, ppEnabledExtensionNames = &device_extensions[0])
+            # Float atomics, when the device offers them: the extension, and its
+            # buffer features alone through the features chain.
+            var atomic_float = VkPhysicalDeviceShaderAtomicFloatFeaturesEXT(sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT)
+            var features = VkPhysicalDeviceFeatures2(sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, pNext = (void*)&atomic_float)
+            let float_atomic_add = version >= vulkan_api_version_1_1 and (try vulkan_has_extension(physical, "VK_EXT_shader_atomic_float")) and vulkan_float_atomics(physical, &features)
+            if float_atomic_add:
+                atomic_float = VkPhysicalDeviceShaderAtomicFloatFeaturesEXT(sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT,
+                                                                            shaderBufferFloat32Atomics = VK_TRUE, shaderBufferFloat32AtomicAdd = VK_TRUE)
+                features = VkPhysicalDeviceFeatures2(sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, pNext = (void*)&atomic_float)
+                device_info.pNext = (void*)&features
+                device_info.enabledExtensionCount = 2
             if vkCreateDevice(physical, &device_info, none, &state.device) != 0:
                 continue
             state.physical = physical
+            state.version = version
+            state.limits = vulkan_device_limits(state, float_atomic_add)
             state.integrated = vulkan_device_rank(physical) == 1
             state.family = (u32)family
             vkGetDeviceQueue(state.device, state.family, 0, &state.queue)
             vkGetPhysicalDeviceMemoryProperties(physical, &state.memory)
             return state
     error(unavailable, "no Vulkan graphics queue supports native presentation")
+
+## The version a device is used at: its own, capped at what the instance requested.
+func vulkan_device_version(physical: u64, requested: u32) -> u32:
+    var properties: VkPhysicalDeviceProperties
+    vkGetPhysicalDeviceProperties(physical, (void*)&properties)
+    # Compare major.minor only; the patch level is irrelevant to which calls exist.
+    let own = properties.apiVersion & 0xfffff000u32
+    return own if own < requested else requested
+
+## Whether the device offers the extension `wanted`.
+func vulkan_has_extension(physical: u64, wanted: str) -> bool!:
+    var count: u32 = 0
+    if vkEnumerateDeviceExtensionProperties(physical, none, &count, none) != VK_SUCCESS or count == 0:
+        return false
+    let extensions = try new VkExtensionProperties[(usize)count] ---
+    defer free(extensions)
+    if vkEnumerateDeviceExtensionProperties(physical, none, &count, extensions.data) != VK_SUCCESS:
+        return false
+    for extension in extensions[..<(usize)count]:
+        var length: usize = 0
+        while length < extension.extensionName.length and extension.extensionName[length] != 0:
+            length += 1
+        if (str)extension.extensionName[..<length] == wanted:
+            return true
+    return false
+
+## Whether the device can add to 32-bit floats atomically in storage buffers;
+## `features` chains the atomic-float structure to fill.
+func vulkan_float_atomics(physical: u64, features: VkPhysicalDeviceFeatures2*) -> bool:
+    vkGetPhysicalDeviceFeatures2(physical, features)
+    let chained = (VkPhysicalDeviceShaderAtomicFloatFeaturesEXT*)(features.pNext else return false)
+    return chained.shaderBufferFloat32AtomicAdd != 0
 
 ## 0 for a discrete GPU, 1 for an integrated one, 2 for any other kind. Only
 ## VkPhysicalDeviceProperties' device type is read (bytes 16..20); the bindings
@@ -437,6 +496,10 @@ func vulkan_retired_free(device: VulkanDevice*, item: VulkanRetired):
     elif item.kind == vulkan_retired_image:
         if item.view != 0: vkDestroyImageView(device.device, item.view, none)
         if item.handle != 0: vkDestroyImage(device.device, item.handle, none)
+    elif item.kind == vulkan_retired_kernel:
+        if item.handle != 0: vkDestroyPipeline(device.device, item.handle, none)
+        if item.view != 0: vkDestroyPipelineLayout(device.device, item.view, none)
+        if item.extra != 0: vkDestroyDescriptorSetLayout(device.device, item.extra, none)
     vulkan_allocation_free(device, item.allocation)
 
 func vulkan_slot_free(device: VulkanDevice*, slot: VulkanSlot*):
@@ -466,7 +529,11 @@ func vulkan_wait(device: VulkanDevice*, serial: u64) -> !:
     if serial <= device.completed:
         return
     let slot = &device.slots[(usize)(serial % (u64)vulkan_slot_limit)]
-    try vulkan_check(vkWaitForFences(device.device, 1, &slot.fence, 1, 0xffffffffffffffffu64), "Vulkan execution failed")
+    let result = vkWaitForFences(device.device, 1, &slot.fence, 1, 0xffffffffffffffffu64)
+    # VK_ERROR_DEVICE_LOST: the work failed on the GPU.
+    if result == -4:
+        error(execution_failed, "the GPU failed while running submitted work")
+    try vulkan_check(result, "Vulkan execution failed")
     vulkan_retire_through(device, serial)
 
 ## Everything submitted before a host wait on the whole queue has completed.

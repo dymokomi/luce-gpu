@@ -3,7 +3,7 @@
 #   probe.lucb        the portable contracts everywhere; on macOS also a refused object
 #                     from another thread, then pixels on the Metal device, then windows
 #                     (presentation, sRGB, resize, ownership) when a desktop session is there
-#   batching.lucb     Vulkan batching, deferred destruction and pooled memory, on Linux,
+#   batching.lucb     Vulkan batching, deferred destruction, pooled memory and compute, on Linux and Windows,
 #                     under the Khronos validation layer when it is installed
 #   unsupported.lucb  a target with no GPU backend refuses a device; it is also emitted for
 #                     every target, which must type-check without Cocoa helpers
@@ -70,7 +70,7 @@ pub func main(arguments: list[str]) -> int!:
     let checks = Checks(base, work, here)
     if platform.macos:
         metal(checks, gpu_policy, window_policy)
-    elif platform.linux:
+    elif platform.linux or platform.windows:
         vulkan(checks, gpu_policy)
     else:
         checks.expect(checks.build("unsupported.lucb", "unsupported", []), [], "ok unsupported GPU target")

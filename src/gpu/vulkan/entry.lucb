@@ -100,6 +100,14 @@ struct VulkanFunctions:
     var vkCmdCopyImageToBuffer: (func(u64, u64, u32, u64, u32, VkBufferImageCopy*?) -> unit)?
     var vkCmdCopyBuffer: (func(u64, u64, u64, u32, VkBufferCopy*?) -> unit)?
     var vkCreateXlibSurfaceKHR: (func(u64, VkXlibSurfaceCreateInfoKHR*?, void*?, u64*?) -> i32)?
+    var vkEnumerateInstanceVersion: (func(u32*?) -> i32)?
+    var vkGetPhysicalDeviceProperties2: (func(u64, VkPhysicalDeviceProperties2*?) -> unit)?
+    var vkGetPhysicalDeviceFeatures2: (func(u64, VkPhysicalDeviceFeatures2*?) -> unit)?
+    var vkEnumerateDeviceExtensionProperties: (func(u64, void*?, u32*?, VkExtensionProperties*?) -> i32)?
+    var vkCreateComputePipelines: (func(u64, u64, u32, VkComputePipelineCreateInfo*?, void*?, u64*?) -> i32)?
+    var vkCmdDispatch: (func(u64, u32, u32, u32) -> unit)?
+    var vkCmdDispatchIndirect: (func(u64, u64, u64) -> unit)?
+    var vkCmdFillBuffer: (func(u64, u64, u64, u64, u32) -> unit)?
 
 var vulkan_functions: VulkanFunctions*? = none
 
@@ -277,6 +285,22 @@ func vulkan_load() -> !:
         table.vkCreateXlibSurfaceKHR = (func(u64, VkXlibSurfaceCreateInfoKHR*?, void*?, u64*?) -> i32)found
     if let found = vulkan_symbol(library, "vkGetPhysicalDeviceProperties"):
         table.vkGetPhysicalDeviceProperties = (func(u64, void*) -> unit)found
+    if let found = vulkan_symbol(library, "vkEnumerateInstanceVersion"):
+        table.vkEnumerateInstanceVersion = (func(u32*?) -> i32)found
+    if let found = vulkan_symbol(library, "vkGetPhysicalDeviceProperties2"):
+        table.vkGetPhysicalDeviceProperties2 = (func(u64, VkPhysicalDeviceProperties2*?) -> unit)found
+    if let found = vulkan_symbol(library, "vkGetPhysicalDeviceFeatures2"):
+        table.vkGetPhysicalDeviceFeatures2 = (func(u64, VkPhysicalDeviceFeatures2*?) -> unit)found
+    if let found = vulkan_symbol(library, "vkEnumerateDeviceExtensionProperties"):
+        table.vkEnumerateDeviceExtensionProperties = (func(u64, void*?, u32*?, VkExtensionProperties*?) -> i32)found
+    if let found = vulkan_symbol(library, "vkCreateComputePipelines"):
+        table.vkCreateComputePipelines = (func(u64, u64, u32, VkComputePipelineCreateInfo*?, void*?, u64*?) -> i32)found
+    if let found = vulkan_symbol(library, "vkCmdDispatch"):
+        table.vkCmdDispatch = (func(u64, u32, u32, u32) -> unit)found
+    if let found = vulkan_symbol(library, "vkCmdDispatchIndirect"):
+        table.vkCmdDispatchIndirect = (func(u64, u64, u64) -> unit)found
+    if let found = vulkan_symbol(library, "vkCmdFillBuffer"):
+        table.vkCmdFillBuffer = (func(u64, u64, u64, u64, u32) -> unit)found
     if table.vkCreateInstance == none:
         free(table) in memory.heap
         error(unavailable, "the Vulkan loader has no vkCreateInstance")
@@ -631,3 +655,44 @@ func vkCreateXlibSurfaceKHR(instance: u64, pCreateInfo: VkXlibSurfaceCreateInfoK
 func vkGetPhysicalDeviceProperties(physicalDevice: u64, pProperties: void*):
     let call = vulkan_entry().vkGetPhysicalDeviceProperties else trap("the Vulkan loader lacks vkGetPhysicalDeviceProperties")
     call(physicalDevice, pProperties)
+
+func vkEnumerateInstanceVersion(pApiVersion: u32*?) -> i32:
+    let call = vulkan_entry().vkEnumerateInstanceVersion else trap("the Vulkan loader lacks vkEnumerateInstanceVersion")
+    return call(pApiVersion)
+
+func vkGetPhysicalDeviceProperties2(physicalDevice: u64, pProperties: VkPhysicalDeviceProperties2*?):
+    let call = vulkan_entry().vkGetPhysicalDeviceProperties2 else trap("the Vulkan loader lacks vkGetPhysicalDeviceProperties2")
+    call(physicalDevice, pProperties)
+
+func vkGetPhysicalDeviceFeatures2(physicalDevice: u64, pFeatures: VkPhysicalDeviceFeatures2*?):
+    let call = vulkan_entry().vkGetPhysicalDeviceFeatures2 else trap("the Vulkan loader lacks vkGetPhysicalDeviceFeatures2")
+    call(physicalDevice, pFeatures)
+
+func vkEnumerateDeviceExtensionProperties(physicalDevice: u64, pLayerName: void*?, pPropertyCount: u32*?, pProperties: VkExtensionProperties*?) -> i32:
+    let call = vulkan_entry().vkEnumerateDeviceExtensionProperties else trap("the Vulkan loader lacks vkEnumerateDeviceExtensionProperties")
+    return call(physicalDevice, pLayerName, pPropertyCount, pProperties)
+
+func vkCreateComputePipelines(device: u64, pipelineCache: u64, createInfoCount: u32, pCreateInfos: VkComputePipelineCreateInfo*?, pAllocator: void*?, pPipelines: u64*?) -> i32:
+    let call = vulkan_entry().vkCreateComputePipelines else trap("the Vulkan loader lacks vkCreateComputePipelines")
+    return call(device, pipelineCache, createInfoCount, pCreateInfos, pAllocator, pPipelines)
+
+func vkCmdDispatch(commandBuffer: u64, groupCountX: u32, groupCountY: u32, groupCountZ: u32):
+    let call = vulkan_entry().vkCmdDispatch else trap("the Vulkan loader lacks vkCmdDispatch")
+    call(commandBuffer, groupCountX, groupCountY, groupCountZ)
+
+func vkCmdDispatchIndirect(commandBuffer: u64, buffer: u64, offset: u64):
+    let call = vulkan_entry().vkCmdDispatchIndirect else trap("the Vulkan loader lacks vkCmdDispatchIndirect")
+    call(commandBuffer, buffer, offset)
+
+func vkCmdFillBuffer(commandBuffer: u64, dstBuffer: u64, dstOffset: u64, size: u64, data: u32):
+    let call = vulkan_entry().vkCmdFillBuffer else trap("the Vulkan loader lacks vkCmdFillBuffer")
+    call(commandBuffer, dstBuffer, dstOffset, size, data)
+
+## The loader's Vulkan version: 1.0 when it predates vkEnumerateInstanceVersion.
+func vulkan_instance_version() -> u32:
+    if vulkan_entry().vkEnumerateInstanceVersion == none:
+        return vulkan_api_version_1_0
+    var version: u32 = vulkan_api_version_1_0
+    if vkEnumerateInstanceVersion(&version) != VK_SUCCESS:
+        return vulkan_api_version_1_0
+    return version

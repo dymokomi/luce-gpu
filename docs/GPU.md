@@ -277,7 +277,8 @@ LUCE_TEST_WINDOW=required luc test
 ```
 
 `luc test` runs `tests/gpu`, which builds the device programs beside it and runs each
-in its own process (`LUCE_TEST_GPU=optional` lets a host without a device pass), and
+in its own process (`LUCE_TEST_GPU=optional` lets a host without a device pass; on
+Linux and Windows that is `batching`, Vulkan's drawing and compute checks), and
 `tests/boundaries`, which keeps native presentation out of the Vulkan core.
 On macOS it enables Metal API validation and tests actual rendered pixels through
 a test-only blit to shared memory. This checks channel order, linear-to-sRGB
@@ -579,7 +580,18 @@ Each UI frame, submit the next pass only once `done()` reports the last one
 finished. The UI never waits, and the GPU always has work. Recording a pass
 takes microseconds, so the main-thread rule costs nothing here.
 
-### Status
+### Backends
 
-The Metal backend runs compute. Vulkan kernels and passes return `unsupported`
-until that backend lands; buffers already allocate there.
+Metal compiles each kernel's MSL into a compute pipeline state and encodes a
+pass as one command buffer: runs of dispatches share a serial compute encoder,
+runs of copies and fills a blit encoder. Vulkan builds one compute pipeline per
+kernel with its own descriptor set layout and a 128-byte push-constant range,
+and records a pass as one submission on the device's submission ring, with a
+descriptor pool freed when it completes. The device runs at Vulkan 1.2 where
+the loader and device support it, and enables `VK_EXT_shader_atomic_float`'s
+buffer float atomics when offered.
+
+`tests/gpu/compute.lucb` runs on Metal (the probe) and on Vulkan (`batching`,
+on Linux and Windows): saxpy, a twelve-dispatch reduction, compaction with
+atomics feeding an indirect dispatch, fills, copies, shared views, a 256 MiB
+buffer, and kernels and buffers destroyed before their pass is submitted.

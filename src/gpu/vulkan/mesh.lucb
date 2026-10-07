@@ -5,7 +5,7 @@
 #   DESCRIPTION:
 #       Buffers are device-local storage filled by copies from the upload ring (or a staging
 #       buffer of their own when larger), each followed by a barrier that makes the bytes
-#       visible to the vertex and fragment stages of every later submission. Mesh draws use
+#       visible to every later submission (allocated and shared buffers: vulkan/compute.lucb). Mesh draws use
 #       their own descriptor layout: storage buffers 8..14 and the parameter block at 15.
 #
 #==============================================================================================
@@ -15,12 +15,18 @@ struct VulkanBuffer:
     var memory: u64
     var bytes: u64
     var last_use: u64
+    ## A shared buffer's persistent mapping.
+    var mapped: void*?
+
+## Every buffer can be bound for storage, copied from and to, and read as
+## indirect dispatch arguments.
+let vulkan_buffer_usage: u32 = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT
 
 func vulkan_buffer_create(device: VulkanDevice*, data: const u8[]) -> VulkanBuffer*!:
     try vulkan_drawing(device)
     let state = try new VulkanBuffer(bytes = (u64)data.length) in memory.heap
     errdefer vulkan_buffer_release((void*)device, (void*)state)
-    var info = VkBufferCreateInfo(sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, size = state.bytes, usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT)
+    var info = VkBufferCreateInfo(sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, size = state.bytes, usage = vulkan_buffer_usage)
     try vulkan_check(vkCreateBuffer(device.device, &info, none, &state.buffer), "a Vulkan buffer could not be created")
     var requirements: VkMemoryRequirements
     vkGetBufferMemoryRequirements(device.device, state.buffer, &requirements)
@@ -57,8 +63,7 @@ func vulkan_buffer_upload(device: VulkanDevice*, state: VulkanBuffer*, offset: u
     let slot = try vulkan_begin(device)
     var region = VkBufferCopy(srcOffset = source_offset, dstOffset = (u64)offset, size = (u64)data.length)
     vkCmdCopyBuffer(slot.command, source, state.buffer, 1, &region)
-    var barrier = VkMemoryBarrier(sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, dstAccessMask = VK_ACCESS_SHADER_READ_BIT)
-    vkCmdPipelineBarrier(slot.command, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 1, (void*)&barrier, 0, none, 0, none)
+    vulkan_compute_barrier(slot.command, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT)
     if staging.buffer != 0:
         try vulkan_retire(slot, VulkanRetired(kind = vulkan_retired_buffer, handle = staging.buffer, allocation = VulkanAllocation(memory = staging.block)))
         staging = VulkanStaging()

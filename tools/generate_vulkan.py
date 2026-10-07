@@ -31,6 +31,14 @@ vkCreateSemaphore vkDestroySemaphore vkCreateFence vkDestroyFence
 vkWaitForFences vkResetFences
 vkCreateDescriptorSetLayout vkDestroyDescriptorSetLayout vkCreateDescriptorPool vkDestroyDescriptorPool
 vkAllocateDescriptorSets vkUpdateDescriptorSets vkCmdBindDescriptorSets vkCmdPushConstants
+vkGetPhysicalDeviceProperties vkCmdSetDepthBias vkCreateSampler vkDestroySampler vkCmdPipelineBarrier
+vkCmdCopyBufferToImage vkCmdCopyImageToBuffer vkCmdCopyBuffer vkCreateXlibSurfaceKHR
+vkEnumerateInstanceVersion vkGetPhysicalDeviceProperties2 vkGetPhysicalDeviceFeatures2
+vkEnumerateDeviceExtensionProperties vkCreateComputePipelines vkCmdDispatch vkCmdDispatchIndirect vkCmdFillBuffer
+'''.split()
+# Structures reached only through pNext chains, which no command names.
+CHAINED = '''
+VkPhysicalDeviceMaintenance3Properties VkPhysicalDeviceShaderAtomicFloatFeaturesEXT
 '''.split()
 
 
@@ -82,6 +90,9 @@ def main():
         complement = re.fullmatch(r'\(~(\d+)U\)', value)
         if complement:
             value = str(0xffffffff ^ int(complement.group(1)))
+        wide = re.fullmatch(r'\(~(\d+)ULL\)', value)
+        if wide:
+            return 'u64', str(0xffffffffffffffff ^ int(wide.group(1)))
         value = re.sub(r'[uU]$', '', value)
         return ('i32' if name in result_names else 'u32'), value
 
@@ -90,7 +101,8 @@ def main():
                'int32_t': 'i32', 'uint32_t': 'u32', 'int64_t': 'i64', 'uint64_t': 'u64',
                'uint8_t': 'u8', 'uint16_t': 'u16', 'size_t': 'usize',
                'HINSTANCE': 'void*?', 'HWND': 'void*?', 'HANDLE': 'void*?',
-               'LPCWSTR': 'u16*?', 'SECURITY_ATTRIBUTES': 'void', 'DWORD': 'u32'}
+               'LPCWSTR': 'u16*?', 'SECURITY_ATTRIBUTES': 'void', 'DWORD': 'u32',
+               'Display': 'void', 'Window': 'u64'}
 
     def base_type(name):
         if name in scalars:
@@ -149,6 +161,8 @@ def main():
         # The functions themselves are called through vulkan/entry.lucb's run-time table;
         # print their signatures for that file rather than linking them here.
         functions.append(f'# func {name}({params})' + (f' -> {result}' if result != 'void' else ''))
+    for name in CHAINED:
+        base_type(name)
     lines = [
              '#==============================================================================================',
              '#',

@@ -3,11 +3,12 @@ import memory
 import thread
 import depth_slope
 import mesh_pixels
+import compute
 
 ## Vulkan batching contracts: texture passes and uploads do not wait, results are
 ## still ordered for later passes and reads, images destroyed while work that
 ## uses them is in flight stay valid until it completes, and pooled memory pages
-## are all released again.
+## are all released again. Compute (compute.lucb) runs here too.
 pub func main(arguments: str[]) -> i32!:
     _ = arguments
     var device = gpu.Device.open() catch failure:
@@ -18,6 +19,7 @@ pub func main(arguments: str[]) -> i32!:
     defer device.destroy()
     try depth_slope.pixels(device)
     try mesh_pixels.pixels(device)
+    try compute.checks(device)
     try ordering(device)
     try batched_reads(device)
     try stress(device, 20000, 256)
