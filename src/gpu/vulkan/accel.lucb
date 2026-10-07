@@ -1,0 +1,238 @@
+#==============================================================================================
+#
+#   accel - Vulkan acceleration structures (VK_KHR_acceleration_structure)
+#
+#   DESCRIPTION:
+#       A Blas or Tlas is a VkAccelerationStructureKHR in a buffer of its own, sized from its
+#       counts when it is created. Builds, refits (update builds) and Tlas updates are recorded
+#       into a compute pass's submission with a scratch buffer and, for a Tlas, an instance
+#       buffer of its own, both retired with the submission. The extension's functions are
+#       found through vkGetDeviceProcAddr once the device exists.
+#
+#==============================================================================================
+
+struct VulkanRay:
+    var sizes: (func(u64, u32, VkAccelerationStructureBuildGeometryInfoKHR*?, u32*?, VkAccelerationStructureBuildSizesInfoKHR*?) -> unit)?
+    var create: (func(u64, VkAccelerationStructureCreateInfoKHR*?, void*?, u64*?) -> i32)?
+    var destroy: (func(u64, u64, void*?) -> unit)?
+    var build: (func(u64, u32, VkAccelerationStructureBuildGeometryInfoKHR*?, VkAccelerationStructureBuildRangeInfoKHR*?*?) -> unit)?
+    var address: (func(u64, VkAccelerationStructureDeviceAddressInfoKHR*?) -> u64)?
+    ## Scratch addresses are aligned to this.
+    var scratch_alignment: u64
+
+struct VulkanAccel:
+    var structure: u64
+    var buffer: u64
+    var memory: u64
+    var top: bool
+    var opaque: bool
+    var refit: bool
+    ## Its device address, which Tlas instances name.
+    var address: u64
+    var build_scratch: u64
+    var update_scratch: u64
+    ## The newest submission that builds or reads it.
+    var last_use: u64
+
+# VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR | PREFER_FAST_TRACE_BIT_KHR,
+# the build and update modes, and the device build type.
+let vulkan_accel_allow_update: u32 = 1
+let vulkan_accel_fast_trace: u32 = 4
+let vulkan_accel_mode_build: u32 = 0
+let vulkan_accel_mode_update: u32 = 1
+let vulkan_accel_device_build: u32 = 1
+## VkAccelerationStructureInstanceKHR: a row-major 3x4 transform, the 24-bit
+## custom index and 8-bit mask, the shader binding offset and flags, and the
+## Blas's device address.
+let vulkan_instance_bytes: usize = 64
+
+func vulkan_ray_load(device: VulkanDevice*) -> !:
+    let ray = try new VulkanRay() in memory.heap
+    device.ray = ray
+    if let found = vkGetDeviceProcAddr(device.device, "vkGetAccelerationStructureBuildSizesKHR"):
+        ray.sizes = (func(u64, u32, VkAccelerationStructureBuildGeometryInfoKHR*?, u32*?, VkAccelerationStructureBuildSizesInfoKHR*?) -> unit)found
+    if let found = vkGetDeviceProcAddr(device.device, "vkCreateAccelerationStructureKHR"):
+        ray.create = (func(u64, VkAccelerationStructureCreateInfoKHR*?, void*?, u64*?) -> i32)found
+    if let found = vkGetDeviceProcAddr(device.device, "vkDestroyAccelerationStructureKHR"):
+        ray.destroy = (func(u64, u64, void*?) -> unit)found
+    if let found = vkGetDeviceProcAddr(device.device, "vkCmdBuildAccelerationStructuresKHR"):
+        ray.build = (func(u64, u32, VkAccelerationStructureBuildGeometryInfoKHR*?, VkAccelerationStructureBuildRangeInfoKHR*?*?) -> unit)found
+    if let found = vkGetDeviceProcAddr(device.device, "vkGetAccelerationStructureDeviceAddressKHR"):
+        ray.address = (func(u64, VkAccelerationStructureDeviceAddressInfoKHR*?) -> u64)found
+    if ray.sizes == none or ray.create == none or ray.destroy == none or ray.build == none or ray.address == none:
+        error(unavailable, "the Vulkan device lacks acceleration structure functions")
+    var accel = VkPhysicalDeviceAccelerationStructurePropertiesKHR(sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR)
+    var properties = VkPhysicalDeviceProperties2(sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, pNext = (void*)&accel)
+    vkGetPhysicalDeviceProperties2(device.physical, &properties)
+    ray.scratch_alignment = (u64)accel.minAccelerationStructureScratchOffsetAlignment
+    if ray.scratch_alignment == 0: ray.scratch_alignment = 256
+
+func vulkan_ray(device: VulkanDevice*) -> VulkanRay*:
+    return device.ray else trap("Vulkan ray queries are not enabled")
+
+func vulkan_ray_destroy(device: VulkanDevice*, structure: u64):
+    let call = vulkan_ray(device).destroy else trap("vkDestroyAccelerationStructureKHR is missing")
+    call(device.device, structure, none)
+
+## One geometry of `triangle_count` triangles; addresses only for builds.
+func vulkan_triangles(vertex_count: u32, stride: u64, opaque: bool, vertices: u64, indices: u64) -> VkAccelerationStructureGeometryKHR:
+    var geometry = VkAccelerationStructureGeometryKHR(sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR, geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR,
+                                                      flags = VK_GEOMETRY_OPAQUE_BIT_KHR if opaque else 0)
+    geometry.geometry.triangles = VkAccelerationStructureGeometryTrianglesDataKHR(sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR,
+                                                                                vertexFormat = VK_FORMAT_R32G32B32_SFLOAT, vertexStride = stride, maxVertex = vertex_count - 1,
+                                                                                indexType = VK_INDEX_TYPE_UINT32)
+    geometry.geometry.triangles.vertexData.deviceAddress = vertices
+    geometry.geometry.triangles.indexData.deviceAddress = indices
+    return geometry
+
+func vulkan_instances(data: u64) -> VkAccelerationStructureGeometryKHR:
+    var geometry = VkAccelerationStructureGeometryKHR(sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR, geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR)
+    geometry.geometry.instances = VkAccelerationStructureGeometryInstancesDataKHR(sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR)
+    geometry.geometry.instances.data.deviceAddress = data
+    return geometry
+
+func vulkan_accel_flags(refit: bool) -> u32:
+    return vulkan_accel_fast_trace | (vulkan_accel_allow_update if refit else 0)
+
+## Storage for `geometry` with `count` primitives, and its scratch sizes.
+func vulkan_accel_make(device: VulkanDevice*, state: VulkanAccel*, geometry: VkAccelerationStructureGeometryKHR*, count: u32) -> !:
+    let ray = vulkan_ray(device)
+    var info = VkAccelerationStructureBuildGeometryInfoKHR(sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
+                                                          descriptorType = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR if state.top else VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,
+                                                          flags = vulkan_accel_flags(state.refit), mode = vulkan_accel_mode_build, geometryCount = 1, pGeometries = geometry)
+    var primitives = count
+    var sizes = VkAccelerationStructureBuildSizesInfoKHR(sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR)
+    (ray.sizes else trap("vkGetAccelerationStructureBuildSizesKHR is missing"))(device.device, vulkan_accel_device_build, &info, &primitives, &sizes)
+    state.build_scratch = sizes.buildScratchSize
+    state.update_scratch = sizes.updateScratchSize
+    var buffer_info = VkBufferCreateInfo(sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, size = sizes.accelerationStructureSize,
+                                         usage = VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT)
+    try vulkan_check(vkCreateBuffer(device.device, &buffer_info, none, &state.buffer), "an acceleration structure buffer could not be created")
+    var requirements: VkMemoryRequirements
+    vkGetBufferMemoryRequirements(device.device, state.buffer, &requirements)
+    state.memory = try vulkan_buffer_memory(device, requirements, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+    try vulkan_check(vkBindBufferMemory(device.device, state.buffer, state.memory, 0), "acceleration structure memory could not be bound")
+    var create = VkAccelerationStructureCreateInfoKHR(sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR, buffer = state.buffer,
+                                                      size = sizes.accelerationStructureSize, descriptorType = info.descriptorType)
+    try vulkan_check((ray.create else trap("vkCreateAccelerationStructureKHR is missing"))(device.device, &create, none, &state.structure), "an acceleration structure could not be created")
+    var address = VkAccelerationStructureDeviceAddressInfoKHR(sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR, accelerationStructure = state.structure)
+    state.address = (ray.address else trap("vkGetAccelerationStructureDeviceAddressKHR is missing"))(device.device, &address)
+
+func vulkan_accel_blas(device: VulkanDevice*, vertex_count: u32, triangle_count: u32, opaque: bool, refit: bool) -> VulkanAccel*!:
+    try vulkan_drawing(device)
+    let state = try new VulkanAccel(opaque = opaque, refit = refit) in memory.heap
+    errdefer vulkan_accel_destroy(device, state)
+    var geometry = vulkan_triangles(vertex_count, 12, opaque, 0, 0)
+    try vulkan_accel_make(device, state, &geometry, triangle_count)
+    return state
+
+func vulkan_accel_tlas(device: VulkanDevice*, capacity: u32) -> VulkanAccel*!:
+    try vulkan_drawing(device)
+    let state = try new VulkanAccel(top = true, refit = true) in memory.heap
+    errdefer vulkan_accel_destroy(device, state)
+    var geometry = vulkan_instances(0)
+    try vulkan_accel_make(device, state, &geometry, capacity)
+    return state
+
+## Free it once every submission that built or read it has completed.
+func vulkan_accel_destroy(device: VulkanDevice*, state: VulkanAccel*):
+    let item = VulkanRetired(kind = vulkan_retired_accel, handle = state.structure, view = state.buffer, allocation = VulkanAllocation(memory = state.memory))
+    let serial = state.last_use
+    free(state) in memory.heap
+    vulkan_poll(device)
+    if serial <= device.completed:
+        vulkan_retired_free(device, item)
+        return
+    vulkan_retire(&device.slots[(usize)(serial % (u64)vulkan_slot_limit)], item) catch failure:
+        vulkan_wait(device, serial) catch waited: _ = waited
+        vulkan_retired_free(device, item)
+
+## A buffer of `bytes` with a device address, for a pass's scratch or Tlas
+## instances (host-visible then), retired with `slot`'s submission; its address.
+func vulkan_transient(device: VulkanDevice*, slot: VulkanSlot*, bytes: u64, usage: u32, visible: bool) -> VulkanTransient!:
+    var info = VkBufferCreateInfo(sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, size = bytes, usage = usage | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT)
+    var transient = VulkanTransient()
+    try vulkan_check(vkCreateBuffer(device.device, &info, none, &transient.buffer), "a Vulkan build buffer could not be created")
+    errdefer vkDestroyBuffer(device.device, transient.buffer, none)
+    var requirements: VkMemoryRequirements
+    vkGetBufferMemoryRequirements(device.device, transient.buffer, &requirements)
+    let flags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT if visible else VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+    let block = try vulkan_buffer_memory(device, requirements, flags)
+    errdefer vkFreeMemory(device.device, block, none)
+    try vulkan_check(vkBindBufferMemory(device.device, transient.buffer, block, 0), "Vulkan build memory could not be bound")
+    if visible:
+        try vulkan_check(vkMapMemory(device.device, block, 0, bytes, 0, &transient.mapped), "Vulkan build memory could not be mapped")
+    try vulkan_retire(slot, VulkanRetired(kind = vulkan_retired_buffer, handle = transient.buffer, allocation = VulkanAllocation(memory = block)))
+    var address = VkBufferDeviceAddressInfo(sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, buffer = transient.buffer)
+    transient.address = vkGetBufferDeviceAddress(device.device, &address)
+    return transient
+
+struct VulkanTransient:
+    var buffer: u64
+    var address: u64
+    var mapped: void*?
+
+## The scratch a pass's builds need at most, or zero.
+func vulkan_scratch_bytes(commands: const ComputeCommand[]) -> u64:
+    var bytes: u64 = 0
+    for recorded in commands:
+        if recorded.kind < command_build_blas: continue
+        let accel = recorded.accel else continue
+        let native = (VulkanAccel*)accel.native
+        let needed = native.update_scratch if recorded.kind == command_refit_blas or recorded.kind == command_update_tlas else native.build_scratch
+        if needed > bytes: bytes = needed
+    return bytes
+
+## Record a build, refit or update into `command`, using `scratch` (aligned).
+func vulkan_encode_build(device: VulkanDevice*, slot: VulkanSlot*, command: u64, recorded: const ComputeCommand*, scratch: u64) -> !:
+    let ray = vulkan_ray(device)
+    let accel = recorded.accel else trap("a build lost its acceleration structure")
+    let native = (VulkanAccel*)accel.native
+    let update = recorded.kind == command_refit_blas or recorded.kind == command_update_tlas
+    var geometry: VkAccelerationStructureGeometryKHR
+    var count: u32 = 0
+    if recorded.kind == command_build_blas or recorded.kind == command_refit_blas:
+        let vertices = recorded.buffer else trap("a Blas build lost its vertices")
+        let indices = recorded.target else trap("a Blas build lost its indices")
+        let base_vertices = vulkan_buffer_address(device, (VulkanBuffer*)vertices.native) + (u64)recorded.geometry.vertex_offset
+        let base_indices = vulkan_buffer_address(device, (VulkanBuffer*)indices.native) + (u64)recorded.geometry.index_offset
+        geometry = vulkan_triangles(recorded.geometry.vertex_count, (u64)recorded.geometry.stride, recorded.geometry.opaque, base_vertices, base_indices)
+        count = recorded.geometry.triangle_count
+    else:
+        count = (u32)recorded.instances.length
+        let staged = try vulkan_transient(device, slot, (u64)(recorded.instances.length * vulkan_instance_bytes),
+                                          VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR, true)
+        let base = (u8*)(staged.mapped else trap("a mapped instance buffer lost its mapping"))
+        for index in 0..<recorded.instances.length:
+            let instance = recorded.instances[index]
+            let at = base + index * vulkan_instance_bytes
+            for element in 0..<(usize)12:
+                memory.write[f32]((void*)(at + element * 4), instance.transform[element])
+            memory.write[u32]((void*)(at + 48), instance.id | ((u32)instance.mask << 24))
+            memory.write[u32]((void*)(at + 52), 0)
+            memory.write[u64]((void*)(at + 56), ((VulkanAccel*)recorded.instanced[index].native).address)
+        geometry = vulkan_instances(staged.address)
+    var info = VkAccelerationStructureBuildGeometryInfoKHR(sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
+                                                          descriptorType = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR if native.top else VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,
+                                                          flags = vulkan_accel_flags(native.refit), mode = vulkan_accel_mode_update if update else vulkan_accel_mode_build,
+                                                          srcAccelerationStructure = native.structure if update else 0, dstAccelerationStructure = native.structure,
+                                                          geometryCount = 1, pGeometries = &geometry)
+    info.scratchData.deviceAddress = scratch
+    var range = VkAccelerationStructureBuildRangeInfoKHR(primitiveCount = count)
+    var ranges: VkAccelerationStructureBuildRangeInfoKHR*? = &range
+    (ray.build else trap("vkCmdBuildAccelerationStructuresKHR is missing"))(command, 1, &info, &ranges)
+
+## Write a Tlas into a descriptor at `binding` of `set`.
+func vulkan_accel_write(device: VulkanDevice*, set: u64, binding: u32, accel: AccelState*):
+    var structure = ((VulkanAccel*)accel.native).structure
+    var chained = VkWriteDescriptorSetAccelerationStructureKHR(sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR, accelerationStructureCount = 1,
+                                                               pAccelerationStructures = &structure)
+    var write = VkWriteDescriptorSet(sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, pNext = (void*)&chained, dstSet = set, dstBinding = binding, descriptorCount = 1,
+                                     descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR)
+    vkUpdateDescriptorSets(device.device, 1, &write, 0, none)
+
+## Record that submission `serial` uses `accel` and, for a Tlas, its Blases.
+func vulkan_accel_used(accel: AccelState*, serial: u64):
+    ((VulkanAccel*)accel.native).last_use = serial
+    for index in 0..<accel.instanced_count:
+        ((VulkanAccel*)accel.instanced[index].native).last_use = serial

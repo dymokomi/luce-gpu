@@ -1,0 +1,318 @@
+import c
+from luce_gpu import gpu
+import memory
+import kernels
+
+## Ray queries against acceleration structures, checked against a CPU
+## intersector: closest hits and shadow rays on a small mesh, a refit after its
+## vertices move, two instances with transforms, ids and masks, and Blases and
+## Tlases destroyed while recorded work still uses them.
+pub func checks(device: gpu.Device) -> !:
+    let limits = try device.limits()
+    if not limits.ray_query:
+        print("skip: no ray query")
+        return
+    var scene = try Scene.open(device)
+    defer scene.close()
+    try scene.single(device)
+    try scene.refit(device)
+    try scene.instances(device)
+    try lifetimes(device)
+
+## A 4 by 4 grid of quads (32 triangles) over x, y in 0..4, at a height that
+## varies with x and y so no two triangles are coplanar.
+let grid: u32 = 4
+let vertex_count: usize = 25
+let triangle_count: usize = 32
+
+func height(x: f32, y: f32, lift: f32) -> f32:
+    return 1.0 + 0.1 * x + 0.05 * y * y + lift
+
+func mesh_vertices(lift: f32) -> f32[75]:
+    var positions: f32[75]
+    for y in 0..<(usize)5:
+        for x in 0..<(usize)5:
+            let index = (y * 5 + x) * 3
+            positions[index] = (f32)x
+            positions[index + 1] = (f32)y
+            positions[index + 2] = height((f32)x, (f32)y, lift if x % 2 == 0 else lift * 0.5)
+    return positions
+
+func mesh_indices() -> u32[96]:
+    var indices: u32[96]
+    var at: usize = 0
+    for y in 0..<grid:
+        for x in 0..<grid:
+            let first = y * 5 + x
+            indices[at] = first
+            indices[at + 1] = first + 1
+            indices[at + 2] = first + 6
+            indices[at + 3] = first
+            indices[at + 4] = first + 6
+            indices[at + 5] = first + 5
+            at += 6
+    return indices
+
+func bytes_of_floats(values: const f32[]) -> u8[]!:
+    let bytes = try new u8[values.length * 4] in memory.heap
+    for index in 0..<values.length:
+        memory.write[f32]((void*)&bytes[index * 4], values[index])
+    return bytes
+
+func bytes_of_words(values: const u32[]) -> u8[]!:
+    let bytes = try new u8[values.length * 4] in memory.heap
+    for index in 0..<values.length:
+        memory.write[u32]((void*)&bytes[index * 4], values[index])
+    return bytes
+
+## A CPU ray-triangle hit: t and barycentrics (weights of the second and third
+## vertex), Möller–Trumbore, as every GPU reports them.
+struct Hit:
+    var t: f32 = -1.0
+    var u: f32
+    var v: f32
+    var primitive: u32
+
+func cross(a: f32[3], b: f32[3]) -> f32[3]:
+    return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+
+func dot(a: f32[3], b: f32[3]) -> f32:
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+func minus(a: f32[3], b: f32[3]) -> f32[3]:
+    return [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+
+func vertex_at(positions: const f32[], index: u32, shift: f32) -> f32[3]:
+    let at = (usize)index * 3
+    return [positions[at] + shift, positions[at + 1], positions[at + 2]]
+
+## The closest hit of the ray from `origin` along `direction` up to `tmax`
+## with the mesh shifted by `shift` in x.
+func closest(positions: const f32[], indices: const u32[], origin: f32[3], direction: f32[3], tmax: f32, shift: f32) -> Hit:
+    var best = Hit()
+    for triangle in 0..<triangle_count:
+        let a = vertex_at(positions, indices[triangle * 3], shift)
+        let b = vertex_at(positions, indices[triangle * 3 + 1], shift)
+        let d = vertex_at(positions, indices[triangle * 3 + 2], shift)
+        let edge1 = minus(b, a)
+        let edge2 = minus(d, a)
+        let p = cross(direction, edge2)
+        let determinant = dot(edge1, p)
+        if determinant > -0.0000001 and determinant < 0.0000001:
+            continue
+        let inverse = 1.0 / determinant
+        let s = minus(origin, a)
+        let u = dot(s, p) * inverse
+        if u < 0.0 or u > 1.0:
+            continue
+        let q = cross(s, edge1)
+        let v = dot(direction, q) * inverse
+        if v < 0.0 or u + v > 1.0:
+            continue
+        let t = dot(edge2, q) * inverse
+        if t > 0.0 and t <= tmax and (best.t < 0.0 or t < best.t):
+            best = Hit(t = t, u = u, v = v, primitive = (u32)triangle)
+    return best
+
+func near(value: f32, wanted: f32) -> bool:
+    return value >= wanted - 0.0005 and value <= wanted + 0.0005
+
+## The mesh, its Blas and a one-instance Tlas, the ray kernel, and its buffers.
+struct Scene:
+    var program: gpu.Kernel
+    var vertices: gpu.Buffer
+    var indices: gpu.Buffer
+    var blas: gpu.Blas
+    var tlas: gpu.Tlas
+    var rays: gpu.Buffer
+    var hits: gpu.Buffer
+    var ids: gpu.Buffer
+    var positions: f32[75]
+    var corners: u32[96]
+
+    static func open(device: gpu.Device) -> Scene!:
+        var scene = Scene(positions = mesh_vertices(0.0), corners = mesh_indices())
+        scene.program = try gpu.Kernel.create(device, kernels.rays_comp_words, kernels.rays_comp_msl, kernels.rays_comp_group, kernels.rays_comp_bindings)
+        let vertex_bytes = try bytes_of_floats(scene.positions)
+        defer free(vertex_bytes) in memory.heap
+        let index_bytes = try bytes_of_words(scene.corners)
+        defer free(index_bytes) in memory.heap
+        scene.vertices = try gpu.Buffer.create(device, vertex_bytes)
+        scene.indices = try gpu.Buffer.create(device, index_bytes)
+        scene.blas = try gpu.Blas.create(device, scene.triangles())
+        scene.tlas = try gpu.Tlas.create(device, 2)
+        scene.rays = try gpu.Buffer.allocate(device, 64 * 32)
+        scene.hits = try gpu.Buffer.allocate(device, 64 * 16)
+        scene.ids = try gpu.Buffer.allocate(device, 64 * 16)
+        return scene
+
+    func close():
+        self.program.destroy()
+        self.vertices.destroy()
+        self.indices.destroy()
+        self.blas.destroy()
+        self.tlas.destroy()
+        self.rays.destroy()
+        self.hits.destroy()
+        self.ids.destroy()
+
+    func triangles() -> gpu.Triangles:
+        return gpu.Triangles(vertices = self.vertices, vertex_count = (u32)vertex_count, indices = self.indices, triangle_count = (u32)triangle_count)
+
+    ## 64 rays straight up from z = 0 over x in -0.5..4.5 (some miss), each
+    ## starting at `x0`; ray 63 is too short to reach the mesh.
+    func ray_origin(index: usize, x0: f32) -> f32[3]:
+        return [x0 + (f32)(index % 8) * 0.71 - 0.5, (f32)(index // 8) * 0.53 + 0.1, 0.0]
+
+    func ray_limit(index: usize) -> f32:
+        return 0.5 if index == 63 else 100.0
+
+    func upload_rays(x0: f32) -> !:
+        var data: f32[512]
+        for index in 0..<(usize)64:
+            let origin = self.ray_origin(index, x0)
+            data[index * 8] = origin[0]
+            data[index * 8 + 1] = origin[1]
+            data[index * 8 + 2] = origin[2]
+            data[index * 8 + 3] = self.ray_limit(index)
+            data[index * 8 + 6] = 1.0
+        let bytes = try bytes_of_floats(data)
+        defer free(bytes) in memory.heap
+        try self.rays.upload(0, bytes)
+
+    ## Trace the 64 rays with `mask`, as shadow rays or closest-hit rays.
+    func trace(device: gpu.Device, shadow: bool, mask: u32) -> !:
+        var uniforms: u8[12]
+        memory.write[u32]((void*)&uniforms[0], 64)
+        memory.write[u32]((void*)&uniforms[4], 1 if shadow else 0)
+        memory.write[u32]((void*)&uniforms[8], mask)
+        var pass = try gpu.Compute.begin(device)
+        defer pass.close()
+        let bindings: gpu.Binding[4] = [gpu.Binding(accel = self.tlas), gpu.Binding(buffer = self.rays), gpu.Binding(buffer = self.hits), gpu.Binding(buffer = self.ids)]
+        try pass.dispatch(self.program, bindings, uniforms, 1)
+        try pass.submit()
+        try pass.wait()
+
+    ## Compare the GPU's hits with the CPU's for the mesh shifted by `shift`;
+    ## `id` and `instance` are the instance the hits must report.
+    func compare(device: gpu.Device, x0: f32, shift: f32, id: u32, instance: u32, shadow: bool) -> usize!:
+        var hits: u8[1024]
+        var ids: u8[1024]
+        try self.hits.read(0, hits)
+        try self.ids.read(0, ids)
+        var hit_count: usize = 0
+        for index in 0..<(usize)64:
+            let expected = closest(self.positions, self.corners, self.ray_origin(index, x0), [0.0, 0.0, 1.0], self.ray_limit(index), shift)
+            let t = memory.read[f32]((const void*)&hits[index * 16])
+            let hit = memory.read[f32]((const void*)&hits[index * 16 + 12])
+            if expected.t < 0.0:
+                assert(hit == 0.0)
+                continue
+            hit_count += 1
+            assert(hit == 1.0)
+            if shadow:
+                continue
+            assert(near(t, expected.t))
+            assert(near(memory.read[f32]((const void*)&hits[index * 16 + 4]), expected.u) and near(memory.read[f32]((const void*)&hits[index * 16 + 8]), expected.v))
+            assert(memory.read[u32]((const void*)&ids[index * 16]) == expected.primitive)
+            assert(memory.read[u32]((const void*)&ids[index * 16 + 4]) == id and memory.read[u32]((const void*)&ids[index * 16 + 8]) == instance)
+        return hit_count
+
+    ## One instance with id 7: closest hits and shadow rays match the CPU.
+    func single(device: gpu.Device) -> !:
+        var pass = try gpu.Compute.begin(device)
+        defer pass.close()
+        try pass.build_blas(self.blas, self.triangles())
+        let instances: gpu.Instance[1] = [gpu.Instance(blas = self.blas, id = 7)]
+        try pass.build_tlas(self.tlas, instances)
+        try pass.submit()
+        try self.upload_rays(0.0)
+        try self.trace(device, false, 0xff)
+        let hits = try self.compare(device, 0.0, 0.0, 7, 0, false)
+        assert(hits > 32 and hits < 64)
+        try self.trace(device, true, 0xff)
+        assert((try self.compare(device, 0.0, 0.0, 7, 0, true)) == hits)
+
+    ## Lift the vertices, refit the Blas and update the Tlas: hits follow.
+    func refit(device: gpu.Device) -> !:
+        self.positions = mesh_vertices(0.75)
+        let bytes = try bytes_of_floats(self.positions)
+        defer free(bytes) in memory.heap
+        try self.vertices.upload(0, bytes)
+        var pass = try gpu.Compute.begin(device)
+        defer pass.close()
+        try pass.refit_blas(self.blas, self.triangles())
+        let instances: gpu.Instance[1] = [gpu.Instance(blas = self.blas, id = 7)]
+        try pass.update_tlas(self.tlas, instances)
+        try pass.submit()
+        try self.trace(device, false, 0xff)
+        _ = try self.compare(device, 0.0, 0.0, 7, 0, false)
+
+    ## Two instances of the Blas, the second moved 10 along x with id 2 and
+    ## mask 2: a mask of 2 sees only it, a mask of 1 only the first.
+    func instances(device: gpu.Device) -> !:
+        var pass = try gpu.Compute.begin(device)
+        defer pass.close()
+        let instances: gpu.Instance[2] = [gpu.Instance(blas = self.blas, id = 1, mask = 1),
+                                          gpu.Instance(blas = self.blas, transform = [1.0, 0.0, 0.0, 10.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0], id = 2, mask = 2)]
+        try pass.build_tlas(self.tlas, instances)
+        try pass.submit()
+        try self.upload_rays(10.0)
+        try self.trace(device, false, 2)
+        assert((try self.compare(device, 10.0, 10.0, 2, 1, false)) > 32)
+        try self.trace(device, false, 1)
+        var hits: u8[1024]
+        try self.hits.read(0, hits)
+        for index in 0..<(usize)64:
+            assert(memory.read[f32]((const void*)&hits[index * 16 + 12]) == 0.0)
+        try self.upload_rays(0.0)
+        try self.trace(device, false, 3)
+        assert((try self.compare(device, 0.0, 0.0, 1, 0, false)) > 32)
+
+## Every structure and buffer destroyed after recording and before the pass is
+## submitted: the pass keeps them, and the trace still hits.
+func lifetimes(device: gpu.Device) -> !:
+    let positions = mesh_vertices(0.0)
+    let corners = mesh_indices()
+    let vertex_bytes = try bytes_of_floats(positions)
+    defer free(vertex_bytes) in memory.heap
+    let index_bytes = try bytes_of_words(corners)
+    defer free(index_bytes) in memory.heap
+    var program = try gpu.Kernel.create(device, kernels.rays_comp_words, kernels.rays_comp_msl, kernels.rays_comp_group, kernels.rays_comp_bindings)
+    defer program.destroy()
+    var vertices = try gpu.Buffer.create(device, vertex_bytes)
+    var indices = try gpu.Buffer.create(device, index_bytes)
+    let triangles = gpu.Triangles(vertices = vertices, vertex_count = (u32)vertex_count, indices = indices, triangle_count = (u32)triangle_count)
+    var blas = try gpu.Blas.create(device, triangles, false)
+    var tlas = try gpu.Tlas.create(device, 1)
+    var ray: f32[8] = [2.25, 2.25, 0.0, 100.0, 0.0, 0.0, 1.0, 0.0]
+    let ray_bytes = try bytes_of_floats(ray)
+    defer free(ray_bytes) in memory.heap
+    var rays = try gpu.Buffer.create(device, ray_bytes)
+    defer rays.destroy()
+    var hits = try gpu.Buffer.allocate(device, 16)
+    defer hits.destroy()
+    var ids = try gpu.Buffer.allocate(device, 16)
+    defer ids.destroy()
+    var pass = try gpu.Compute.begin(device)
+    defer pass.close()
+    try pass.build_blas(blas, triangles)
+    let instances: gpu.Instance[1] = [gpu.Instance(blas = blas, id = 3)]
+    try pass.build_tlas(tlas, instances)
+    var uniforms: u8[12]
+    memory.write[u32]((void*)&uniforms[0], 1)
+    memory.write[u32]((void*)&uniforms[8], 0xff)
+    let bindings: gpu.Binding[4] = [gpu.Binding(accel = tlas), gpu.Binding(buffer = rays), gpu.Binding(buffer = hits), gpu.Binding(buffer = ids)]
+    try pass.dispatch(program, bindings, uniforms, 1)
+    vertices.destroy()
+    indices.destroy()
+    blas.destroy()
+    tlas.destroy()
+    try pass.submit()
+    try pass.wait()
+    var result: u8[16]
+    try hits.read(0, result)
+    let expected = closest(positions, corners, [2.25, 2.25, 0.0], [0.0, 0.0, 1.0], 100.0, 0.0)
+    assert(expected.t > 0.0 and near(memory.read[f32]((const void*)&result[0]), expected.t))
+    try ids.read(0, result)
+    assert(memory.read[u32]((const void*)&result[4]) == 3)

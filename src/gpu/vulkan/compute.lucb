@@ -56,7 +56,8 @@ func vulkan_device_limits(device: VulkanDevice*) -> Limits:
     return Limits(buffer_bytes = buffer_bytes, group_threads = limits.maxComputeWorkGroupInvocations, group_size = limits.maxComputeWorkGroupSize,
                   group_count = limits.maxComputeWorkGroupCount, shared_bytes = limits.maxComputeSharedMemorySize, float_atomic_add = device.features.float_atomic_add,
                   subgroup_size = subgroups.subgroupSize, subgroup_ops = subgroup_ops, timestamps = device.timestamp_bits > 0,
-                  buffer_addresses = device.features.buffer_addresses, texture_tables = tables, texture_table_size = table_size if tables else 0)
+                  buffer_addresses = device.features.buffer_addresses, texture_tables = tables, texture_table_size = table_size if tables else 0,
+                  ray_query = device.features.ray_query)
 
 func vulkan_limits(device: VulkanDevice*) -> Limits:
     return device.limits
@@ -153,6 +154,7 @@ func vulkan_descriptor_type(kind: u8) -> u32:
     if kind == (u8)BindingKind.storage_image: return VK_DESCRIPTOR_TYPE_STORAGE_IMAGE
     if kind == (u8)BindingKind.sampled_image: return VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
     if kind == (u8)BindingKind.sampler: return VK_DESCRIPTOR_TYPE_SAMPLER
+    if kind == (u8)BindingKind.acceleration_structure: return VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR
     return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
 
 ## Release once every submission that dispatched the kernel has completed.
@@ -183,7 +185,11 @@ func vulkan_compute_barrier(command: u64, source: u32, target: u32):
                                   dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT)
     vkCmdPipelineBarrier(command, source, target, 0, 1, (void*)&barrier, 0, none, 0, none)
 
-let vulkan_compute_stages: u32 = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT
+## The stages a pass's commands run in: acceleration structure builds too,
+## where ray queries are enabled (the stage is invalid otherwise).
+func vulkan_compute_stages(device: VulkanDevice*) -> u32:
+    let stages = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT
+    return stages | VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR if device.features.ray_query else stages
 
 ## Record `commands` into one submission and submit it without waiting. Like
 ## every submission its start and end are timed (vulkan_begin, vulkan_end); a
@@ -203,19 +209,29 @@ func vulkan_compute_submit(device: VulkanDevice*, commands: const ComputeCommand
     if stamped != 0:
         vkCmdResetQueryPool(slot.command, stamped, 0, (u32)stamps)
     if dispatches > 0:
-        var sizes: VkDescriptorPoolSize[4] = [
+        var sizes: VkDescriptorPoolSize[5] = [
             VkDescriptorPoolSize(descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, descriptorCount = dispatches * (u32)binding_limit),
             VkDescriptorPoolSize(descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, descriptorCount = dispatches * (u32)binding_limit),
             VkDescriptorPoolSize(descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, descriptorCount = dispatches * (u32)binding_limit),
-            VkDescriptorPoolSize(descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER, descriptorCount = dispatches * (u32)binding_limit)]
-        var pool_info = VkDescriptorPoolCreateInfo(sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, maxSets = dispatches, poolSizeCount = 4, pPoolSizes = &sizes[0])
+            VkDescriptorPoolSize(descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER, descriptorCount = dispatches * (u32)binding_limit),
+            VkDescriptorPoolSize(descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, descriptorCount = dispatches * (u32)binding_limit)]
+        # Acceleration structure descriptors exist only where ray queries are enabled.
+        let kinds: u32 = 5 if device.features.ray_query else 4
+        var pool_info = VkDescriptorPoolCreateInfo(sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, maxSets = dispatches, poolSizeCount = kinds, pPoolSizes = &sizes[0])
         try vulkan_check(vkCreateDescriptorPool(device.device, &pool_info, none, &pool), "Vulkan compute descriptors could not be created")
+    # One scratch buffer for the pass's builds, ordered by the barriers between them.
+    var scratch: u64 = 0
+    let scratch_bytes = vulkan_scratch_bytes(commands)
+    if scratch_bytes > 0:
+        let alignment = vulkan_ray(device).scratch_alignment
+        let memory_block = try vulkan_transient(device, slot, scratch_bytes + alignment, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, false)
+        scratch = (memory_block.address + alignment - 1) // alignment * alignment
     # Earlier submissions' writes (uploads, passes) before this pass reads.
-    vulkan_compute_barrier(slot.command, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, vulkan_compute_stages)
+    vulkan_compute_barrier(slot.command, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, vulkan_compute_stages(device))
     for index in 0..<commands.length:
         let recorded = &commands[index]
         if index > 0:
-            vulkan_compute_barrier(slot.command, vulkan_compute_stages, vulkan_compute_stages)
+            vulkan_compute_barrier(slot.command, vulkan_compute_stages(device), vulkan_compute_stages(device))
         if recorded.kind == command_timestamp:
             # After every earlier command has finished.
             vkCmdWriteTimestamp(slot.command, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, stamped, recorded.value)
@@ -227,6 +243,8 @@ func vulkan_compute_submit(device: VulkanDevice*, commands: const ComputeCommand
         elif recorded.kind == command_fill:
             let target = recorded.buffer else trap("a fill lost its buffer")
             vkCmdFillBuffer(slot.command, ((VulkanBuffer*)target.native).buffer, (u64)recorded.offset, (u64)recorded.bytes, recorded.value)
+        elif recorded.kind >= command_build_blas:
+            try vulkan_encode_build(device, slot, slot.command, recorded, scratch)
         else:
             try vulkan_encode_dispatch(device, slot.command, pool, recorded)
     # Storage images back to sampling, the layout the rest of the device expects.
@@ -234,7 +252,7 @@ func vulkan_compute_submit(device: VulkanDevice*, commands: const ComputeCommand
         for bound in recorded.textures:
             if let texture = bound: vulkan_transition(slot.command, (VulkanTexture*)texture.native, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
     # The results, to whatever is submitted next: frames, reads, other passes.
-    vulkan_compute_barrier(slot.command, vulkan_compute_stages, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT)
+    vulkan_compute_barrier(slot.command, vulkan_compute_stages(device), VK_PIPELINE_STAGE_ALL_COMMANDS_BIT)
     if pool != 0:
         try vulkan_retire(slot, VulkanRetired(kind = vulkan_retired_descriptors, handle = pool))
         pool = 0
@@ -246,6 +264,11 @@ func vulkan_compute_submit(device: VulkanDevice*, commands: const ComputeCommand
         for bound in recorded.textures:
             if let texture = bound: ((VulkanTexture*)texture.native).last_use = serial
         if let table = recorded.table: vulkan_table_used((VulkanTable*)table.native, serial)
+        if let accel = recorded.accel: vulkan_accel_used(accel, serial)
+        for bound in recorded.accels:
+            if let accel = bound: vulkan_accel_used(accel, serial)
+        for blas in recorded.instanced:
+            ((VulkanAccel*)blas.native).last_use = serial
         if let buffer = recorded.buffer: ((VulkanBuffer*)buffer.native).last_use = serial
         if let buffer = recorded.target: ((VulkanBuffer*)buffer.native).last_use = serial
     # Buffers kernels may reach by address count as used by every pass.
@@ -333,6 +356,9 @@ func vulkan_encode_dispatch(device: VulkanDevice*, command: u64, pool: u64, reco
             writes[(usize)count] = VkWriteDescriptorSet(sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, dstSet = set, dstBinding = (u32)index, descriptorCount = 1,
                                                         descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, pBufferInfo = &infos[index])
             count += 1
+            continue
+        if let accel = recorded.accels[index]:
+            vulkan_accel_write(device, set, (u32)index, accel)
             continue
         let texture = recorded.textures[index] else continue
         let image = (VulkanTexture*)texture.native

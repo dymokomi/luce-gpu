@@ -116,6 +116,7 @@ struct VulkanFunctions:
     var vkCmdWriteTimestamp: (func(u64, u32, u64, u32) -> unit)?
     var vkGetQueryPoolResults: (func(u64, u64, u32, u32, usize, void*?, u64, u32) -> i32)?
     var vkGetBufferDeviceAddress: (func(u64, VkBufferDeviceAddressInfo*?) -> u64)?
+    var vkGetDeviceProcAddr: (func(u64, c.str) -> void*?)?
 
 var vulkan_functions: VulkanFunctions*? = none
 
@@ -325,6 +326,8 @@ func vulkan_load() -> !:
         table.vkGetQueryPoolResults = (func(u64, u64, u32, u32, usize, void*?, u64, u32) -> i32)found
     if let found = vulkan_symbol(library, "vkGetBufferDeviceAddress"):
         table.vkGetBufferDeviceAddress = (func(u64, VkBufferDeviceAddressInfo*?) -> u64)found
+    if let found = vulkan_symbol(library, "vkGetDeviceProcAddr"):
+        table.vkGetDeviceProcAddr = (func(u64, c.str) -> void*?)found
     if table.vkCreateInstance == none:
         free(table) in memory.heap
         error(unavailable, "the Vulkan loader has no vkCreateInstance")
@@ -743,6 +746,10 @@ func vkGetQueryPoolResults(device: u64, queryPool: u64, firstQuery: u32, queryCo
 func vkGetBufferDeviceAddress(device: u64, pInfo: VkBufferDeviceAddressInfo*?) -> u64:
     let call = vulkan_entry().vkGetBufferDeviceAddress else trap("the Vulkan loader lacks vkGetBufferDeviceAddress")
     return call(device, pInfo)
+
+func vkGetDeviceProcAddr(device: u64, pName: c.str) -> void*?:
+    let call = vulkan_entry().vkGetDeviceProcAddr else trap("the Vulkan loader lacks vkGetDeviceProcAddr")
+    return call(device, pName)
 
 ## The loader's Vulkan version: 1.0 when it predates vkEnumerateInstanceVersion.
 func vulkan_instance_version() -> u32:

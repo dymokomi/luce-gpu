@@ -7,6 +7,7 @@ import depth_slope
 import mesh_pixels
 import textures
 import compute
+import rays
 import targets
 import copies
 import instances
@@ -214,6 +215,7 @@ pub func main(arguments: str[]) -> i32!:
         try textures.upload_batches(device)
         try textures.programs(device)
         try compute.checks(device)
+        try rays.checks(device)
         try targets.pixels(device)
         try copies.pixels(device)
         try instances.pixels(device)

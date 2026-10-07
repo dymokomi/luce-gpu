@@ -737,6 +737,67 @@ resident for each dispatch. Vulkan keeps one descriptor set of sampled images,
 updated after bind. Only sampled textures go in tables; storage images and
 buffers stay bound, or reached by address.
 
+### Ray queries
+
+Where `limits().ray_query`, kernels trace rays against triangle meshes with
+`GL_EXT_ray_query`, the inline ray tracing of Vulkan's `VK_KHR_ray_query`,
+Metal's `intersection_query` and DXR's `RayQuery`. There are no ray-tracing
+pipelines or shader tables: a kernel starts a query, steps it and reads the
+committed hit. The scene lives in two levels of acceleration structure:
+
+- **`Blas`** holds one mesh's triangles: `Triangles` names world-space float3
+  positions (`stride` bytes apart, 12 by default) and three u32 indices per
+  triangle, with offsets into their buffers. `opaque` triangles skip any-hit
+  handling. `Blas.create(device, triangles, refit = true)` sizes storage from
+  the counts; build it on a pass.
+- **`Tlas`** holds instances: `Instance { blas, transform, id, mask }`, where
+  `transform` is the object-to-world matrix as 3 rows of 4 (row-major, as in
+  Vulkan and DXR), `id` the 24-bit custom index a query reports and `mask` the
+  bits a ray's cull mask must share. `Tlas.create(device, capacity)`.
+
+Builds are recorded on a `Compute` pass, ordered with its dispatches by the
+same automatic barriers:
+
+| Operation | Contract |
+| --- | --- |
+| `build_blas(blas, triangles)` | Builds from the counts the Blas was created for. |
+| `refit_blas(blas, triangles)` | After vertices move, same counts and indices: faster than a build, and tracing quality degrades only with large motion. Needs `refit`. |
+| `build_tlas(tlas, instances)` | Up to its capacity of built Blases. The Tlas holds those Blases until it is built again. |
+| `update_tlas(tlas, instances)` | New transforms, ids and masks for the same Blases in the same order; also needed after a Blas is refitted. |
+
+Scratch memory is the pass's own. A kernel binds a Tlas with
+`Binding(accel = tlas)` at an `accelerationStructureEXT` binding; on Metal
+every Blas behind it is made resident for the dispatch. Embed ray-query
+kernels with `--target-env vulkan1.2`:
+
+```glsl
+#extension GL_EXT_ray_query : require
+layout(set = 0, binding = 0) uniform accelerationStructureEXT scene;
+...
+rayQueryEXT query;
+rayQueryInitializeEXT(query, scene, gl_RayFlagsOpaqueEXT, 0xff, origin, 0.0, direction, tmax);
+while (rayQueryProceedEXT(query)) {}
+if (rayQueryGetIntersectionTypeEXT(query, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
+    float t = rayQueryGetIntersectionTEXT(query, true);
+    vec2 uv = rayQueryGetIntersectionBarycentricsEXT(query, true);      // weights of vertices 1 and 2
+    int triangle = rayQueryGetIntersectionPrimitiveIndexEXT(query, true);
+    int id = rayQueryGetIntersectionInstanceCustomIndexEXT(query, true);  // Instance.id
+}
+```
+
+A shadow ray adds `gl_RayFlagsTerminateOnFirstHitEXT` and only asks whether
+anything was hit. Blases, Tlases and the buffers they were built from may be
+destroyed once recorded: the pass, and then the submitted work, keep them.
+Compaction is not offered yet.
+
+On Metal, a Blas is a primitive acceleration structure and a Tlas an instance
+acceleration structure with user-id instance descriptors. Storage grows at a
+build whose descriptor needs more, since a Tlas's size depends on the Blases it
+instances. On Vulkan, the device enables `VK_KHR_acceleration_structure`,
+`VK_KHR_ray_query` and `VK_KHR_deferred_host_operations` where offered, with
+buffer addresses. Builds use `vkCmdBuildAccelerationStructuresKHR`, and a Tlas's
+instances go in a buffer of their own for each build.
+
 ### Buffers for compute
 
 `Buffer.allocate(device, bytes, memory = Memory.device)` makes a zeroed buffer.
@@ -765,6 +826,7 @@ copy source or destination, indirect arguments, or mesh data.
 | `buffer_addresses` | `Buffer.address` | Metal 3 GPUs (`gpuAddress`) | `bufferDeviceAddress` and `shaderInt64` |
 | `texture_tables` | `TextureTable` | argument buffers tier 2 | descriptor indexing: runtime arrays, nonuniform indexing, partially bound, variable count, update after bind |
 | `texture_table_size` | slots per table | 65536 | `maxDescriptorSetUpdateAfterBindSampledImages`, at most 65536 |
+| `ray_query` | `Blas`, `Tlas` and `GL_EXT_ray_query` | `supportsRaytracing` | `VK_KHR_acceleration_structure`, `VK_KHR_ray_query` |
 
 ### Completion and GPU time
 
@@ -850,4 +912,7 @@ buffer, kernels and buffers destroyed before their pass is submitted, IEEE
 infinities and NaNs (the same bits on every backend), subgroup operations, storage
 images of each 32-bit format written, sampled, read and written in place, read
 back and drawn for display, float atomics, submissions, GPU times and
-timestamps, buffers reached by address, and texture tables.
+timestamps, buffers reached by address, texture tables, and (in `rays.lucb`)
+ray queries checked against a CPU intersector: closest hits and shadow rays,
+a refit, two instances with transforms, ids and masks, and structures
+destroyed after recording.

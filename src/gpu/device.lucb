@@ -136,6 +136,10 @@ pub struct Limits:
     pub var texture_tables: bool = false
     ## The most slots a texture table has.
     pub var texture_table_size: u32 = 0
+    ## Whether kernels can trace rays with GL_EXT_ray_query against Tlases
+    ## (`Blas`, `Tlas`): Metal's supportsRaytracing; Vulkan's
+    ## VK_KHR_acceleration_structure and VK_KHR_ray_query.
+    pub var ray_query: bool = false
 
 struct DeviceState:
     var backend: Backend

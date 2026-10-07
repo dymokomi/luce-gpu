@@ -39,6 +39,12 @@ extern struct LuceGpuMetalRange:
     location: u64
     length: u64
 
+## MTLAccelerationStructureSizes.
+extern struct LuceGpuMetalAccelSizes:
+    size: u64
+    build: u64
+    refit: u64
+
 extern struct LuceGpuMetalViewport:
     x: f64
     y: f64

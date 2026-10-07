@@ -55,6 +55,7 @@ let vulkan_retired_descriptors: u8 = 3
 let vulkan_retired_image: u8 = 4
 let vulkan_retired_kernel: u8 = 5
 let vulkan_retired_queries: u8 = 6
+let vulkan_retired_accel: u8 = 7
 
 ## A handle released once the submission holding it has completed. A kernel
 ## keeps its pipeline in `handle`, its pipeline layout in `view` and its
@@ -98,6 +99,8 @@ struct VulkanDevice:
     var timing_serial: u64[32]
     # Set 1 of kernels reading a texture table (vulkan/compute.lucb).
     var table_layout: u64
+    # Acceleration structure functions and limits (vulkan/accel.lucb), where ray queries are enabled.
+    var ray: VulkanRay*?
     var queue: u64
     var family: u32
     var memory: VkPhysicalDeviceMemoryProperties
@@ -190,14 +193,15 @@ func vulkan_device_open() -> VulkanDevice*!:
             var queue_info = VkDeviceQueueCreateInfo(sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
                                                      queueFamilyIndex = (u32)family, queueCount = 1, pQueuePriorities = &priority)
             let version = vulkan_device_version(physical, requested)
-            var device_extensions: c.str[2] = [VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME]
+            var device_extensions: c.str[5] = [VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME, VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
+                                               VK_KHR_RAY_QUERY_EXTENSION_NAME, VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME]
             var device_info = VkDeviceCreateInfo(sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
                                                  queueCreateInfoCount = 1, pQueueCreateInfos = &queue_info,
                                                  enabledExtensionCount = 1, ppEnabledExtensionNames = &device_extensions[0])
             # Optional features the device offers are enabled, only those bits,
             # through the features chain: float atomics (an extension), and on
-            # Vulkan 1.2 buffer addresses and the descriptor indexing texture
-            # tables need.
+            # Vulkan 1.2 buffer addresses, the descriptor indexing texture tables
+            # need, and ray queries (three extensions).
             let offered = try vulkan_offered_features(physical, version)
             var atomic_float = VkPhysicalDeviceShaderAtomicFloatFeaturesEXT(sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT,
                                                                             shaderBufferFloat32Atomics = VK_TRUE, shaderBufferFloat32AtomicAdd = VK_TRUE)
@@ -207,11 +211,23 @@ func vulkan_device_open() -> VulkanDevice*!:
                                                             descriptorIndexing = tables, runtimeDescriptorArray = tables, shaderSampledImageArrayNonUniformIndexing = tables,
                                                             descriptorBindingPartiallyBound = tables, descriptorBindingVariableDescriptorCount = tables,
                                                             descriptorBindingSampledImageUpdateAfterBind = tables)
+            var accel = VkPhysicalDeviceAccelerationStructureFeaturesKHR(sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR, accelerationStructure = VK_TRUE)
+            var ray_query = VkPhysicalDeviceRayQueryFeaturesKHR(sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR, pNext = (void*)&accel, rayQuery = VK_TRUE)
             var features = VkPhysicalDeviceFeatures2(sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2)
             var chain: void*? = none
+            # The extensions after the swapchain's, in the array's order:
+            # float atomics, or (moved down) none, then the ray query three.
             if offered.float_atomic_add:
                 chain = (void*)&atomic_float
                 device_info.enabledExtensionCount = 2
+            if offered.ray_query:
+                if not offered.float_atomic_add:
+                    device_extensions[1] = VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME
+                    device_info.enabledExtensionCount = 4
+                else:
+                    device_info.enabledExtensionCount = 5
+                accel.pNext = chain
+                chain = (void*)&ray_query
             if offered.buffer_addresses or offered.texture_tables:
                 vulkan12.pNext = chain
                 chain = (void*)&vulkan12
@@ -226,6 +242,8 @@ func vulkan_device_open() -> VulkanDevice*!:
             state.version = version
             state.features = offered
             state.timestamp_bits = properties[family].timestampValidBits
+            if offered.ray_query:
+                try vulkan_ray_load(state)
             state.limits = vulkan_device_limits(state)
             state.integrated = vulkan_device_rank(physical) == 1
             state.family = (u32)family
@@ -270,17 +288,27 @@ struct VulkanFeatures:
     ## indexed nonuniformly, partially bound, of variable count, updated after
     ## binding (Vulkan 1.2).
     var texture_tables: bool
+    ## Acceleration structures and ray queries (three extensions, Vulkan 1.2,
+    ## with buffer addresses).
+    var ray_query: bool
 
 func vulkan_offered_features(physical: u64, version: u32) -> VulkanFeatures!:
     if version < vulkan_api_version_1_1:
         return VulkanFeatures()
     let atomics = try vulkan_has_extension(physical, "VK_EXT_shader_atomic_float")
+    let modern = version >= vulkan_api_version_1_2
+    let rays = (modern and (try vulkan_has_extension(physical, "VK_KHR_acceleration_structure")) and (try vulkan_has_extension(physical, "VK_KHR_ray_query")) and
+                (try vulkan_has_extension(physical, "VK_KHR_deferred_host_operations")))
+    var accel = VkPhysicalDeviceAccelerationStructureFeaturesKHR(sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR)
+    var ray_query = VkPhysicalDeviceRayQueryFeaturesKHR(sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR, pNext = (void*)&accel)
     var atomic_float = VkPhysicalDeviceShaderAtomicFloatFeaturesEXT(sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT)
     var vulkan12 = VkPhysicalDeviceVulkan12Features(sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES)
     var features = VkPhysicalDeviceFeatures2(sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2)
     var chain: void*? = none
     if atomics: chain = (void*)&atomic_float
-    let modern = version >= vulkan_api_version_1_2
+    if rays:
+        accel.pNext = chain
+        chain = (void*)&ray_query
     if modern:
         vulkan12.pNext = chain
         chain = (void*)&vulkan12
@@ -288,8 +316,9 @@ func vulkan_offered_features(physical: u64, version: u32) -> VulkanFeatures!:
     vkGetPhysicalDeviceFeatures2(physical, &features)
     let tables = (vulkan12.descriptorIndexing != 0 and vulkan12.runtimeDescriptorArray != 0 and vulkan12.shaderSampledImageArrayNonUniformIndexing != 0 and
                   vulkan12.descriptorBindingPartiallyBound != 0 and vulkan12.descriptorBindingVariableDescriptorCount != 0 and vulkan12.descriptorBindingSampledImageUpdateAfterBind != 0)
-    return VulkanFeatures(float_atomic_add = atomics and atomic_float.shaderBufferFloat32AtomicAdd != 0,
-                          buffer_addresses = modern and vulkan12.bufferDeviceAddress != 0 and features.features.shaderInt64 != 0, texture_tables = modern and tables)
+    let addresses = modern and vulkan12.bufferDeviceAddress != 0 and features.features.shaderInt64 != 0
+    return VulkanFeatures(float_atomic_add = atomics and atomic_float.shaderBufferFloat32AtomicAdd != 0, buffer_addresses = addresses, texture_tables = modern and tables,
+                          ray_query = rays and addresses and accel.accelerationStructure != 0 and ray_query.rayQuery != 0)
 
 ## 0 for a discrete GPU, 1 for an integrated one, 2 for any other kind. Only
 ## VkPhysicalDeviceProperties' device type is read (bytes 16..20); the bindings
@@ -329,6 +358,7 @@ func vulkan_device_destroy(state: VulkanDevice*):
         vulkan_drawing_destroy(state)
         if state.timing != 0: vkDestroyQueryPool(state.device, state.timing, none)
         if state.table_layout != 0: vkDestroyDescriptorSetLayout(state.device, state.table_layout, none)
+        if let ray = state.ray: free(ray) in memory.heap
         # Textures still open when the device goes release their pages with it.
         while let page = state.pages:
             vulkan_page_destroy(state, page)
@@ -561,6 +591,10 @@ func vulkan_retired_free(device: VulkanDevice*, item: VulkanRetired):
         if item.handle != 0: vkDestroyImage(device.device, item.handle, none)
     elif item.kind == vulkan_retired_queries:
         vkDestroyQueryPool(device.device, item.handle, none)
+    elif item.kind == vulkan_retired_accel:
+        # An acceleration structure, then the buffer holding it.
+        if item.handle != 0: vulkan_ray_destroy(device, item.handle)
+        if item.view != 0: vkDestroyBuffer(device.device, item.view, none)
     elif item.kind == vulkan_retired_kernel:
         if item.handle != 0: vkDestroyPipeline(device.device, item.handle, none)
         if item.view != 0: vkDestroyPipelineLayout(device.device, item.view, none)

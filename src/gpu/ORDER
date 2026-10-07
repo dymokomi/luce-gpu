@@ -19,6 +19,7 @@ shaders.lucb
 compute.lucb
 compute_shaders.lucb
 table.lucb
+accel.lucb
 backend.lucb
 presentation.lucb
 resources.lucb
@@ -29,6 +30,7 @@ metal/geometry.lucb
 metal/mesh.lucb
 metal/buffer.lucb
 metal/compute.lucb
+metal/accel.lucb
 metal/submission.lucb
 metal/texture.lucb
 metal/transfer.lucb
@@ -42,6 +44,7 @@ vulkan/device.lucb
 vulkan/geometry.lucb
 vulkan/mesh.lucb
 vulkan/compute.lucb
+vulkan/accel.lucb
 vulkan/texture.lucb
 vulkan/transfer.lucb
 vulkan/shader.lucb

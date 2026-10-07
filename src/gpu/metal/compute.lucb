@@ -42,6 +42,7 @@ func metal_limits(device: MetalDevice*) -> Limits:
                   group_size = [1024, 1024, 1024], group_count = [0xffffffffu32, 0xffffffffu32, 0xffffffffu32],
                   shared_bytes = (u32)metal_uint(native, metal_sel("maxThreadgroupMemoryLength")), float_atomic_add = float_atomics,
                   subgroup_size = 32, subgroup_ops = true, timestamps = true, buffer_addresses = float_atomics,
+                  ray_query = (metal_uint(native, metal_sel("supportsRaytracing")) & 0xff) != 0,
                   texture_tables = metal_uint(native, metal_sel("argumentBuffersSupport")) == metal_argument_buffers_tier2, texture_table_size = texture_table_limit)
 
 func metal_kernel_create(device: MetalDevice*, msl: c.str, group: u32[3], fast_math: bool) -> void*!:
@@ -99,20 +100,25 @@ func metal_required_compute(device: MetalDevice*) -> MetalCompute*:
 
 ## The encoder a run of commands records into: dispatches into a compute
 ## encoder, copies and fills into a blit encoder, one open at a time.
+## Which encoder is open: compute, blit or acceleration structure.
+let metal_encoder_compute: u8 = 0
+let metal_encoder_blit: u8 = 1
+let metal_encoder_accel: u8 = 2
+
 struct MetalEncoding:
     var command: void*
     var encoder: void*?
-    var blit: bool
+    var kind: u8
     ## Buffers kernels may reach by address: resident in every compute encoder.
     var addressed: BufferState*[]
 
     func compute() -> void*!:
         if let encoder = self.encoder:
-            if not self.blit: return encoder
+            if self.kind == metal_encoder_compute: return encoder
             self.end()
         let encoder = metal_ptr(self.command, metal_sel("computeCommandEncoder")) else error(failed, "could not create a Metal compute encoder")
         self.encoder = encoder
-        self.blit = false
+        self.kind = metal_encoder_compute
         if self.addressed.length > 0:
             let natives = try new void*[self.addressed.length] --- in memory.heap
             defer free(natives) in memory.heap
@@ -124,11 +130,20 @@ struct MetalEncoding:
 
     func transfer() -> void*!:
         if let encoder = self.encoder:
-            if self.blit: return encoder
+            if self.kind == metal_encoder_blit: return encoder
             self.end()
         let encoder = metal_ptr(self.command, metal_sel("blitCommandEncoder")) else error(failed, "could not create a Metal blit encoder")
         self.encoder = encoder
-        self.blit = true
+        self.kind = metal_encoder_blit
+        return encoder
+
+    func builder() -> void*!:
+        if let encoder = self.encoder:
+            if self.kind == metal_encoder_accel: return encoder
+            self.end()
+        let encoder = metal_ptr(self.command, metal_sel("accelerationStructureCommandEncoder")) else error(failed, "could not create a Metal acceleration structure encoder")
+        self.encoder = encoder
+        self.kind = metal_encoder_accel
         return encoder
 
     func end():
@@ -148,6 +163,9 @@ func metal_compute_submit(device: MetalDevice*, commands: const ComputeCommand[]
     errdefer metal_release_buffers(buffers, count)
     var command = metal_ptr(metal_required(device.queue), metal_sel("commandBuffer")) else error(failed, "could not create a Metal command buffer")
     var encoding = MetalEncoding(command = command, addressed = addressed)
+    # Scratch memory for the pass's builds, grown as they need it; Metal orders
+    # builds that share it.
+    var scratch = MetalScratch()
     for index in 0..<commands.length:
         let recorded = &commands[index]
         if recorded.kind == command_timestamp:
@@ -166,6 +184,8 @@ func metal_compute_submit(device: MetalDevice*, commands: const ComputeCommand[]
             metal_copy_buffer(try encoding.transfer(), metal_sel("copyFromBuffer:sourceOffset:toBuffer:destinationOffset:size:"), origin.native, (u64)recorded.offset, goal.native, (u64)recorded.target_offset, (u64)recorded.bytes)
         elif recorded.kind == command_fill:
             try metal_encode_fill(device, &encoding, recorded)
+        elif recorded.kind >= command_build_blas:
+            try metal_encode_build(device, try encoding.builder(), recorded, &scratch)
         else:
             let kernel = recorded.kernel else trap("a dispatch lost its kernel")
             let encoder = try encoding.compute()
@@ -221,6 +241,9 @@ func metal_encode_bindings(encoder: void*, drawing: MetalDrawing*, kernel: Metal
     let program = recorded.kernel else trap("a dispatch lost its kernel")
     if let table = recorded.table:
         try metal_table_encode(encoder, (MetalTable*)table.native)
+    for index in 0..<binding_limit:
+        if let accel = recorded.accels[index]:
+            try metal_accel_bind(encoder, accel, (u64)index)
     for index in 0..<binding_limit:
         if program.bindings[index] == (u8)BindingKind.sampler:
             metal_bind_texture(encoder, metal_sel("setSamplerState:atIndex:"), metal_sampler_for(drawing, recorded.filters[index]), (u64)index)

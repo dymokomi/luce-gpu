@@ -21,8 +21,11 @@ struct VulkanBuffer:
 ## Every buffer can be bound for storage, copied from and to, read as
 ## indirect dispatch arguments, and, where the device has them, addressed.
 func vulkan_buffer_usage(device: VulkanDevice*) -> u32:
-    let usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT
-    return usage | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT if device.features.buffer_addresses else usage
+    var usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT
+    if device.features.buffer_addresses: usage = usage | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
+    # Positions and indices a Blas is built from.
+    if device.features.ray_query: usage = usage | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR
+    return usage
 
 func vulkan_buffer_create(device: VulkanDevice*, data: const u8[]) -> VulkanBuffer*!:
     try vulkan_drawing(device)

@@ -1,0 +1,181 @@
+#==============================================================================================
+#
+#   accel - Metal acceleration structures
+#
+#   DESCRIPTION:
+#       A Blas is a primitive acceleration structure of one triangle geometry, a Tlas an
+#       instance acceleration structure with user-id instance descriptors. Their storage is
+#       sized when they are created and grown at a build whose real descriptor needs more (a
+#       Tlas's size depends on the Blases it instances); builds and refits are encoded on an
+#       acceleration structure encoder of the pass's command buffer, with scratch memory the
+#       pass grows as its builds need. A kernel binding a Tlas makes every Blas behind it
+#       resident.
+#
+#==============================================================================================
+
+struct MetalAccel:
+    var structure: void*?
+    var size: u64
+    var top: bool
+    var opaque: bool
+    var refit: bool
+
+## A pass's scratch memory for builds (autoreleased; its command buffers keep it).
+struct MetalScratch:
+    var buffer: void*?
+    var bytes: u64
+
+# MTLAttributeFormatFloat3, MTLIndexTypeUInt32,
+# MTLAccelerationStructureInstanceDescriptorTypeUserID, MTLAccelerationStructureUsageRefit.
+let metal_float3: u64 = 30
+let metal_index_u32: u64 = 1
+let metal_instances_user_id: u64 = 1
+let metal_usage_refit: u64 = 1
+## MTLAccelerationStructureUserIDInstanceDescriptor: a packed 4x3 column-major
+## transform, then options, mask, intersection function table offset,
+## acceleration structure index and user id, all u32.
+let metal_instance_bytes: usize = 68
+
+## A primitive descriptor of one triangle geometry; buffers are set only for builds.
+func metal_blas_descriptor(vertex_count: u32, triangle_count: u32, opaque: bool, refit: bool, vertices: void*?, triangles: const TriangleRecord*?, indices: void*?) -> void*!:
+    let geometry = metal_ptr(try metal_class("MTLAccelerationStructureTriangleGeometryDescriptor"), metal_sel("descriptor")) else error(failed, "could not describe Metal triangles")
+    metal_uint_arg(geometry, metal_sel("setVertexFormat:"), metal_float3)
+    metal_uint_arg(geometry, metal_sel("setVertexStride:"), 12)
+    metal_uint_arg(geometry, metal_sel("setIndexType:"), metal_index_u32)
+    metal_uint_arg(geometry, metal_sel("setTriangleCount:"), (u64)triangle_count)
+    metal_bool_arg(geometry, metal_sel("setOpaque:"), opaque)
+    if let record = triangles:
+        metal_object(geometry, metal_sel("setVertexBuffer:"), vertices)
+        metal_uint_arg(geometry, metal_sel("setVertexBufferOffset:"), (u64)record.vertex_offset)
+        metal_uint_arg(geometry, metal_sel("setVertexStride:"), (u64)record.stride)
+        metal_object(geometry, metal_sel("setIndexBuffer:"), indices)
+        metal_uint_arg(geometry, metal_sel("setIndexBufferOffset:"), (u64)record.index_offset)
+    _ = vertex_count
+    let descriptor = metal_ptr(try metal_class("MTLPrimitiveAccelerationStructureDescriptor"), metal_sel("descriptor")) else error(failed, "could not describe a Metal acceleration structure")
+    let list = metal_with_object(try metal_class("NSArray"), metal_sel("arrayWithObject:"), geometry) else error(failed, "could not list Metal geometry")
+    metal_object(descriptor, metal_sel("setGeometryDescriptors:"), list)
+    metal_uint_arg(descriptor, metal_sel("setUsage:"), metal_usage_refit if refit else 0)
+    return descriptor
+
+## An instance descriptor for `count` instances of `blases`, read from `instances`.
+func metal_tlas_descriptor(count: u64, blases: void*?, instances: void*?) -> void*!:
+    let descriptor = metal_ptr(try metal_class("MTLInstanceAccelerationStructureDescriptor"), metal_sel("descriptor")) else error(failed, "could not describe a Metal acceleration structure")
+    metal_uint_arg(descriptor, metal_sel("setInstanceDescriptorType:"), metal_instances_user_id)
+    metal_uint_arg(descriptor, metal_sel("setInstanceCount:"), count)
+    metal_uint_arg(descriptor, metal_sel("setUsage:"), metal_usage_refit)
+    if let list = blases: metal_object(descriptor, metal_sel("setInstancedAccelerationStructures:"), list)
+    if let buffer = instances: metal_object(descriptor, metal_sel("setInstanceDescriptorBuffer:"), buffer)
+    return descriptor
+
+## Storage of the size `descriptor` needs, replacing smaller storage (work
+## already encoded keeps the old one).
+func metal_accel_new(device: MetalDevice*, descriptor: void*, state: MetalAccel*) -> !:
+    let sizes = metal_accel_sizes(metal_required(device.device), metal_sel("accelerationStructureSizesWithDescriptor:"), descriptor)
+    try metal_accel_storage(device, state, sizes.size)
+
+func metal_accel_storage(device: MetalDevice*, state: MetalAccel*, size: u64) -> !:
+    if state.structure != none and state.size >= size: return
+    let structure = metal_new_buffer(metal_required(device.device), metal_sel("newAccelerationStructureWithSize:"), size, 0) else error(out_of_memory, "could not allocate an acceleration structure")
+    metal_release_optional(state.structure)
+    state.structure = structure
+    state.size = size
+
+func metal_accel_blas(device: MetalDevice*, vertex_count: u32, triangle_count: u32, opaque: bool, refit: bool) -> MetalAccel*!:
+    let pool = objc_autoreleasePoolPush()
+    defer objc_autoreleasePoolPop(pool)
+    let state = try new MetalAccel(opaque = opaque, refit = refit) in memory.heap
+    errdefer metal_accel_destroy(state)
+    try metal_accel_new(device, try metal_blas_descriptor(vertex_count, triangle_count, opaque, refit, none, none, none), state)
+    return state
+
+func metal_accel_tlas(device: MetalDevice*, capacity: u32) -> MetalAccel*!:
+    let pool = objc_autoreleasePoolPush()
+    defer objc_autoreleasePoolPop(pool)
+    let state = try new MetalAccel(top = true, refit = true) in memory.heap
+    errdefer metal_accel_destroy(state)
+    try metal_accel_new(device, try metal_tlas_descriptor((u64)capacity, none, none), state)
+    return state
+
+func metal_accel_destroy(state: MetalAccel*):
+    if let structure = state.structure:
+        metal_void(structure, metal_sel("release"))
+    free(state) in memory.heap
+
+func metal_release_optional(object: void*?):
+    if let held = object: metal_void(held, metal_sel("release"))
+
+## Scratch memory of at least `bytes`, grown when the pass's scratch is smaller.
+func metal_scratch(device: MetalDevice*, scratch: MetalScratch*, bytes: u64) -> void*!:
+    if let buffer = scratch.buffer:
+        if scratch.bytes >= bytes: return buffer
+    let fresh = metal_new_buffer(metal_required(device.device), metal_sel("newBufferWithLength:options:"), bytes if bytes > 0 else 16, metal_storage_private) else error(out_of_memory, "could not allocate acceleration structure scratch memory")
+    scratch.buffer = metal_ptr(fresh, metal_sel("autorelease"))
+    scratch.bytes = bytes
+    return fresh
+
+## Encode a recorded build, refit or update: storage grown for a build whose
+## descriptor needs more, scratch as large as it needs.
+func metal_encode_build(device: MetalDevice*, encoder: void*, recorded: const ComputeCommand*, scratch_memory: MetalScratch*) -> !:
+    let accel = recorded.accel else trap("a build lost its acceleration structure")
+    let native = (MetalAccel*)accel.native
+    var descriptor: void* = metal_required(native.structure)
+    if recorded.kind == command_build_blas or recorded.kind == command_refit_blas:
+        let vertices = recorded.buffer else trap("a Blas build lost its vertices")
+        let indices = recorded.target else trap("a Blas build lost its indices")
+        descriptor = try metal_blas_descriptor(recorded.geometry.vertex_count, recorded.geometry.triangle_count, recorded.geometry.opaque, native.refit,
+                                               vertices.native, &recorded.geometry, indices.native)
+    else:
+        descriptor = try metal_tlas_build_descriptor(device, recorded)
+    let refit = recorded.kind == command_refit_blas or recorded.kind == command_update_tlas
+    let sizes = metal_accel_sizes(metal_required(device.device), metal_sel("accelerationStructureSizesWithDescriptor:"), descriptor)
+    if not refit:
+        try metal_accel_storage(device, native, sizes.size)
+    let structure = metal_required(native.structure)
+    let scratch = try metal_scratch(device, scratch_memory, sizes.refit if refit else sizes.build)
+    if refit:
+        metal_accel_refit(encoder, metal_sel("refitAccelerationStructure:descriptor:destination:scratchBuffer:scratchBufferOffset:"), structure, descriptor, none, scratch, 0)
+    else:
+        metal_accel_build(encoder, metal_sel("buildAccelerationStructure:descriptor:scratchBuffer:scratchBufferOffset:"), structure, descriptor, scratch, 0)
+
+## A Tlas build's descriptor: its instances written into a buffer of their own
+## (the command buffer keeps it), each naming its Blas by index.
+func metal_tlas_build_descriptor(device: MetalDevice*, recorded: const ComputeCommand*) -> void*!:
+    let count = recorded.instances.length
+    let bytes = try new u8[count * metal_instance_bytes] in memory.heap
+    defer free(bytes) in memory.heap
+    let blases = try new void*[count] --- in memory.heap
+    defer free(blases) in memory.heap
+    for index in 0..<count:
+        let instance = recorded.instances[index]
+        let at = (void*)&bytes[index * metal_instance_bytes]
+        # Row-major 3x4 to Metal's four packed columns.
+        for column in 0..<(usize)4:
+            for row in 0..<(usize)3:
+                memory.write[f32]((void*)((u8*)at + (column * 3 + row) * 4), instance.transform[row * 4 + column])
+        memory.write[u32]((void*)((u8*)at + 48), 0)
+        memory.write[u32]((void*)((u8*)at + 52), (u32)instance.mask)
+        memory.write[u32]((void*)((u8*)at + 56), 0)
+        memory.write[u32]((void*)((u8*)at + 60), (u32)index)
+        memory.write[u32]((void*)((u8*)at + 64), instance.id)
+        blases[index] = metal_required(((MetalAccel*)recorded.instanced[index].native).structure)
+    let buffer = metal_buffer(metal_required(device.device), metal_sel("newBufferWithBytes:length:options:"), bytes.data, (u64)bytes.length, metal_storage_shared) else error(out_of_memory, "could not stage Tlas instances")
+    let staged = metal_ptr(buffer, metal_sel("autorelease")) else trap("autorelease returned nothing")
+    let list = metal_array(try metal_class("NSArray"), metal_sel("arrayWithObjects:count:"), blases.data, (u64)count) else error(failed, "could not list Blases")
+    return try metal_tlas_descriptor((u64)count, list, staged)
+
+## Bind a Tlas at `index` and make it and every Blas it instances resident.
+func metal_accel_bind(encoder: void*, accel: AccelState*, index: u64) -> !:
+    let structure = metal_required(((MetalAccel*)accel.native).structure)
+    metal_bind_texture(encoder, metal_sel("setAccelerationStructure:atBufferIndex:"), structure, index)
+    if accel.instanced_count == 0: return
+    let resident = try new void*[accel.instanced_count] --- in memory.heap
+    defer free(resident) in memory.heap
+    for position in 0..<accel.instanced_count:
+        resident[position] = metal_required(((MetalAccel*)accel.instanced[position].native).structure)
+    # MTLResourceUsageRead.
+    metal_use_resources(encoder, metal_sel("useResources:count:usage:"), resident.data, (u64)accel.instanced_count, 1)
+
+extern func metal_accel_sizes as "objc_msgSend"(object: void*, selector: void*, descriptor: void*) -> LuceGpuMetalAccelSizes
+extern func metal_accel_build as "objc_msgSend"(object: void*, selector: void*, structure: void*, descriptor: void*, scratch: void*, offset: u64)
+extern func metal_accel_refit as "objc_msgSend"(object: void*, selector: void*, structure: void*, descriptor: void*, destination: void*?, scratch: void*, offset: u64)
+extern func metal_array as "objc_msgSend"(object: void*, selector: void*, objects: void**, count: u64) -> void*?

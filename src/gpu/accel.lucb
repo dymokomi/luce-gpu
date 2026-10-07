@@ -1,0 +1,212 @@
+#==============================================================================================
+#
+#   accel - Acceleration structures for ray queries
+#
+#   DESCRIPTION:
+#       A Blas (bottom-level acceleration structure) holds one triangle mesh's BVH; a Tlas
+#       (top-level) holds instances of Blases, each with a transform, a custom id and a mask.
+#       Kernels trace rays against a Tlas with GL_EXT_ray_query (Metal's intersection_query,
+#       Vulkan's VK_KHR_ray_query), where `limits().ray_query`. Both are manual Base resources
+#       whose storage is sized when they are created; builds, refits and updates are recorded
+#       on a Compute pass, ordered with its dispatches like every other command.
+#
+#==============================================================================================
+
+## A mesh's triangles for a Blas: `vertex_count` world-space float3 positions,
+## `stride` bytes apart from `vertex_offset` in `vertices`, and three u32
+## indices per triangle from `index_offset` in `indices`. Offsets and the
+## stride are multiples of four. `opaque` triangles never run any-hit logic
+## (ray queries then need no candidate loop for them).
+pub struct Triangles:
+    pub var vertices: Buffer
+    pub var vertex_offset: usize = 0
+    pub var stride: u32 = 12
+    pub var vertex_count: u32
+    pub var indices: Buffer
+    pub var index_offset: usize = 0
+    pub var triangle_count: u32
+    pub var opaque: bool = true
+
+## One instance of a Blas in a Tlas. `transform` is the object-to-world matrix,
+## 3 rows of 4 (row-major, the Vulkan and DXR layout: x' = row 0 · (x, y, z, 1));
+## `id` is the custom index a ray query reports (24 bits); a ray's cull mask
+## must share a bit with `mask` for the instance to be hit.
+pub struct Instance:
+    pub var blas: Blas
+    pub var transform: f32[12] = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+    pub var id: u32 = 0
+    pub var mask: u8 = 0xff
+
+## The largest instance id: 24 bits, as Vulkan stores it.
+pub let instance_id_limit: u32 = 0xffffff
+
+## A bottom-level acceleration structure: one mesh. The zero value is closed;
+## copies alias ownership; one owner destroys it on the main thread, and
+## recorded builds, Tlases built from it and submitted work keep it alive.
+pub struct Blas:
+    var state: AccelState*?
+
+    ## Storage for a mesh of `triangles`' counts (its buffers are not read
+    ## yet: build it on a pass). `refit` lets later passes refit it after its
+    ## vertices move.
+    pub static func create(device: Device, triangles: Triangles, refit: bool = true) -> Blas!:
+        let owner = try device.checked()
+        if not owner.limits.ray_query:
+            error(unsupported, "the device has no ray queries")
+        if triangles.vertex_count == 0 or triangles.triangle_count == 0:
+            error(invalid_geometry, "a Blas holds at least one triangle")
+        let native = try backend_accel_blas(owner, triangles.vertex_count, triangles.triangle_count, triangles.opaque, refit)
+        errdefer backend_accel_destroy(owner, native)
+        let state = try new AccelState(device = owner, native = native, vertex_count = triangles.vertex_count,
+                                       triangle_count = triangles.triangle_count, refit = refit) in memory.heap
+        owner.references += 1
+        return Blas(state = state)
+
+    pub func is_open() -> bool:
+        return self.state != none
+
+    pub func destroy():
+        let state = self.state else return
+        require_thread()
+        self.state = none
+        release_accel(state)
+
+    func checked() -> AccelState*!:
+        try check_thread()
+        return self.state else error(closed, "the Blas is closed")
+
+## A top-level acceleration structure: instances of Blases. The zero value is
+## closed; copies alias ownership; one owner destroys it on the main thread,
+## and recorded builds and submitted work keep it alive.
+pub struct Tlas:
+    var state: AccelState*?
+
+    ## Storage for up to `capacity` instances; build it on a pass.
+    pub static func create(device: Device, capacity: u32) -> Tlas!:
+        let owner = try device.checked()
+        if not owner.limits.ray_query:
+            error(unsupported, "the device has no ray queries")
+        if capacity == 0:
+            error(invalid_geometry, "a Tlas holds at least one instance")
+        let native = try backend_accel_tlas(owner, capacity)
+        errdefer backend_accel_destroy(owner, native)
+        let state = try new AccelState(device = owner, native = native, top = true, capacity = capacity, refit = true) in memory.heap
+        owner.references += 1
+        return Tlas(state = state)
+
+    pub func is_open() -> bool:
+        return self.state != none
+
+    pub func destroy():
+        let state = self.state else return
+        require_thread()
+        self.state = none
+        release_accel(state)
+
+    func checked() -> AccelState*!:
+        try check_thread()
+        return self.state else error(closed, "the Tlas is closed")
+
+struct AccelState:
+    var device: DeviceState*
+    var native: void*
+    var references: usize = 1
+    var top: bool
+    ## A Blas's counts, or a Tlas's capacity.
+    var vertex_count: u32
+    var triangle_count: u32
+    var capacity: u32
+    var refit: bool
+    ## Whether a build was recorded (refits and updates need one).
+    var built: bool
+    ## A Tlas: the Blases its last recorded build instanced, in instance order;
+    ## it holds a reference to each until it is built again or released.
+    var instanced: AccelState*[]
+    var instanced_count: usize
+
+    ## Hold `blases` as the instances of this Tlas, replacing the last build's.
+    func keep_instanced(blases: AccelState*[]) -> !:
+        if self.instanced.length < blases.length:
+            let grown = try new AccelState*[blases.length] --- in memory.heap
+            memory.copy(grown, self.instanced, self.instanced_count)
+            if self.instanced.length > 0: free(self.instanced) in memory.heap
+            self.instanced = grown
+        # New references first: a Blas in both builds must not reach zero.
+        for blas in blases:
+            blas.references += 1
+        self.release_instanced()
+        memory.copy(self.instanced, blases, blases.length)
+        self.instanced_count = blases.length
+
+    func release_instanced():
+        for index in 0..<self.instanced_count:
+            release_accel(self.instanced[index])
+        self.instanced_count = 0
+
+func release_accel(state: AccelState*):
+    state.references -= 1
+    if state.references == 0:
+        state.release_instanced()
+        if state.instanced.length > 0: free(state.instanced) in memory.heap
+        backend_accel_destroy(state.device, state.native)
+        release_device(state.device)
+        free(state) in memory.heap
+
+## A recorded Blas build's geometry, its buffers referenced by the command.
+struct TriangleRecord:
+    var vertex_offset: usize
+    var stride: u32
+    var vertex_count: u32
+    var index_offset: usize
+    var triangle_count: u32
+    var opaque: bool
+
+## A recorded instance: its Blas is the command's `instanced[index]`.
+struct InstanceRecord:
+    var transform: f32[12]
+    var id: u32
+    var mask: u8
+
+## Check `triangles` against `blas` and the pass's device.
+func check_triangles(device: DeviceState*, blas: AccelState*, triangles: const Triangles*) -> !:
+    if blas.top:
+        error(invalid_geometry, "a Tlas is built from instances, not triangles")
+    if triangles.vertex_count != blas.vertex_count or triangles.triangle_count != blas.triangle_count:
+        error(invalid_geometry, "a Blas is built from the counts it was created for")
+    let vertices = triangles.vertices.state else error(closed, "a Blas build was given a closed vertex buffer")
+    let indices = triangles.indices.state else error(closed, "a Blas build was given a closed index buffer")
+    if vertices.device != device or indices.device != device:
+        error(wrong_device, "a Blas build reads buffers of its own device")
+    if triangles.stride < 12 or triangles.stride % 4 != 0 or triangles.vertex_offset % 4 != 0 or triangles.index_offset % 4 != 0:
+        error(invalid_geometry, "vertex strides and offsets are multiples of four, strides at least 12")
+    let vertex_end = (u64)triangles.vertex_offset + ((u64)triangles.vertex_count - 1) * (u64)triangles.stride + 12
+    let index_end = (u64)triangles.index_offset + (u64)triangles.triangle_count * 12
+    if vertex_end > (u64)vertices.bytes or index_end > (u64)indices.bytes:
+        error(invalid_geometry, "a Blas's vertices and indices lie inside their buffers")
+
+# mark: Dispatch ==============================================================================
+
+func backend_accel_blas(device: DeviceState*, vertex_count: u32, triangle_count: u32, opaque: bool, refit: bool) -> void*!:
+    if (platform.windows or platform.linux) and device.backend == Backend.vulkan:
+        return (void*)try vulkan_accel_blas((VulkanDevice*)device.native, vertex_count, triangle_count, opaque, refit)
+    if platform.macos and platform.arm64:
+        if device.backend == Backend.metal:
+            return (void*)try metal_accel_blas((MetalDevice*)device.native, vertex_count, triangle_count, opaque, refit)
+    error(unsupported, "ray queries are unavailable on this backend")
+
+func backend_accel_tlas(device: DeviceState*, capacity: u32) -> void*!:
+    if (platform.windows or platform.linux) and device.backend == Backend.vulkan:
+        return (void*)try vulkan_accel_tlas((VulkanDevice*)device.native, capacity)
+    if platform.macos and platform.arm64:
+        if device.backend == Backend.metal:
+            return (void*)try metal_accel_tlas((MetalDevice*)device.native, capacity)
+    error(unsupported, "ray queries are unavailable on this backend")
+
+## Released by the backend once no submitted work uses it.
+func backend_accel_destroy(device: DeviceState*, native: void*):
+    if (platform.windows or platform.linux) and device.backend == Backend.vulkan:
+        vulkan_accel_destroy((VulkanDevice*)device.native, (VulkanAccel*)native)
+        return
+    if platform.macos and platform.arm64:
+        if device.backend == Backend.metal:
+            metal_accel_destroy((MetalAccel*)native)

@@ -10,6 +10,8 @@
 
 # mark: Vulkan bindings =======================================================================
 
+let VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR: u32 = 1
+let VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR: u32 = 0
 let VK_ACCESS_COLOR_ATTACHMENT_READ_BIT: u32 = 128
 let VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT: u32 = 256
 let VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT: u32 = 1024
@@ -26,12 +28,15 @@ let VK_ATTACHMENT_STORE_OP_DONT_CARE: u32 = 1
 let VK_ATTACHMENT_STORE_OP_STORE: u32 = 0
 let VK_BLEND_FACTOR_ONE: u32 = 1
 let VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA: u32 = 7
+let VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR: u32 = 524288
+let VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR: u32 = 1048576
 let VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT: u32 = 256
 let VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT: u32 = 131072
 let VK_BUFFER_USAGE_STORAGE_BUFFER_BIT: u32 = 32
 let VK_BUFFER_USAGE_TRANSFER_DST_BIT: u32 = 2
 let VK_BUFFER_USAGE_TRANSFER_SRC_BIT: u32 = 1
 let VK_BUFFER_USAGE_VERTEX_BUFFER_BIT: u32 = 128
+let VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR: u32 = 1
 let VK_COLOR_COMPONENT_A_BIT: u32 = 8
 let VK_COLOR_COMPONENT_B_BIT: u32 = 4
 let VK_COLOR_COMPONENT_G_BIT: u32 = 2
@@ -45,6 +50,7 @@ let VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT: u32 = 1
 let VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT: u32 = 8
 let VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT: u32 = 2
 let VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT: u32 = 2
+let VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR: u32 = 1000150000
 let VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER: u32 = 1
 let VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE: u32 = 2
 let VK_DESCRIPTOR_TYPE_SAMPLER: u32 = 0
@@ -72,6 +78,7 @@ let VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT: u32 = 4096
 let VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT: u32 = 2
 let VK_FORMAT_R16G16B16A16_SFLOAT: u32 = 97
 let VK_FORMAT_R32G32B32A32_SFLOAT: u32 = 109
+let VK_FORMAT_R32G32B32_SFLOAT: u32 = 106
 let VK_FORMAT_R32G32_SFLOAT: u32 = 103
 let VK_FORMAT_R32_SFLOAT: u32 = 100
 let VK_FORMAT_R32_UINT: u32 = 98
@@ -79,6 +86,9 @@ let VK_FORMAT_R8G8B8A8_SRGB: u32 = 43
 let VK_FORMAT_R8G8B8A8_UNORM: u32 = 37
 let VK_FORMAT_R8_UNORM: u32 = 9
 let VK_FORMAT_UNDEFINED: u32 = 0
+let VK_GEOMETRY_OPAQUE_BIT_KHR: u32 = 1
+let VK_GEOMETRY_TYPE_INSTANCES_KHR: u32 = 2
+let VK_GEOMETRY_TYPE_TRIANGLES_KHR: u32 = 0
 let VK_IMAGE_ASPECT_COLOR_BIT: u32 = 1
 let VK_IMAGE_ASPECT_DEPTH_BIT: u32 = 2
 let VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL: u32 = 2
@@ -97,6 +107,10 @@ let VK_IMAGE_USAGE_STORAGE_BIT: u32 = 8
 let VK_IMAGE_USAGE_TRANSFER_DST_BIT: u32 = 2
 let VK_IMAGE_USAGE_TRANSFER_SRC_BIT: u32 = 1
 let VK_IMAGE_VIEW_TYPE_2D: u32 = 1
+let VK_INDEX_TYPE_UINT32: u32 = 1
+let VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME: c.str = "VK_KHR_acceleration_structure"
+let VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME: c.str = "VK_KHR_deferred_host_operations"
+let VK_KHR_RAY_QUERY_EXTENSION_NAME: c.str = "VK_KHR_ray_query"
 let VK_KHR_SURFACE_EXTENSION_NAME: c.str = "VK_KHR_surface"
 let VK_KHR_SWAPCHAIN_EXTENSION_NAME: c.str = "VK_KHR_swapchain"
 let VK_KHR_WIN32_SURFACE_EXTENSION_NAME: c.str = "VK_KHR_win32_surface"
@@ -110,6 +124,7 @@ let VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT: u32 = 2
 let VK_NOT_READY: i32 = 1
 let VK_PIPELINE_BIND_POINT_COMPUTE: u32 = 1
 let VK_PIPELINE_BIND_POINT_GRAPHICS: u32 = 0
+let VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR: u32 = 33554432
 let VK_PIPELINE_STAGE_ALL_COMMANDS_BIT: u32 = 65536
 let VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT: u32 = 8192
 let VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT: u32 = 1024
@@ -146,6 +161,98 @@ let VK_TIMEOUT: i32 = 2
 let VK_TRUE: u32 = 1
 let VK_VERTEX_INPUT_RATE_INSTANCE: u32 = 1
 let VK_WHOLE_SIZE: u64 = 18446744073709551615
+
+extern struct VkAccelerationStructureBuildGeometryInfoKHR:
+    sType: u32
+    pNext: void*?
+    descriptorType: u32
+    flags: u32
+    mode: u32
+    srcAccelerationStructure: u64
+    dstAccelerationStructure: u64
+    geometryCount: u32
+    pGeometries: VkAccelerationStructureGeometryKHR*?
+    ppGeometries: VkAccelerationStructureGeometryKHR*?*?
+    scratchData: VkDeviceOrHostAddressKHR
+
+let VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR: u32 = 1000150000
+
+extern struct VkAccelerationStructureBuildRangeInfoKHR:
+    primitiveCount: u32
+    primitiveOffset: u32
+    firstVertex: u32
+    transformOffset: u32
+
+extern struct VkAccelerationStructureBuildSizesInfoKHR:
+    sType: u32
+    pNext: void*?
+    accelerationStructureSize: u64
+    updateScratchSize: u64
+    buildScratchSize: u64
+
+let VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR: u32 = 1000150020
+
+extern struct VkAccelerationStructureCreateInfoKHR:
+    sType: u32
+    pNext: void*?
+    createFlags: u32
+    buffer: u64
+    offset: u64
+    size: u64
+    descriptorType: u32
+    deviceAddress: u64
+
+let VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR: u32 = 1000150017
+
+extern struct VkAccelerationStructureDeviceAddressInfoKHR:
+    sType: u32
+    pNext: void*?
+    accelerationStructure: u64
+
+let VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR: u32 = 1000150002
+
+extern struct VkAccelerationStructureGeometryAabbsDataKHR:
+    sType: u32
+    pNext: void*?
+    data: VkDeviceOrHostAddressConstKHR
+    stride: u64
+
+let VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_AABBS_DATA_KHR: u32 = 1000150003
+
+extern union VkAccelerationStructureGeometryDataKHR:
+    triangles: VkAccelerationStructureGeometryTrianglesDataKHR
+    aabbs: VkAccelerationStructureGeometryAabbsDataKHR
+    instances: VkAccelerationStructureGeometryInstancesDataKHR
+
+extern struct VkAccelerationStructureGeometryInstancesDataKHR:
+    sType: u32
+    pNext: void*?
+    arrayOfPointers: u32
+    data: VkDeviceOrHostAddressConstKHR
+
+let VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR: u32 = 1000150004
+
+extern struct VkAccelerationStructureGeometryKHR:
+    sType: u32
+    pNext: void*?
+    geometryType: u32
+    geometry: VkAccelerationStructureGeometryDataKHR
+    flags: u32
+
+let VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR: u32 = 1000150006
+
+extern struct VkAccelerationStructureGeometryTrianglesDataKHR:
+    sType: u32
+    pNext: void*?
+    vertexFormat: u32
+    vertexData: VkDeviceOrHostAddressConstKHR
+    vertexStride: u64
+    maxVertex: u32
+    indexType: u32
+    indexData: VkDeviceOrHostAddressConstKHR
+    transformData: VkDeviceOrHostAddressConstKHR
+
+let VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR: u32 = 1000150005
 
 extern struct VkApplicationInfo:
     sType: u32
@@ -371,6 +478,14 @@ extern struct VkDeviceCreateInfo:
 
 let VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO: u32 = 3
 
+extern union VkDeviceOrHostAddressConstKHR:
+    deviceAddress: u64
+    hostAddress: void*?
+
+extern union VkDeviceOrHostAddressKHR:
+    deviceAddress: u64
+    hostAddress: void*?
+
 extern struct VkDeviceQueueCreateInfo:
     sType: u32
     pNext: void*?
@@ -570,6 +685,31 @@ extern struct VkOffset3D:
     x: i32
     y: i32
     z: i32
+
+extern struct VkPhysicalDeviceAccelerationStructureFeaturesKHR:
+    sType: u32
+    pNext: void*?
+    accelerationStructure: u32
+    accelerationStructureCaptureReplay: u32
+    accelerationStructureIndirectBuild: u32
+    accelerationStructureHostCommands: u32
+    descriptorBindingAccelerationStructureUpdateAfterBind: u32
+
+let VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR: u32 = 1000150013
+
+extern struct VkPhysicalDeviceAccelerationStructurePropertiesKHR:
+    sType: u32
+    pNext: void*?
+    maxGeometryCount: u64
+    maxInstanceCount: u64
+    maxPrimitiveCount: u64
+    maxPerStageDescriptorAccelerationStructures: u32
+    maxPerStageDescriptorUpdateAfterBindAccelerationStructures: u32
+    maxDescriptorSetAccelerationStructures: u32
+    maxDescriptorSetUpdateAfterBindAccelerationStructures: u32
+    minAccelerationStructureScratchOffsetAlignment: u32
+
+let VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR: u32 = 1000150014
 
 extern struct VkPhysicalDeviceDescriptorIndexingProperties:
     sType: u32
@@ -803,6 +943,13 @@ extern struct VkPhysicalDeviceProperties2:
     properties: VkPhysicalDeviceProperties
 
 let VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2: u32 = 1000059001
+
+extern struct VkPhysicalDeviceRayQueryFeaturesKHR:
+    sType: u32
+    pNext: void*?
+    rayQuery: u32
+
+let VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR: u32 = 1000348013
 
 extern struct VkPhysicalDeviceShaderAtomicFloatFeaturesEXT:
     sType: u32
@@ -1263,6 +1410,14 @@ extern struct VkWriteDescriptorSet:
 
 let VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET: u32 = 35
 
+extern struct VkWriteDescriptorSetAccelerationStructureKHR:
+    sType: u32
+    pNext: void*?
+    accelerationStructureCount: u32
+    pAccelerationStructures: u64*?
+
+let VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR: u32 = 1000150007
+
 extern struct VkXlibSurfaceCreateInfoKHR:
     sType: u32
     pNext: void*?
@@ -1371,3 +1526,9 @@ let VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR: u32 = 1000004000
 # func vkCmdWriteTimestamp(commandBuffer: u64, pipelineStage: u32, queryPool: u64, query: u32)
 # func vkGetQueryPoolResults(device: u64, queryPool: u64, firstQuery: u32, queryCount: u32, dataSize: usize, pData: void*?, stride: u64, flags: u32) -> i32
 # func vkGetBufferDeviceAddress(device: u64, pInfo: VkBufferDeviceAddressInfo*?) -> u64
+# func vkGetDeviceProcAddr(device: u64, pName: c.str) -> void*?
+# func vkGetAccelerationStructureBuildSizesKHR(device: u64, buildType: u32, pBuildInfo: VkAccelerationStructureBuildGeometryInfoKHR*?, pMaxPrimitiveCounts: u32*?, pSizeInfo: VkAccelerationStructureBuildSizesInfoKHR*?)
+# func vkCreateAccelerationStructureKHR(device: u64, pCreateInfo: VkAccelerationStructureCreateInfoKHR*?, pAllocator: void*?, pAccelerationStructure: u64*?) -> i32
+# func vkDestroyAccelerationStructureKHR(device: u64, accelerationStructure: u64, pAllocator: void*?)
+# func vkCmdBuildAccelerationStructuresKHR(commandBuffer: u64, infoCount: u32, pInfos: VkAccelerationStructureBuildGeometryInfoKHR*?, ppBuildRangeInfos: VkAccelerationStructureBuildRangeInfoKHR*?*?)
+# func vkGetAccelerationStructureDeviceAddressKHR(device: u64, pInfo: VkAccelerationStructureDeviceAddressInfoKHR*?) -> u64

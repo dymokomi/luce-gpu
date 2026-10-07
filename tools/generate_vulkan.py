@@ -36,13 +36,19 @@ vkCmdCopyBufferToImage vkCmdCopyImageToBuffer vkCmdCopyBuffer vkCmdCopyImage vkC
 vkEnumerateInstanceVersion vkGetPhysicalDeviceProperties2 vkGetPhysicalDeviceFeatures2
 vkEnumerateDeviceExtensionProperties vkCreateComputePipelines vkCmdDispatch vkCmdDispatchIndirect vkCmdFillBuffer
 vkCreateQueryPool vkDestroyQueryPool vkCmdResetQueryPool vkCmdWriteTimestamp vkGetQueryPoolResults
-vkGetBufferDeviceAddress
+vkGetBufferDeviceAddress vkGetDeviceProcAddr
+vkGetAccelerationStructureBuildSizesKHR vkCreateAccelerationStructureKHR vkDestroyAccelerationStructureKHR
+vkCmdBuildAccelerationStructuresKHR vkGetAccelerationStructureDeviceAddressKHR
 '''.split()
+# Unions emitted as `extern union`: acceleration structure addresses and geometry.
+UNIONS = {'VkDeviceOrHostAddressConstKHR', 'VkDeviceOrHostAddressKHR', 'VkAccelerationStructureGeometryDataKHR'}
 # Structures reached only through pNext chains, which no command names.
 CHAINED = '''
 VkPhysicalDeviceMaintenance3Properties VkPhysicalDeviceShaderAtomicFloatFeaturesEXT VkPhysicalDeviceSubgroupProperties
 VkPhysicalDeviceVulkan12Features VkPhysicalDeviceDescriptorIndexingProperties VkDescriptorSetLayoutBindingFlagsCreateInfo
 VkDescriptorSetVariableDescriptorCountAllocateInfo VkMemoryAllocateFlagsInfo
+VkPhysicalDeviceAccelerationStructureFeaturesKHR VkPhysicalDeviceRayQueryFeaturesKHR VkPhysicalDeviceAccelerationStructurePropertiesKHR
+VkWriteDescriptorSetAccelerationStructureKHR VkAccelerationStructureGeometryTrianglesDataKHR VkAccelerationStructureGeometryInstancesDataKHR
 '''.split()
 
 
@@ -106,7 +112,7 @@ def main():
                'uint8_t': 'u8', 'uint16_t': 'u16', 'size_t': 'usize',
                'HINSTANCE': 'void*?', 'HWND': 'void*?', 'HANDLE': 'void*?',
                'LPCWSTR': 'u16*?', 'SECURITY_ATTRIBUTES': 'void', 'DWORD': 'u32',
-               'Display': 'void', 'Window': 'u64'}
+               'Display': 'void', 'Window': 'u64', 'PFN_vkVoidFunction': 'void*?'}
 
     def base_type(name):
         if name in scalars:
@@ -198,9 +204,10 @@ def main():
         if name == 'VkClearValue':
             lines += ['extern struct VkClearValue:', '    color: f32[4]', '']
             continue
-        if item.get('category') == 'union':
+        # Unions the bindings use carry their C layout; the others are left out.
+        if item.get('category') == 'union' and name not in UNIONS:
             continue
-        lines.append(f'extern struct {name}:')
+        lines.append(f'extern {item.get("category")} {name}:')
         for member in members(item):
             n, t = declaration(member)
             lines.append(f'    {"descriptorType" if n == "type" else n}: {t}')

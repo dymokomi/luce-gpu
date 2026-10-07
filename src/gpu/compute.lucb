@@ -29,7 +29,8 @@ pub enum BindingKind as u8:
     storage_image = 2
     ## A sampled image (`sampler2D` and the like).
     sampled_image = 3
-    ## A ray-tracing acceleration structure (reserved).
+    ## A ray-tracing acceleration structure (`accelerationStructureEXT`):
+    ## a Tlas, bound with `Binding(accel = ...)`.
     acceleration_structure = 4
     ## A sampler (`uniform sampler`), for a texture table's textures; bound
     ## with `Binding(filter = ...)`.
@@ -62,8 +63,10 @@ pub struct Kernel:
             error(invalid_shader, "the kernel's workgroup holds more invocations than the device's limits().group_threads")
         var kinds: u8[16]
         for index in 0..<bindings.length:
-            if bindings[index] == (u8)BindingKind.acceleration_structure or bindings[index] > (u8)BindingKind.sampler:
-                error(unsupported, "acceleration structures are not supported yet")
+            if bindings[index] > (u8)BindingKind.sampler:
+                error(invalid_shader, "a kernel binding of an unknown kind")
+            if bindings[index] == (u8)BindingKind.acceleration_structure and not owner.limits.ray_query:
+                error(unsupported, "the device has no ray queries")
             kinds[index] = bindings[index]
         if table and not owner.limits.texture_tables:
             error(unsupported, "the device has no texture tables")
@@ -119,6 +122,8 @@ pub struct Binding:
     pub var texture: Texture
     ## How a sampled image, or a sampler binding, filters.
     pub var filter: Filter = Filter.nearest
+    ## An acceleration structure binding's Tlas.
+    pub var accel: Tlas
 
 # mark: Recording =============================================================================
 let command_dispatch: u8 = 0
@@ -126,6 +131,10 @@ let command_indirect: u8 = 1
 let command_copy: u8 = 2
 let command_fill: u8 = 3
 let command_timestamp: u8 = 4
+let command_build_blas: u8 = 5
+let command_refit_blas: u8 = 6
+let command_build_tlas: u8 = 7
+let command_update_tlas: u8 = 8
 
 ## The most timestamps one pass records.
 pub let timestamp_limit: usize = 64
@@ -141,6 +150,8 @@ struct ComputeCommand:
     var filters: Filter[16]
     ## The texture table set 1 reads.
     var table: TableState*?
+    ## Acceleration structure bindings.
+    var accels: AccelState*?[16]
     var uniforms: u8[128]
     var groups: u32[3]
     ## The indirect arguments, the copy's source or the fill's target.
@@ -151,6 +162,12 @@ struct ComputeCommand:
     var target_offset: usize
     var bytes: usize
     var value: u32
+    ## A build's Blas or Tlas; a Blas build's geometry (from `buffer` and
+    ## `target`), or a Tlas build's instances and the Blases they instance.
+    var accel: AccelState*?
+    var geometry: TriangleRecord
+    var instances: InstanceRecord[]
+    var instanced: AccelState*[]
 
 func release_command(command: ComputeCommand*):
     if let kernel = command.kernel: release_kernel(kernel)
@@ -159,6 +176,13 @@ func release_command(command: ComputeCommand*):
     for slot in command.textures:
         if let texture = slot: release_texture(texture)
     if let table = command.table: release_table(table)
+    for slot in command.accels:
+        if let accel = slot: release_accel(accel)
+    if let accel = command.accel: release_accel(accel)
+    for blas in command.instanced:
+        release_accel(blas)
+    if command.instances.length > 0: free(command.instances) in memory.heap
+    if command.instanced.length > 0: free(command.instanced) in memory.heap
     if let buffer = command.buffer: release_buffer(buffer)
     if let target = command.target: release_buffer(target)
     *command = ComputeCommand()
@@ -232,6 +256,80 @@ pub struct Compute:
         var command = ComputeCommand(kind = command_fill, buffer = target, offset = offset, bytes = bytes, value = value)
         target.references += 1
         try state.append(&command)
+
+    ## Build `blas` from `triangles` (the counts it was created for).
+    pub func build_blas(blas: Blas, triangles: Triangles) -> !:
+        try self.record_blas(command_build_blas, blas, &triangles)
+
+    ## Refit `blas` to `triangles`' moved vertices: same counts and indices,
+    ## faster than a build, where the Blas was created with `refit` and built.
+    pub func refit_blas(blas: Blas, triangles: Triangles) -> !:
+        try self.record_blas(command_refit_blas, blas, &triangles)
+
+    ## Build `tlas` from `instances` (at most its capacity), each a built Blas
+    ## of the device. The Tlas holds the Blases until it is built again.
+    pub func build_tlas(tlas: Tlas, instances: const Instance[]) -> !:
+        try self.record_tlas(command_build_tlas, tlas, instances)
+
+    ## Update a built `tlas` with new transforms, ids and masks: the same
+    ## number of instances, of the same Blases in the same order.
+    pub func update_tlas(tlas: Tlas, instances: const Instance[]) -> !:
+        try self.record_tlas(command_update_tlas, tlas, instances)
+
+    func record_blas(kind: u8, blas: Blas, triangles: const Triangles*) -> !:
+        let state = try self.recording()
+        let target = try blas.checked()
+        if target.device != state.device:
+            error(wrong_device, "a compute pass builds Blases of its own device")
+        try check_triangles(state.device, target, triangles)
+        if kind == command_refit_blas and not (target.refit and target.built):
+            error(invalid_geometry, "a refit needs a Blas created with refit and built before")
+        let vertices = triangles.vertices.state else trap("checked vertices went missing")
+        let indices = triangles.indices.state else trap("checked indices went missing")
+        var command = ComputeCommand(kind = kind, accel = target, buffer = vertices, target = indices,
+                                     geometry = TriangleRecord(vertex_offset = triangles.vertex_offset, stride = triangles.stride, vertex_count = triangles.vertex_count,
+                                                               index_offset = triangles.index_offset, triangle_count = triangles.triangle_count, opaque = triangles.opaque))
+        target.references += 1
+        vertices.references += 1
+        indices.references += 1
+        try state.append(&command)
+        target.built = true
+
+    func record_tlas(kind: u8, tlas: Tlas, instances: const Instance[]) -> !:
+        let state = try self.recording()
+        let target = try tlas.checked()
+        if target.device != state.device:
+            error(wrong_device, "a compute pass builds Tlases of its own device")
+        if instances.length == 0 or instances.length > (usize)target.capacity:
+            error(invalid_geometry, "a Tlas build has 1 to its capacity of instances")
+        if kind == command_update_tlas and not (target.built and target.instanced_count == instances.length):
+            error(invalid_geometry, "an update needs a built Tlas and as many instances as its build")
+        for index in 0..<instances.length:
+            let blas = instances[index].blas.state else error(closed, "a Tlas instance names a closed Blas")
+            if blas.device != state.device or blas.top or not blas.built:
+                error(invalid_geometry, "a Tlas instances built Blases of its own device")
+            if instances[index].id > instance_id_limit:
+                error(invalid_geometry, "an instance id has 24 bits")
+            if kind == command_update_tlas and target.instanced[index] != blas:
+                error(invalid_geometry, "an update instances the same Blases in the same order")
+        let records = try new InstanceRecord[instances.length] --- in memory.heap
+        errdefer free(records) in memory.heap
+        let blases = try new AccelState*[instances.length] --- in memory.heap
+        errdefer free(blases) in memory.heap
+        for index in 0..<instances.length:
+            let blas = instances[index].blas.state else trap("a checked instance lost its Blas")
+            records[index] = InstanceRecord(transform = instances[index].transform, id = instances[index].id, mask = instances[index].mask)
+            blases[index] = blas
+        # The command holds the Blases until it is encoded; the Tlas from now
+        # until it is built again.
+        if kind == command_build_tlas:
+            try target.keep_instanced(blases)
+        for blas in blases:
+            blas.references += 1
+        var command = ComputeCommand(kind = kind, accel = target, instances = records, instanced = blases)
+        target.references += 1
+        try state.append(&command)
+        target.built = true
 
     ## Record a timestamp: the GPU time at which every command recorded before
     ## it has finished, read with `timestamps` once the pass has. Its index,
@@ -387,6 +485,12 @@ struct ComputeState:
             if declared == (u8)BindingKind.sampler:
                 command.filters[index] = bindings[index].filter
                 continue
+            if declared == (u8)BindingKind.acceleration_structure:
+                let accel = try bindings[index].accel.checked()
+                if accel.device != self.device or not accel.built:
+                    error(invalid_geometry, "an acceleration structure binding takes a built Tlas of the pass's device")
+                command.accels[index] = accel
+                continue
             let image = bindings[index].texture.state else error(closed, "a compute pass was given a closed texture")
             if image.closed or image.device != self.device:
                 error(wrong_device, "a compute pass uses open textures of its own device")
@@ -402,6 +506,8 @@ struct ComputeState:
             if let buffer = slot: buffer.references += 1
         for slot in command.textures:
             if let texture = slot: texture.references += 1
+        for slot in command.accels:
+            if let accel = slot: accel.references += 1
         return command
 
     func append(command: ComputeCommand*) -> !:

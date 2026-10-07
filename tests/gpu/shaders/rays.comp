@@ -1,0 +1,33 @@
+#version 460
+#extension GL_EXT_ray_query : require
+// Trace rays against a Tlas with a ray query. Closest hits report t, the
+// barycentrics, the primitive index, the instance's custom id and its index;
+// shadow rays stop at the first hit and report only whether there was one.
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0) uniform accelerationStructureEXT scene;
+layout(set = 0, binding = 1, std430) readonly buffer Rays { vec4 rays[]; };     // origin, tmax; direction, unused
+layout(set = 0, binding = 2, std430) writeonly buffer Hits { vec4 hits[]; };    // t, u, v, hit
+layout(set = 0, binding = 3, std430) writeonly buffer Ids { uvec4 ids[]; };     // primitive, id, instance, unused
+layout(push_constant) uniform Params { uint n; uint shadow; uint mask; } params;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= params.n)
+        return;
+    vec4 from = rays[2u * i];
+    vec3 direction = rays[2u * i + 1u].xyz;
+    uint flags = gl_RayFlagsOpaqueEXT | (params.shadow != 0u ? gl_RayFlagsTerminateOnFirstHitEXT : 0u);
+    rayQueryEXT query;
+    rayQueryInitializeEXT(query, scene, flags, params.mask, from.xyz, 0.0, direction, from.w);
+    while (rayQueryProceedEXT(query)) {
+    }
+    if (rayQueryGetIntersectionTypeEXT(query, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
+        vec2 uv = rayQueryGetIntersectionBarycentricsEXT(query, true);
+        hits[i] = vec4(rayQueryGetIntersectionTEXT(query, true), uv, 1.0);
+        ids[i] = uvec4(uint(rayQueryGetIntersectionPrimitiveIndexEXT(query, true)), uint(rayQueryGetIntersectionInstanceCustomIndexEXT(query, true)),
+                       uint(rayQueryGetIntersectionInstanceIdEXT(query, true)), 0u);
+    } else {
+        hits[i] = vec4(-1.0, 0.0, 0.0, 0.0);
+        ids[i] = uvec4(0xffffffffu);
+    }
+}
