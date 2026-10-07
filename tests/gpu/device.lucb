@@ -1,0 +1,11 @@
+## Opening and closing a device initializes and links no window system.
+from luce_gpu import gpu
+
+pub func main(arguments: str[]) -> i32!:
+    _ = arguments
+    var device = gpu.Device.open() catch failure:
+        if failure.code == gpu.unavailable:
+            return 0
+        error(failure.code, failure.message)
+    device.destroy()
+    return 0

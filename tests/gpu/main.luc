@@ -1,0 +1,157 @@
+# luce-gpu's device checks. The programs beside this one are built with LUCE_BASE and run
+# as their own processes, under Metal's API validation:
+#   probe.lucb        the portable contracts everywhere; on macOS also a refused object
+#                     from another thread, then pixels on the Metal device, then windows
+#                     (presentation, sRGB, resize, ownership) when a desktop session is there
+#   batching.lucb     Vulkan batching, deferred destruction and pooled memory, on Linux,
+#                     under the Khronos validation layer when it is installed
+#   unsupported.lucb  a target with no GPU backend refuses a device; it is also emitted for
+#                     every target, which must type-check without Cocoa helpers
+#   values.lucb       portable GPU values link no graphics library
+#   device.lucb       a device alone links no window system
+# LUCE_TEST_GPU=optional lets a host without a device pass (required by default), and
+# LUCE_TEST_WINDOW=required|optional|off says whether windows must be tested.
+from luce_std import files, paths, process
+import platform
+
+let failed = ErrorCode.package(1)
+
+class Checks:
+    var base: str
+    var work: str
+    var environment: list[str]
+
+    func init(self, base: str, work: str):
+        self.base = base
+        self.work = work
+        self.environment = ["MTL_DEBUG_LAYER=1"]
+
+    # Run `program`, failing unless it exits 0; its output, trimmed.
+    func run(self, program: str, arguments: list[str]) -> str!:
+        let done = process.run(program, arguments, "", self.environment)
+        if done.exit_code != 0:
+            error(failed, f"{program} {arguments}: exit status {done.exit_code}\n{done.output}{done.error_output}")
+        return done.output.trim()
+
+    # Build `source` (beside this program) with the extra `flags`; the output's path.
+    func build(self, source: str, name: str, flags: list[str]) -> str!:
+        let output = paths.join(self.work, name)
+        var words = ["build", source, "-o", output]
+        for flag in flags:
+            words.append(flag)
+        _ = self.run(self.base, words)
+        return output
+
+    func expect(self, program: str, arguments: list[str], wanted: str) -> unit!:
+        let output = self.run(program, arguments)
+        if output != wanted:
+            error(failed, f"{program} {arguments}: printed [{output}], wanted [{wanted}]")
+
+    # Fail when the libraries `binary` links name any of `unwanted`.
+    func links_none(self, binary: str, unwanted: list[str]) -> unit!:
+        let linked = self.run("otool", ["-L", binary])
+        for library in unwanted:
+            if library in linked:
+                error(failed, f"{binary} links {library}")
+
+pub func main(arguments: list[str]) -> int!:
+    let base = process.variable("LUCE_BASE") else "luce-base"
+    let gpu_policy = process.variable("LUCE_TEST_GPU") else "required"
+    let window_policy = process.variable("LUCE_TEST_WINDOW") else "optional"
+    if gpu_policy != "required" and gpu_policy != "optional":
+        error(failed, "LUCE_TEST_GPU must be required or optional")
+    if window_policy != "required" and window_policy != "optional" and window_policy != "off":
+        error(failed, "LUCE_TEST_WINDOW must be required, optional, or off")
+    let work = paths.join(paths.directory(paths.directory(process.current_directory())), "build/tests/gpu/work")
+    files.ensure_directory(work)
+    let checks = Checks(base, work)
+    if platform.macos:
+        metal(checks, gpu_policy, window_policy)
+    elif platform.linux:
+        vulkan(checks, gpu_policy)
+    else:
+        checks.expect(checks.build("unsupported.lucb", "unsupported", []), [], "ok unsupported GPU target")
+        print("ok gpu unsupported target")
+    # importing portable GPU values must not link any native graphics library
+    let values = checks.build("values.lucb", "values", [])
+    _ = checks.run(values, [])
+    if platform.macos:
+        checks.links_none(values, ["AppKit", "Metal", "QuartzCore", "SDL", "libobjc"])
+    # cross-target emission type-checks the public API without the test-only Cocoa
+    # helpers, and native Linux code holds no Apple linkage
+    for target in ["arm64-macos", "x86_64-macos", "x86_64-linux", "x86_64-windows"]:
+        _ = checks.build("unsupported.lucb", f"{target}.c", ["--target", target, "--emit=c"])
+    let assembly = files.read_text(checks.build("unsupported.lucb", "linux.s", ["--target", "x86_64-linux", "--emit=asm"]))
+    for symbol in ["objc_msgSend", "MTLCreateSystemDefaultDevice", "CGColorSpaceCreateWithName", "NSDefaultRunLoopMode"]:
+        if symbol in assembly:
+            error(failed, f"the x86_64-linux assembly names {symbol}")
+    print("ok gpu target emission and optional framework linkage")
+    if platform.macos:
+        # device ownership does not initialize or link a window system
+        let device = checks.build("device.lucb", "device", [])
+        _ = checks.run(device, [])
+        checks.links_none(device, ["AppKit", "QuartzCore"])
+        print("ok gpu device without a window system")
+    files.remove_tree(work)
+    return 0
+
+# A logged-in desktop session: launchd's manager is Aqua there, and Background over SSH.
+func desktop() -> bool:
+    let done = process.run("launchctl", ["managername"]) catch failure:
+        return false
+    return done.output.trim() == "Aqua"
+
+func metal(checks: Checks, gpu_policy: str, window_policy: str) -> unit!:
+    let has_desktop = window_policy != "off" and desktop()
+    if window_policy == "required" and not has_desktop:
+        error(failed, "GPU presentation tests require a logged-in macOS desktop")
+    let probe = checks.build("probe.lucb", "probe", [])
+    checks.expect(probe, [], "ok GPU contracts without hardware")
+    let refused = process.run(probe, ["wrong-thread"], "", checks.environment)
+    if refused.exit_code != 1 or not ("an object belongs to another runtime thread" in refused.error_output):
+        error(failed, f"probe wrong-thread: exit status {refused.exit_code}\n{refused.error_output}")
+    let outcome = checks.run(probe, ["device"])
+    if outcome != "ok GPU device" and outcome != "skip no Metal device":
+        error(failed, f"probe device: {outcome}")
+    let hardware = outcome == "ok GPU device"
+    if gpu_policy == "required" and not hardware:
+        error(failed, "GPU tests require a Metal device")
+    if hardware and has_desktop:
+        checks.expect(probe, ["gui"], "ok GPU pixels, sRGB, resize, acquisition, ownership, and isolation")
+    checks.links_none(probe, ["SDL"])
+    print("ok gpu metal" + (" (pixels and presentation)" if hardware and has_desktop else " (contracts)"))
+    if not hardware:
+        print("skip gpu hardware: no Metal device; portable contracts passed")
+    elif not has_desktop:
+        print("skip gpu presentation and pixels in windows: no desktop session, or LUCE_TEST_WINDOW=off")
+
+# The Khronos validation layer, when installed.
+func validation_available() -> bool!:
+    let home = process.variable("HOME") else ""
+    for folder in ["/usr/share/vulkan/explicit_layer.d", "/usr/local/share/vulkan/explicit_layer.d", paths.join(home, ".local/share/vulkan/explicit_layer.d")]:
+        if files.exists(paths.join(folder, "VkLayer_khronos_validation.json")):
+            return true
+    return false
+
+func vulkan(checks: Checks, gpu_policy: str) -> unit!:
+    let batching = checks.build("batching.lucb", "batching", [])
+    let log = paths.join(checks.work, "validation.log")
+    let validated = validation_available()
+    var environment = ["MTL_DEBUG_LAYER=1"]
+    if validated:
+        for setting in ["VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation", "VK_LAYER_VALIDATE_SYNC=1", "VK_LAYER_DEBUG_ACTION=VK_DBG_LAYER_ACTION_LOG_MSG", "VK_LAYER_REPORT_FLAGS=error,warn", f"VK_LAYER_LOG_FILENAME={log}"]:
+            environment.append(setting)
+    let done = process.run(batching, [], "", environment)
+    if done.exit_code != 0 or done.output.trim() == "":
+        error(failed, f"batching: exit status {done.exit_code}\n{done.output}{done.error_output}")
+    let lines = done.output.lines()
+    if "skip no Vulkan device" in lines:
+        if gpu_policy == "required":
+            error(failed, "the Vulkan batching tests require a Vulkan device")
+        print("skip vulkan batching: no Vulkan device")
+        return
+    if not ("ok Vulkan batching" in lines):
+        error(failed, f"batching printed {done.output}")
+    if files.exists(log) and "Validation" in files.read_text(log):
+        error(failed, files.read_text(log))
+    print("ok vulkan batching" + (" (validation, sync validation)" if validated else ""))

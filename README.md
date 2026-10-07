@@ -36,7 +36,7 @@ On Windows and Linux nothing is linked: the system's Vulkan loader (`vulkan-1.dl
 
 ## Tests
 
-`./test.sh` runs every module's `test` blocks and the unit tests through the native and C backends, then the program checks under `tests/programs`. It expects the compiler beside this checkout at `../luce-base/build/luce-base` (or `--base PATH`).
+`luc test` runs `tests/gpu`, the device, pixel, window and linkage checks (Metal on macOS, Vulkan batching on Linux), and `tests/boundaries`. `docs/GPU.md` describes them.
 
 ## License
 

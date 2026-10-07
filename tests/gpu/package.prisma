@@ -1,0 +1,17 @@
+#prisma 4.0
+def package "gpu" {
+    def dependency "luce-gpu" {
+        str owner = "dymokomi"
+        str path = "../.."
+    }
+
+    def dependency "luce-std" {
+        str owner = "dymokomi"
+        str path = "../../../luce-std"
+    }
+
+    def dependency "luce-window" {
+        str owner = "dymokomi"
+        str path = "../../../luce-window"
+    }
+}

@@ -1,0 +1,22 @@
+# Keep native presentation in the presentation adapter, out of the Vulkan core, and call
+# Vulkan only through vulkan/entry.lucb: Vulkan is loaded at run time, so a direct extern
+# would be an undefined symbol on Linux and Windows, where nothing links the loader.
+from luce_std import files, paths
+
+let failed = ErrorCode.package(1)
+
+pub func main(arguments: list[str]) -> int!:
+    let vulkan = "../../src/gpu/vulkan"
+    for module in ["device", "surface", "pipeline", "render"]:
+        let text = files.read_text(paths.join(vulkan, f"{module}.lucb"))
+        for native in ["GetModuleHandle", "CreateWin32Surface", "VK_KHR_win32_surface", "VkWin32Surface"]:
+            if native in text:
+                error(failed, f"src/gpu/vulkan/{module}.lucb names {native}: native presentation belongs in the presentation adapter")
+    for relative in files.walk(vulkan):
+        if not relative.ends_with(".lucb"):
+            continue
+        for line in files.read_text(paths.join(vulkan, relative)).lines():
+            if line.starts_with("extern func vk"):
+                error(failed, f"src/gpu/vulkan/{relative}: call Vulkan through vulkan/entry.lucb, not a direct extern")
+    print("ok GPU presentation boundary")
+    return 0

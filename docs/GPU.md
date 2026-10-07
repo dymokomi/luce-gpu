@@ -91,13 +91,13 @@ alias), `isophote` (lines of equal N · axis), `normals`, `unlit` and
 colors buffer carries unclamped, over `mesh_curvature`'s range). `MeshKind.wires` expands point pairs into constant-pixel-width lines.
 `MeshKind.ids` writes `id base + face + 1` little-endian into an `rgba8_linear`
 target for picking; zero is nothing. Shading is a parameter, so changing it
-re-uploads no buffer. tests/programs/gpu/mesh_pixels.lucb checks pixels on
-Metal and, through tests/programs/vulkan, on Vulkan hosts.
+re-uploads no buffer. tests/gpu/mesh_pixels.lucb checks pixels on
+Metal and, through tests/gpu/batching.lucb, on Vulkan hosts.
 
 ## Run the example
 
 ```sh
-./build/luce-base build tests/programs/gpu/main.lucb -o build/gpu-window
+luce-base build tests/gpu/surface.lucb -o build/gpu-window
 ./build/gpu-window
 ```
 
@@ -270,11 +270,12 @@ pipeline handles are introduced by this increment.
 ## Validation
 
 ```sh
-LUCE_TEST_GPU=required LUCE_TEST_WINDOW=required tests/programs/gpu/check.sh
-LUCE_TEST_WINDOW=required tests/programs/native_window/check.sh
+LUCE_TEST_WINDOW=required luc test
 ```
 
-The GPU suite runs native optimization levels 0–3 and C debug/release comparisons.
+`luc test` runs `tests/gpu`, which builds the device programs beside it and runs each
+in its own process (`LUCE_TEST_GPU=optional` lets a host without a device pass), and
+`tests/boundaries`, which keeps native presentation out of the Vulkan core.
 On macOS it enables Metal API validation and tests actual rendered pixels through
 a test-only blit to shared memory. This checks channel order, linear-to-sRGB
 conversion, alpha, full target coverage, aggregate calling conventions, and
@@ -371,7 +372,7 @@ into the slot or `finish()` gives it back. A batch keeps the textures it copies
 from alive until it is submitted. At most three batches are held at once per
 device, so one can be on the GPU while the caller works through another.
 `read` is a batch of one, split into runs of rows when a region is larger than a
-slot. `tests/programs/readbench` times each phase on a device.
+slot. `tests/readbench` times each phase on a device.
 
 `texture.frame()` begins a recording frame whose target is the texture (points
 equal texels). Its `present(color)` clears to `color` — alpha included — draws

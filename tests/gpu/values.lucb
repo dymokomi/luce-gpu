@@ -1,0 +1,8 @@
+## Portable GPU values: importing them links no native graphics library.
+from luce_gpu import gpu
+
+pub func main(arguments: str[]) -> i32:
+    _ = arguments
+    let color = gpu.Color(red = 0.5)
+    assert(color.red == 0.5 and color.green == 0.0)
+    return 0
