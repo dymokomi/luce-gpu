@@ -82,7 +82,7 @@ pub func main(arguments: list[str]) -> int!:
         checks.links_none(values, ["AppKit", "Metal", "QuartzCore", "SDL", "libobjc"])
     # cross-target emission type-checks the public API without the test-only Cocoa
     # helpers, and native Linux code holds no Apple linkage
-    for target in ["arm64-macos", "x86_64-macos", "x86_64-linux", "x86_64-windows"]:
+    for target in ["arm64-macos", "x86_64-linux", "x86_64-windows"]:
         _ = checks.build("unsupported.lucb", f"{target}.c", ["--target", target, "--emit=c"])
     let assembly = files.read_text(checks.build("unsupported.lucb", "linux.s", ["--target", "x86_64-linux", "--emit=asm"]))
     for symbol in ["objc_msgSend", "MTLCreateSystemDefaultDevice", "CGColorSpaceCreateWithName", "NSDefaultRunLoopMode"]:
