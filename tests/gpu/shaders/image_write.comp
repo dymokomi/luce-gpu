@@ -1,0 +1,19 @@
+#version 450
+// Write a known pattern into one storage image of each 32-bit format.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0, rgba32f) writeonly uniform image2D color;
+layout(set = 0, binding = 1, r32f) writeonly uniform image2D depth;
+layout(set = 0, binding = 2, r32ui) writeonly uniform uimage2D ids;
+layout(set = 0, binding = 3, rg32f) writeonly uniform image2D motion;
+layout(push_constant) uniform Size { uint width; uint height; } size;
+
+void main() {
+    uvec2 at = gl_GlobalInvocationID.xy;
+    if (at.x >= size.width || at.y >= size.height)
+        return;
+    ivec2 texel = ivec2(at);
+    imageStore(color, texel, vec4(float(at.x) / float(size.width), float(at.y) / float(size.height), 0.5, 1.0));
+    imageStore(depth, texel, vec4(float(at.x + at.y)));
+    imageStore(ids, texel, uvec4(at.x * 1000u + at.y));
+    imageStore(motion, texel, vec4(float(at.x), -float(at.y), 0.0, 0.0));
+}

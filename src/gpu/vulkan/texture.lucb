@@ -23,11 +23,18 @@ struct VulkanTexture:
     var format: Format
     var native_format: u32
     var layout: u32
+    ## Whether the device filters the format linearly; sampling falls back to
+    ## nearest where it does not (32-bit floats on some devices).
+    var filterable: bool
 
 func vulkan_native_format(pixel_format: Format) -> u32:
     if pixel_format == Format.rgba8_linear: return VK_FORMAT_R8G8B8A8_UNORM
     if pixel_format == Format.rgba16_float: return VK_FORMAT_R16G16B16A16_SFLOAT
     if pixel_format == Format.r8: return VK_FORMAT_R8_UNORM
+    if pixel_format == Format.rgba32_float: return VK_FORMAT_R32G32B32A32_SFLOAT
+    if pixel_format == Format.r32_float: return VK_FORMAT_R32_SFLOAT
+    if pixel_format == Format.r32_uint: return VK_FORMAT_R32_UINT
+    if pixel_format == Format.rg32_float: return VK_FORMAT_R32G32_SFLOAT
     return VK_FORMAT_R8G8B8A8_SRGB
 
 # mark: Shared drawing state ==================================================================
@@ -58,7 +65,7 @@ func vulkan_drawing(device: VulkanDevice*) -> !:
     device.fill = try vulkan_shader(device, fill_frag_words)
     device.ready = true
     # Every draw binds an image; one opaque texel stands in for draws that sample none.
-    let placeholder = try vulkan_texture_create(device, 1, 1, Format.rgba8_linear)
+    let placeholder = try vulkan_texture_create(device, 1, 1, Format.rgba8_linear, false)
     device.placeholder = placeholder
     var white: u8[4] = [255, 255, 255, 255]
     try vulkan_texture_upload(device, placeholder, white, Region(0, 0, 1, 1))
@@ -162,13 +169,23 @@ func vulkan_depth_destroy(device: VulkanDevice*):
 
 # mark: Images ================================================================================
 
-func vulkan_texture_create(device: VulkanDevice*, width: u32, height: u32, pixel_format: Format) -> VulkanTexture*!:
+func vulkan_texture_create(device: VulkanDevice*, width: u32, height: u32, pixel_format: Format, storage: bool) -> VulkanTexture*!:
     try vulkan_drawing(device)
-    let state = try new VulkanTexture(width = width, height = height, format = pixel_format, native_format = vulkan_native_format(pixel_format), layout = VK_IMAGE_LAYOUT_UNDEFINED) in memory.heap
+    let native_format = vulkan_native_format(pixel_format)
+    var properties: VkFormatProperties
+    vkGetPhysicalDeviceFormatProperties(device.physical, native_format, &properties)
+    let features = properties.optimalTilingFeatures
+    if (features & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) == 0 or (storage and (features & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) == 0):
+        error(unsupported, "the Vulkan device cannot sample or store textures of this format")
+    var usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT
+    if renderable(pixel_format): usage = usage | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
+    if storage: usage = usage | VK_IMAGE_USAGE_STORAGE_BIT
+    let state = try new VulkanTexture(width = width, height = height, format = pixel_format, native_format = native_format, layout = VK_IMAGE_LAYOUT_UNDEFINED,
+                                      filterable = (features & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) != 0) in memory.heap
     errdefer vulkan_texture_destroy(device, state)
     var info = VkImageCreateInfo(sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, imageType = VK_IMAGE_TYPE_2D, format = state.native_format,
                                  extent = VkExtent3D(width = width, height = height, depth = 1), mipLevels = 1, arrayLayers = 1, samples = VK_SAMPLE_COUNT_1_BIT,
-                                 usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT)
+                                 usage = usage)
     try vulkan_check(vkCreateImage(device.device, &info, none, &state.image), "a Vulkan image could not be created")
     var requirements: VkMemoryRequirements
     vkGetImageMemoryRequirements(device.device, state.image, &requirements)
@@ -204,13 +221,15 @@ func vulkan_transition(command: u64, state: VulkanTexture*, layout: u32):
     if state.layout == layout:
         return
     var barrier = VkImageMemoryBarrier(sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-                                       srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-                                       dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                                       srcAccessMask = vulkan_image_access, dstAccessMask = vulkan_image_access,
                                        oldLayout = state.layout, newLayout = layout, srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
                                        image = state.image, subresourceRange = VkImageSubresourceRange(aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, levelCount = 1, layerCount = 1))
-    let stages = VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+    let stages = VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT
     vkCmdPipelineBarrier(command, stages, stages, 0, 0, none, 0, none, 1, &barrier)
     state.layout = layout
+
+## Every access an image transition orders, compute stores included.
+let vulkan_image_access: u32 = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
 
 struct VulkanStaging:
     var buffer: u64

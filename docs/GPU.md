@@ -352,10 +352,12 @@ resize of depth storage, and releasing CPU commands before GPU completion.
 
 ## Textures and offscreen frames
 
-`Texture.create(device, width, height, format)` allocates a texture of one of
-four tightly packed, top-down, straight-alpha formats: `rgba8` (sRGB-encoded,
-sampled as linear light), `rgba8_linear`, `rgba16_float` and `r8` (samples as
-red with alpha one). Dimensions are 1..16384. `upload(pixels, region?)` replaces
+`Texture.create(device, width, height, format, storage = false)` allocates a
+texture of a tightly packed, top-down, straight-alpha format: `rgba8`
+(sRGB-encoded, sampled as linear light), `rgba8_linear`, `rgba16_float` and
+`r8` (samples as red with alpha one), and the 32-bit `rgba32_float`,
+`r32_float`, `rg32_float` and `r32_uint` that compute kernels write (see
+Compute). Dimensions are 1..16384. `upload(pixels, region?)` replaces
 a region from CPU bytes and `read(pixels, region?)` copies one back. Both are
 ordered after earlier submissions; `upload` does not wait for its copy (the bytes
 may be reused at once), and `read` waits, so `read` after a frame sees that
@@ -471,13 +473,15 @@ void main() {
 ```
 
 Everything lives in descriptor set 0 at bindings 0..15, one resource per
-binding: storage buffers, and (soon) storage images and sampled images. Small
+binding: storage buffers, storage images and sampled images. Small
 per-dispatch values go in the push-constant block. Uniform buffers, separate
 samplers and arrays of resources are refused when embedding. Pass counts in
 push constants instead of calling `.length()` on a runtime array, which Metal
 cannot answer without an extra buffer. Atomics on storage buffers (`atomicAdd`,
 `atomicMin`, `atomicMax`, `atomicExchange`, `atomicCompSwap` on 32-bit ints)
-work everywhere; image atomics are refused.
+work everywhere; image atomics are refused. Adding floats atomically
+(`GL_EXT_shader_atomic_float`'s `atomicAdd` on a `float` in a buffer) works
+where `limits().float_atomic_add` says so.
 
 `tools/embed_shaders.py OUTPUT.lucb --public FILE.comp...` turns each kernel
 into four declarations, the arguments of `Kernel.create`:
@@ -547,6 +551,31 @@ called, a `Compute` when submitted. A frame, read or pass submitted after a
 recorded: the pass, and then the submitted work, keep them alive. Like every GPU
 call, recording happens on the main thread.
 
+### Images for compute
+
+A texture created with `storage = true` binds as a storage image
+(`image2D`, `uimage2D`) that a kernel loads and stores; any texture binds as a
+sampled image (`sampler2D`), filtered as `Binding.filter` says. Pass either as
+`Binding(texture = ...)`; the kernel's declaration decides which it is.
+
+```glsl
+layout(set = 0, binding = 0, rgba32f) writeonly uniform image2D color;
+layout(set = 0, binding = 1, r32ui) uniform uimage2D ids;
+layout(set = 0, binding = 2) uniform sampler2D environment;
+```
+
+The formats for kernel output are `rgba32_float`, `r32_float`, `rg32_float`
+and `r32_uint`, beside `rgba16_float` and the 8-bit ones. Metal writes
+`rg32_float` only from images declared `readonly` or `writeonly`; the others
+can be read and written in one kernel. Frames do not render into the 32-bit
+formats, but everything else does: `read` and `upload`, `ReadBatch`, and, except
+for `r32_uint`, which holds integers, `draw_image` and `copy_image` to show
+the result in a view. Where a device cannot filter a format linearly (32-bit
+floats on some Vulkan devices), sampling falls back to nearest. On Vulkan a
+storage image is in the general layout during a pass and goes back to the
+sampling layout after it; on Metal the textures are created with shader-write
+usage.
+
 ### Buffers for compute
 
 `Buffer.allocate(device, bytes, memory = Memory.device)` makes a zeroed buffer.
@@ -591,7 +620,12 @@ descriptor pool freed when it completes. The device runs at Vulkan 1.2 where
 the loader and device support it, and enables `VK_EXT_shader_atomic_float`'s
 buffer float atomics when offered.
 
+Metal compiles kernels as MSL 3.0, which read-write textures and float atomics
+need.
+
 `tests/gpu/compute.lucb` runs on Metal (the probe) and on Vulkan (`batching`,
 on Linux and Windows): saxpy, a twelve-dispatch reduction, compaction with
 atomics feeding an indirect dispatch, fills, copies, shared views, a 256 MiB
-buffer, and kernels and buffers destroyed before their pass is submitted.
+buffer, kernels and buffers destroyed before their pass is submitted, storage
+images of each 32-bit format written, sampled, read and written in place, read
+back and drawn for display, and float atomics.

@@ -105,6 +105,11 @@ func release_kernel(state: KernelState*):
 pub struct Binding:
     ## A storage buffer, bound whole.
     pub var buffer: Buffer
+    ## A storage image (a texture created with `storage`) or a sampled image,
+    ## as the kernel declares the binding.
+    pub var texture: Texture
+    ## How a sampled image is filtered.
+    pub var filter: Filter = Filter.nearest
 
 # mark: Recording =============================================================================
 let command_dispatch: u8 = 0
@@ -119,6 +124,8 @@ struct ComputeCommand:
     var kind: u8
     var kernel: KernelState*?
     var buffers: BufferState*?[16]
+    var textures: TextureState*?[16]
+    var filters: Filter[16]
     var uniforms: u8[128]
     var groups: u32[3]
     ## The indirect arguments, the copy's source or the fill's target.
@@ -134,6 +141,8 @@ func release_command(command: ComputeCommand*):
     if let kernel = command.kernel: release_kernel(kernel)
     for slot in command.buffers:
         if let buffer = slot: release_buffer(buffer)
+    for slot in command.textures:
+        if let texture = slot: release_texture(texture)
     if let buffer = command.buffer: release_buffer(buffer)
     if let target = command.target: release_buffer(target)
     *command = ComputeCommand()
@@ -310,11 +319,19 @@ struct ComputeState:
                 error(invalid_geometry, "a dispatch leaves out a binding its kernel uses")
             if declared == (u8)BindingKind.storage_buffer:
                 command.buffers[index] = try self.own(bindings[index].buffer)
-            else:
-                error(unsupported, "image bindings are not supported yet")
+                continue
+            let image = bindings[index].texture.state else error(closed, "a compute pass was given a closed texture")
+            if image.closed or image.device != self.device:
+                error(wrong_device, "a compute pass uses open textures of its own device")
+            if declared == (u8)BindingKind.storage_image and not image.storage:
+                error(invalid_geometry, "a storage image binding takes a texture created with storage")
+            command.textures[index] = image
+            command.filters[index] = bindings[index].filter
         program.references += 1
         for slot in command.buffers:
             if let buffer = slot: buffer.references += 1
+        for slot in command.textures:
+            if let texture = slot: texture.references += 1
         return command
 
     func append(command: ComputeCommand*) -> !:

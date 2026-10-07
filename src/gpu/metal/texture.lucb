@@ -20,7 +20,7 @@ extern func metal_copy_from_texture as "objc_msgSend"(object: void*, selector: v
                                                       size: LuceGpuMetalExtent, buffer: void*, offset: u64, bytes_per_row: u64, bytes_per_image: u64)
 extern func metal_new_buffer as "objc_msgSend"(object: void*, selector: void*, length: u64, options: u64) -> void*?
 
-func metal_texture_create(device: MetalDevice*, width: u32, height: u32, pixel_format: Format) -> MetalTexture*!:
+func metal_texture_create(device: MetalDevice*, width: u32, height: u32, pixel_format: Format, storage: bool) -> MetalTexture*!:
     let pool = objc_autoreleasePoolPush()
     defer objc_autoreleasePoolPop(pool)
     let state = try new MetalTexture(width = width, height = height, format = pixel_format) in memory.heap
@@ -28,12 +28,13 @@ func metal_texture_create(device: MetalDevice*, width: u32, height: u32, pixel_f
     let descriptor = metal_ptr(try metal_class("MTLTextureDescriptor"), metal_sel("new")) else error(failed, "could not create a GPU texture descriptor")
     defer metal_void(descriptor, metal_sel("release"))
     metal_uint_arg(descriptor, metal_sel("setTextureType:"), 2)
-    metal_uint_arg(descriptor, metal_sel("setPixelFormat:"), metal_slot_format(metal_format_slot(pixel_format)))
+    metal_uint_arg(descriptor, metal_sel("setPixelFormat:"), metal_pixel_format(pixel_format))
     metal_uint_arg(descriptor, metal_sel("setWidth:"), (u64)width)
     metal_uint_arg(descriptor, metal_sel("setHeight:"), (u64)height)
-    # MTLStorageModePrivate; MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget.
+    # MTLStorageModePrivate; MTLTextureUsageShaderRead (1), and RenderTarget (4)
+    # for formats frames render into, ShaderWrite (2) for storage images.
     metal_uint_arg(descriptor, metal_sel("setStorageMode:"), 2)
-    metal_uint_arg(descriptor, metal_sel("setUsage:"), 5)
+    metal_uint_arg(descriptor, metal_sel("setUsage:"), 1u64 | (4u64 if renderable(pixel_format) else 0u64) | (2u64 if storage else 0u64))
     state.texture = metal_with_object(metal_required(device.device), metal_sel("newTextureWithDescriptor:"), descriptor) else error(out_of_memory, "could not allocate GPU texture storage")
     return state
 

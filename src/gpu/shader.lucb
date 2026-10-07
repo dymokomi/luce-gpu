@@ -71,6 +71,9 @@ pub struct Pipeline:
         let shader_state = try shader.checked()
         if shader_state.device != device_state:
             error(wrong_device, "the shader belongs to another GPU device")
+        if let target = pixel_format:
+            if not renderable(target):
+                error(invalid_geometry, "32-bit textures are written by compute kernels, not rendered into")
         let native = try backend_pipeline_create(device_state, shader_state.native, blend, pixel_format)
         errdefer device_state.destroy_pipeline(device_state.native, native)
         let state = try new PipelineState(device = device_state, shader = shader_state, native = native, blend = blend, format = pixel_format) in memory.heap

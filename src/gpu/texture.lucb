@@ -16,14 +16,16 @@ pub struct Texture:
     var state: TextureState*?
 
     ## Allocate an uninitialised `width` by `height` texture of `format`, each
-    ## dimension in 1..16384.
-    pub static func create(device: Device, width: u32, height: u32, pixel_format: Format) -> Texture!:
+    ## dimension in 1..16384. A `storage` texture can also be bound to compute
+    ## kernels as a storage image, loaded and stored (`unsupported` where the
+    ## device cannot store the format).
+    pub static func create(device: Device, width: u32, height: u32, pixel_format: Format, storage: bool = false) -> Texture!:
         let device_state = try device.checked()
         if width == 0 or height == 0 or width > 16384 or height > 16384:
             error(invalid_geometry, "texture dimensions must be in 1..16384")
-        let native = try backend_texture_create(device_state, width, height, pixel_format)
+        let native = try backend_texture_create(device_state, width, height, pixel_format, storage)
         errdefer backend_texture_destroy(device_state, native)
-        let state = try new TextureState(device = device_state, native = native, width = width, height = height, format = pixel_format) in memory.heap
+        let state = try new TextureState(device = device_state, native = native, width = width, height = height, format = pixel_format, storage = storage) in memory.heap
         device_state.references += 1
         return Texture(state = state)
 
@@ -56,12 +58,18 @@ pub struct Texture:
         let area = try state.check_region(region, pixels.length)
         try read_texture(state, pixels, area)
 
+    ## Whether compute kernels can bind the texture as a storage image.
+    pub func storage() -> bool!:
+        return (try self.checked()).storage
+
     ## Begin one recording frame whose target is this texture; its points equal
-    ## texels. `present` clears the texture to the given color and draws, ordered
+    ## texels. The 32-bit formats are not rendered into (`invalid_geometry`). `present` clears the texture to the given color and draws, ordered
     ## before every later submission, so the result can be read or sampled
     ## immediately after without waiting for the GPU: only `read` waits.
     pub func frame() -> interop.Reference[Frame]!:
         let state = try self.checked()
+        if not renderable(state.format):
+            error(invalid_geometry, "32-bit textures are written by compute kernels, not rendered into")
         if state.active_frame:
             error(frame_in_use, "the texture already has an active frame")
         let extent = (f64)state.width
@@ -101,6 +109,7 @@ struct TextureState:
     var width: u32
     var height: u32
     var format: Format
+    var storage: bool
     var references: usize = 1
     var closed: bool
     var active_frame: bool

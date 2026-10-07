@@ -15,6 +15,8 @@
 ## The Metal buffer index of a kernel's push constants (embed_shaders.py moves
 ## them there, clear of storage buffers 0..15).
 let metal_uniform_index: u64 = 30
+# MTLLanguageVersion3_0.
+let metal_language_3_0: u64 = 3u64 << 16
 # MTLGPUFamilyMetal3: atomic_float on device memory.
 let metal_family_metal3: u64 = 5001
 
@@ -40,11 +42,16 @@ func metal_kernel_create(device: MetalDevice*, msl: c.str, group: u32[3]) -> voi
     let pool = objc_autoreleasePoolPush()
     defer objc_autoreleasePoolPop(pool)
     let native = metal_required(device.device)
-    let library = try metal_compile(native, msl)
+    # Kernels are MSL 3.0 (read-write textures, float atomics); without options
+    # Metal compiles source as an older language version.
+    let options = metal_ptr(try metal_class("MTLCompileOptions"), metal_sel("new")) else error(failed, "could not create Metal compile options")
+    defer metal_void(options, metal_sel("release"))
+    metal_uint_arg(options, metal_sel("setLanguageVersion:"), metal_language_3_0)
+    var failure: void*? = none
+    let library = metal_library(native, metal_sel("newLibraryWithSource:options:error:"), try metal_text(msl), options, &failure) else error(invalid_shader, "could not compile the kernel's Metal source")
     defer metal_void(library, metal_sel("release"))
     let function = metal_with_object(library, metal_sel("newFunctionWithName:"), try metal_text("luce_compute")) else error(invalid_shader, "the compute shader has no luce_compute entry")
     defer metal_void(function, metal_sel("release"))
-    var failure: void*? = none
     let pipeline = metal_pipeline(native, metal_sel("newComputePipelineStateWithFunction:error:"), function, &failure) else error(invalid_shader, "could not build a Metal compute pipeline")
     errdefer metal_void(pipeline, metal_sel("release"))
     if (u64)group[0] * (u64)group[1] * (u64)group[2] > metal_uint(pipeline, metal_sel("maxTotalThreadsPerThreadgroup")):
@@ -129,7 +136,7 @@ func metal_compute_submit(device: MetalDevice*, commands: const ComputeCommand[]
         else:
             let kernel = recorded.kernel else trap("a dispatch lost its kernel")
             let encoder = try encoding.compute()
-            metal_encode_bindings(encoder, (MetalKernel*)kernel.native, recorded)
+            metal_encode_bindings(encoder, try metal_drawing(device), (MetalKernel*)kernel.native, recorded)
             let group = metal_group((MetalKernel*)kernel.native)
             if recorded.kind == command_indirect:
                 let arguments = recorded.buffer else trap("an indirect dispatch lost its arguments")
@@ -146,13 +153,21 @@ func metal_compute_submit(device: MetalDevice*, commands: const ComputeCommand[]
 func metal_group(kernel: MetalKernel*) -> LuceGpuMetalExtent:
     return LuceGpuMetalExtent((u64)kernel.group[0], (u64)kernel.group[1], (u64)kernel.group[2])
 
-## Bind a dispatch's pipeline, buffers and its 128 uniform bytes (the block
-## may be padded past the bytes given, so Metal sees all of it).
-func metal_encode_bindings(encoder: void*, kernel: MetalKernel*, recorded: const ComputeCommand*):
+## Bind a dispatch's pipeline, buffers, images (a sampled one with its sampler
+## at the same index) and its 128 uniform bytes (the block may be padded past
+## the bytes given, so Metal sees all of it).
+func metal_encode_bindings(encoder: void*, drawing: MetalDrawing*, kernel: MetalKernel*, recorded: const ComputeCommand*):
     metal_object(encoder, metal_sel("setComputePipelineState:"), metal_required(kernel.pipeline))
+    let program = recorded.kernel else trap("a dispatch lost its kernel")
     for index in 0..<binding_limit:
         if let buffer = recorded.buffers[index]:
             metal_bind_buffer(encoder, metal_sel("setBuffer:offset:atIndex:"), buffer.native, 0, (u64)index)
+        if let texture = recorded.textures[index]:
+            metal_bind_texture(encoder, metal_sel("setTexture:atIndex:"), metal_required(((MetalTexture*)texture.native).texture), (u64)index)
+            if program.bindings[index] == (u8)BindingKind.sampled_image:
+                # Integer textures are never filtered.
+                let linear = recorded.filters[index] == Filter.linear and texture.format != Format.r32_uint
+                metal_bind_texture(encoder, metal_sel("setSamplerState:atIndex:"), metal_required(drawing.linear if linear else drawing.nearest), (u64)index)
     var uniforms = recorded.uniforms
     metal_inline_bytes(encoder, metal_sel("setBytes:length:atIndex:"), &uniforms, (u64)uniform_limit, metal_uniform_index)
 

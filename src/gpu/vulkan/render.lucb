@@ -106,7 +106,7 @@ func vulkan_upload(device: VulkanDevice*, canvas: Canvas) -> VulkanUpload!:
             var image = placeholder
             if let texture = draw.images[slot]:
                 image = (VulkanTexture*)texture.native
-            image_infos[slot] = VkDescriptorImageInfo(sampler = device.linear if draw.filter == Filter.linear else device.nearest,
+            image_infos[slot] = VkDescriptorImageInfo(sampler = device.linear if draw.filter == Filter.linear and image.filterable else device.nearest,
                                                       imageView = image.view, imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
             writes[slot] = VkWriteDescriptorSet(sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, dstSet = upload.descriptors[index], dstBinding = (u32)slot + 1, descriptorCount = 1,
                                                 descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, pImageInfo = &image_infos[slot])

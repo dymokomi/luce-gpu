@@ -182,6 +182,10 @@ func vulkan_compute_submit(device: VulkanDevice*, commands: const ComputeCommand
             vkCmdFillBuffer(slot.command, ((VulkanBuffer*)target.native).buffer, (u64)recorded.offset, (u64)recorded.bytes, recorded.value)
         else:
             try vulkan_encode_dispatch(device, slot.command, pool, recorded)
+    # Storage images back to sampling, the layout the rest of the device expects.
+    for recorded in commands:
+        for bound in recorded.textures:
+            if let texture = bound: vulkan_transition(slot.command, (VulkanTexture*)texture.native, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
     # The results, to whatever is submitted next: frames, reads, other passes.
     vulkan_compute_barrier(slot.command, vulkan_compute_stages, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT)
     if pool != 0:
@@ -192,6 +196,8 @@ func vulkan_compute_submit(device: VulkanDevice*, commands: const ComputeCommand
         if let kernel = recorded.kernel: ((VulkanKernel*)kernel.native).last_use = serial
         for bound in recorded.buffers:
             if let buffer = bound: ((VulkanBuffer*)buffer.native).last_use = serial
+        for bound in recorded.textures:
+            if let texture = bound: ((VulkanTexture*)texture.native).last_use = serial
         if let buffer = recorded.buffer: ((VulkanBuffer*)buffer.native).last_use = serial
         if let buffer = recorded.target: ((VulkanBuffer*)buffer.native).last_use = serial
     return Ticket(serial = serial)
@@ -211,14 +217,28 @@ func vulkan_encode_dispatch(device: VulkanDevice*, command: u64, pool: u64, reco
     var set_info = VkDescriptorSetAllocateInfo(sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, descriptorPool = pool, descriptorSetCount = 1, pSetLayouts = &kernel.set_layout)
     try vulkan_check(vkAllocateDescriptorSets(device.device, &set_info, &set), "Vulkan compute descriptors could not be allocated")
     var infos: VkDescriptorBufferInfo[16]
+    var images: VkDescriptorImageInfo[16]
     var writes: VkWriteDescriptorSet[16]
     var count: u32 = 0
     for index in 0..<binding_limit:
-        let buffer = recorded.buffers[index] else continue
-        let native = (VulkanBuffer*)buffer.native
-        infos[index] = VkDescriptorBufferInfo(buffer = native.buffer, range = native.bytes)
+        if let buffer = recorded.buffers[index]:
+            let native = (VulkanBuffer*)buffer.native
+            infos[index] = VkDescriptorBufferInfo(buffer = native.buffer, range = native.bytes)
+            writes[(usize)count] = VkWriteDescriptorSet(sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, dstSet = set, dstBinding = (u32)index, descriptorCount = 1,
+                                                        descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, pBufferInfo = &infos[index])
+            count += 1
+            continue
+        let texture = recorded.textures[index] else continue
+        let image = (VulkanTexture*)texture.native
+        # Storage images are loaded and stored in the general layout; sampled
+        # ones are read as every draw reads them.
+        let storage = program.bindings[index] == (u8)BindingKind.storage_image
+        let layout = VK_IMAGE_LAYOUT_GENERAL if storage else VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+        vulkan_transition(command, image, layout)
+        let linear = recorded.filters[index] == Filter.linear and image.filterable and texture.format != Format.r32_uint
+        images[index] = VkDescriptorImageInfo(sampler = 0 if storage else (device.linear if linear else device.nearest), imageView = image.view, imageLayout = layout)
         writes[(usize)count] = VkWriteDescriptorSet(sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, dstSet = set, dstBinding = (u32)index, descriptorCount = 1,
-                                                    descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, pBufferInfo = &infos[index])
+                                                    descriptorType = vulkan_descriptor_type(program.bindings[index]), pImageInfo = &images[index])
         count += 1
     if count > 0:
         vkUpdateDescriptorSets(device.device, count, &writes[0], 0, none)

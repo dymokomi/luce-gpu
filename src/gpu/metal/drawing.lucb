@@ -50,8 +50,17 @@ func metal_slot_format(slot: usize) -> u64:
     if slot == 4: return 10  # R8Unorm
     return 81  # BGRA8Unorm_sRGB
 
+## The pipeline slot of a renderable format.
 func metal_format_slot(pixel_format: Format) -> usize:
     return (usize)pixel_format + 1
+
+## The MTLPixelFormat of a texture format.
+func metal_pixel_format(pixel_format: Format) -> u64:
+    if pixel_format == Format.rgba32_float: return 125  # RGBA32Float
+    if pixel_format == Format.r32_float: return 55  # R32Float
+    if pixel_format == Format.r32_uint: return 53  # R32Uint
+    if pixel_format == Format.rg32_float: return 105  # RG32Float
+    return metal_slot_format(metal_format_slot(pixel_format))
 
 ## The one vertex stage: eight scalar floats per vertex from buffer 0, passed
 ## through with the color at user location 0 for every fragment program.
@@ -74,7 +83,7 @@ func metal_drawing_open(device: MetalDevice*) -> MetalDrawing*!:
     state.nearest = try metal_sampler(native, 0)
     state.linear = try metal_sampler(native, 1)
     # Every draw binds a texture; one opaque texel stands in for draws that sample none.
-    let placeholder = try metal_texture_create(device, 1, 1, Format.rgba8_linear)
+    let placeholder = try metal_texture_create(device, 1, 1, Format.rgba8_linear, false)
     var white: u8[4] = [255, 255, 255, 255]
     metal_texture_upload(device, placeholder, white, Region(0, 0, 1, 1)) catch problem:
         metal_texture_destroy(placeholder)

@@ -90,12 +90,18 @@ pub struct Color:
 ## Texel layouts of a texture. Every format is tightly packed, top-down, with
 ## straight alpha. rgba8 is sRGB-encoded and sampled as linear light; rgba8_linear
 ## is sampled as stored; rgba16_float holds half floats; r8 is one channel that
-## samples as red with alpha one.
+## samples as red with alpha one. The 32-bit formats are for compute kernels
+## (storage images): they are drawn and copied from, sampled and read back,
+## but not rendered into, and r32_uint, which holds integers, is not drawn.
 pub enum Format as u8:
     rgba8 = 0
     rgba8_linear = 1
     rgba16_float = 2
     r8 = 3
+    rgba32_float = 4
+    r32_float = 5
+    r32_uint = 6
+    rg32_float = 7
 
 ## How a draw combines with what is already in the target. Shaders emit
 ## premultiplied color: `over` composites it, `replace` writes it as is, and
@@ -128,11 +134,18 @@ pub struct Region:
 
 ## The bytes of one texel in `format`.
 pub func texel_bytes(pixel_format: Format) -> usize:
-    if pixel_format == Format.rgba16_float:
+    if pixel_format == Format.rgba32_float:
+        return 16
+    if pixel_format == Format.rgba16_float or pixel_format == Format.rg32_float:
         return 8
     if pixel_format == Format.r8:
         return 1
     return 4
+
+## Whether frames render into textures of `format` (the 32-bit ones are
+## written by compute kernels instead).
+func renderable(pixel_format: Format) -> bool:
+    return (u8)pixel_format <= (u8)Format.r8
 
 # mark: Presentation and thread checks ========================================================
 ## Submission does not guarantee that a frame has appeared on the display.

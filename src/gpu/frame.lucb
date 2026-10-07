@@ -240,7 +240,7 @@ pub func device_of(target: const RenderTarget*) -> Device!:
 pub func draw_image(target: const RenderTarget*, texture: Texture, rectangle: Rect, source: Region? = none, opacity: f64 = 1.0, filter: Filter = Filter.linear) -> !:
     try target.frame.check()
     try check_region(rectangle)
-    let state = try texture.checked()
+    let state = try drawable_texture(texture)
     let area = source else Region(0, 0, state.width, state.height)
     let scale_x = frame_scale(target.frame.size.pixel_width, target.frame.size.width)
     let scale_y = frame_scale(target.frame.size.pixel_height, target.frame.size.height)
@@ -259,7 +259,7 @@ pub func draw_image(target: const RenderTarget*, texture: Texture, rectangle: Re
 pub func copy_image(target: const RenderTarget*, texture: Texture, rectangle: Rect, source: Region? = none, filter: Filter = Filter.nearest, straighten: bool = false) -> !:
     try target.frame.check()
     try check_region(rectangle)
-    let state = try texture.checked()
+    let state = try drawable_texture(texture)
     let area = source else Region(0, 0, state.width, state.height)
     let scale_x = frame_scale(target.frame.size.pixel_width, target.frame.size.width)
     let scale_y = frame_scale(target.frame.size.pixel_height, target.frame.size.height)
@@ -267,6 +267,13 @@ pub func copy_image(target: const RenderTarget*, texture: Texture, rectangle: Re
                            (target.rectangle.y + rectangle.y) * scale_y, rectangle.width * scale_x, rectangle.height * scale_y)
     try target.frame.canvas.image(state, area, destination, 1.0, filter, target.clipping,
                                   target.frame.size.pixel_width, target.frame.size.pixel_height, draw_straightened if straighten else draw_copied)
+
+## A texture image draws can sample as color: any format but r32_uint.
+func drawable_texture(texture: Texture) -> TextureState*!:
+    let state = try texture.checked()
+    if state.format == Format.r32_uint:
+        error(invalid_geometry, "an r32_uint texture holds integers; draw it through a kernel or a shader")
+    return state
 
 func frame_scale(pixels: f64, points: f64) -> f64:
     return pixels / points if points > 0.0 else 0.0

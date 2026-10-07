@@ -1,0 +1,18 @@
+#version 450
+// Add a sampled image into a storage image read and written in place, and copy
+// an integer image's texels into a buffer.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0) uniform sampler2D source;
+layout(set = 0, binding = 1, rgba32f) uniform image2D total;
+layout(set = 0, binding = 2, r32ui) readonly uniform uimage2D ids;
+layout(set = 0, binding = 3, std430) writeonly buffer Out { uint values[]; };
+layout(push_constant) uniform Size { uint width; uint height; } size;
+
+void main() {
+    uvec2 at = gl_GlobalInvocationID.xy;
+    if (at.x >= size.width || at.y >= size.height)
+        return;
+    ivec2 texel = ivec2(at);
+    imageStore(total, texel, imageLoad(total, texel) + texelFetch(source, texel, 0));
+    values[at.y * size.width + at.x] = imageLoad(ids, texel).x;
+}
