@@ -35,6 +35,61 @@ pub func pixels(device: gpu.Device) -> !:
     defer mask_root.release()
     assert((try mask_root.value().pixel_format()) == gpu.Format.r8)
     try kept(device)
+    try clip_masks(device)
+
+## An r8 texture as a clip mask: frames render coverage into it, a nested clip
+## multiplies what is there (an `over` draw of color 0 and alpha 1 - coverage
+## leaves mask * coverage), and draws sample it as red.
+func clip_masks(device: gpu.Device) -> !:
+    var mask = try gpu.Texture.create(device, 4, 4, gpu.Format.r8)
+    defer mask.destroy()
+    let frame = try mask.frame()
+    let root = try frame.value().target()
+    # The outer clip: the left half, everything else outside it.
+    let right = try root.value().region(gpu.Rect(x = 2.0, width = 2.0, height = 4.0))
+    try right.value().triangles(cover(0.0, 1.0))
+    right.release()
+    # A nested clip of coverage 0.25 over the top half: alpha 0.75 multiplies by 0.25.
+    let top = try root.value().region(gpu.Rect(width = 4.0, height = 2.0))
+    try top.value().triangles(cover(0.0, 0.75))
+    top.release()
+    root.release()
+    assert((try frame.value().present(gpu.Color(1.0, 0.0, 0.0, 1.0))) == gpu.PresentResult.submitted)
+    frame.release()
+    var texels: u8[16]
+    try mask.read(texels)
+    for y in 0..<(usize)4:
+        for x in 0..<(usize)4:
+            let value = texels[y * 4 + x]
+            if x >= 2:
+                assert(value == 0)
+            elif y < 2:
+                assert(value >= 63 and value <= 64)
+            else:
+                assert(value == 255)
+    # Sampled by a draw, the mask reads as red with alpha one.
+    var shown = try gpu.Texture.create(device, 4, 4, gpu.Format.rgba8_linear)
+    defer shown.destroy()
+    let view = try shown.frame()
+    let target = try view.value().target()
+    try gpu.draw_image(target.value(), mask, gpu.Rect(width = 4.0, height = 4.0), filter = gpu.Filter.nearest)
+    target.release()
+    assert((try view.value().present(gpu.Color(0.0, 0.0, 0.0, 0.0))) == gpu.PresentResult.submitted)
+    view.release()
+    var colors: u8[64]
+    try shown.read(colors)
+    assert(colors[0] >= 63 and colors[0] <= 64 and colors[3] == 255 and colors[32] == 255 and colors[12] == 0)
+
+## A full-target quad of gray `level` and straight `alpha`.
+func cover(level: f32, alpha: f32) -> gpu.Vertex[6]:
+    let a = gpu.Vertex(x = -1.0, y = 1.0, red = level, green = level, blue = level, alpha = alpha)
+    var b = a
+    b.x = 1.0
+    var c = b
+    c.y = -1.0
+    var d = a
+    d.y = -1.0
+    return [a, b, c, a, c, d]
 
 ## Frames begun with `keep` draw over the texture's contents: what a cleared
 ## frame left, and what an upload wrote.

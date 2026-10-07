@@ -396,6 +396,14 @@ to what earlier frames, uploads and copies left, as a tile that changed in one p
 updated (Metal's load action `load`; on Vulkan a render pass that loads the attachment,
 compatible with the clearing one). A texture destroyed
 while submitted work still uses it is released when that work completes.
+**Clip masks.** An `r8` texture is a render target like the other 8- and 16-bit
+formats, which makes it a clip mask: a frame renders a clip's coverage into it, and
+later draws sample it (as red) and multiply their output by it. Nested clips need no
+stencil: drawing the inner clip's coverage `c` over the mask as color 0 with alpha
+`1 - c` (an ordinary `over` draw) leaves `mask * c`, and a clip path's coverage from
+an atlas works the same way. A mask is one byte a pixel (256 KiB for a 512-pixel
+tile), rendered in its own frame before the frame that samples it.
+
 `device.memory_pages()` counts the pooled memory pages textures are carved from
 (Vulkan; zero on Metal), a diagnostic for tests and memory reports. A frame
 cannot sample the texture it renders into (`invalid_geometry`), and a texture
