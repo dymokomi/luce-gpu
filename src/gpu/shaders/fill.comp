@@ -1,0 +1,12 @@
+#version 450
+// Compute.fill where a blit cannot do it: Metal fills buffers with one byte, so a
+// 32-bit value whose bytes differ is written by this kernel instead.
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0, std430) writeonly buffer Words { uint words[]; };
+layout(push_constant) uniform Fill { uint first; uint count; uint value; } fill;
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    if (index < fill.count)
+        words[fill.first + index] = fill.value;
+}

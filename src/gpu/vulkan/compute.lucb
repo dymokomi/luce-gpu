@@ -1,0 +1,39 @@
+#==============================================================================================
+#
+#   compute - Vulkan compute pipelines and passes
+#
+#   DESCRIPTION:
+#       Not implemented yet: buffers allocate as device storage, and kernels and passes report
+#       `unsupported`.
+#
+#==============================================================================================
+
+func vulkan_limits(device: VulkanDevice*) -> Limits:
+    _ = device
+    return Limits(buffer_bytes = 134217728)
+
+func vulkan_buffer_allocate(device: VulkanDevice*, bytes: usize, memory_kind: Memory) -> VulkanBuffer*!:
+    if memory_kind == Memory.shared:
+        error(unsupported, "shared Vulkan buffers are not implemented yet")
+    let zeros = try new u8[bytes] in memory.heap
+    defer free(zeros) in memory.heap
+    return try vulkan_buffer_create(device, zeros)
+
+func vulkan_buffer_contents(buffer: VulkanBuffer*) -> u8*?:
+    _ = buffer
+    return none
+
+func vulkan_kernel_create(device: VulkanDevice*, spirv: const u32[], bindings: u8[16]) -> void*!:
+    _ = device
+    _ = spirv
+    _ = bindings
+    error(unsupported, "Vulkan compute kernels are not implemented yet")
+
+func vulkan_kernel_release(device: void*, native: void*):
+    _ = device
+    _ = native
+
+func vulkan_compute_submit(device: VulkanDevice*, commands: const ComputeCommand[]) -> Ticket!:
+    _ = device
+    _ = commands
+    error(unsupported, "Vulkan compute work is not implemented yet")

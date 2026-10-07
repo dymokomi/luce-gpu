@@ -1,0 +1,12 @@
+#version 450
+// One step of a pairwise sum: values[i] += values[i + half] for i < half. Run with
+// half = n/2, n/4, ... 1; each step reads what the previous one wrote.
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0, std430) buffer Values { uint values[]; };
+layout(push_constant) uniform Params { uint half_count; } params;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i < params.half_count)
+        values[i] += values[i + params.half_count];
+}

@@ -1,0 +1,364 @@
+#==============================================================================================
+#
+#   compute - Compute kernels and the passes that dispatch them
+#
+#   DESCRIPTION:
+#       A Kernel is one GLSL compute shader on a device, supplied in both backends' forms by
+#       tools/embed_shaders.py: SPIR-V for Vulkan, Metal Shading Language for Metal, its
+#       workgroup size and what each binding of set 0 holds. A Compute records dispatches,
+#       buffer copies and fills, then submits them as one submission on the device's queue.
+#       Every command sees what the commands before it wrote (Metal: a serial encoder over
+#       tracked resources; Vulkan: a memory barrier between commands), and work submitted
+#       after it, frames included, sees its results.
+#
+#       Commands are recorded portably and encoded at `submit`, so a pass holds no backend
+#       recording open between calls and the device's other work can go on meanwhile.
+#
+#==============================================================================================
+
+# mark: Kernels ===============================================================================
+## The most bindings a kernel has: set 0, bindings 0..15.
+pub let binding_limit: usize = 16
+
+## What a kernel binding holds (`<stem>_comp_bindings`, made by embed_shaders.py).
+pub enum BindingKind as u8:
+    unused = 0
+    ## A storage buffer (`buffer` block); bound with `Binding(buffer = ...)`.
+    storage_buffer = 1
+    ## A storage image (`image2D` and the like), loaded and stored.
+    storage_image = 2
+    ## A sampled image (`sampler2D` and the like).
+    sampled_image = 3
+    ## A ray-tracing acceleration structure (reserved).
+    acceleration_structure = 4
+
+## A compute program on one device; the zero value is closed, copies alias
+## ownership, and submitted work keeps it alive until it finishes.
+pub struct Kernel:
+    var state: KernelState*?
+
+    ## Build a kernel from its SPIR-V words and Metal source (each backend
+    ## uses its own form), its workgroup size and its binding kinds, as
+    ## embed_shaders.py emits them: `<stem>_comp_words`, `_msl`, `_group`, `_bindings`.
+    pub static func create(device: Device, spirv: const u32[], msl: c.str, group: const u32[], bindings: const u8[]) -> Kernel!:
+        let owner = try device.checked()
+        if spirv.length < 5 or spirv[0] != 0x07230203:
+            error(invalid_shader, "SPIR-V words must begin with the SPIR-V magic number")
+        if group.length != 3 or bindings.length > binding_limit:
+            error(invalid_shader, "a kernel has a three-part workgroup size and at most 16 bindings")
+        let limits = owner.limits
+        var threads: u64 = 1
+        for axis in 0..<(usize)3:
+            if group[axis] == 0 or group[axis] > limits.group_size[axis]:
+                error(invalid_shader, "the kernel's workgroup size exceeds the device's limits().group_size")
+            threads *= (u64)group[axis]
+        if threads > (u64)limits.group_threads:
+            error(invalid_shader, "the kernel's workgroup holds more invocations than the device's limits().group_threads")
+        var kinds: u8[16]
+        for index in 0..<bindings.length:
+            if bindings[index] > (u8)BindingKind.sampled_image:
+                error(unsupported, "acceleration structures are not supported yet")
+            kinds[index] = bindings[index]
+        var size: u32[3] = [group[0], group[1], group[2]]
+        let native = try backend_kernel_create(owner, spirv, msl, size, kinds)
+        errdefer owner.destroy_kernel(owner.native, native)
+        let state = try new KernelState(device = owner, native = native, group = size, bindings = kinds) in memory.heap
+        owner.references += 1
+        return Kernel(state = state)
+
+    ## The workgroup size the kernel was built with.
+    pub func group() -> u32[3]!:
+        return (try self.checked()).group
+
+    pub func is_open() -> bool:
+        return self.state != none
+
+    ## Release this handle on the main thread; submitted work keeps the kernel
+    ## until it finishes.
+    pub func destroy():
+        let state = self.state else return
+        require_thread()
+        self.state = none
+        release_kernel(state)
+
+    func checked() -> KernelState*!:
+        try check_thread()
+        return self.state else error(closed, "the GPU kernel is closed")
+
+struct KernelState:
+    var device: DeviceState*
+    var native: void*
+    var group: u32[3]
+    var bindings: u8[16]
+    var references: usize = 1
+
+func release_kernel(state: KernelState*):
+    state.references -= 1
+    if state.references == 0:
+        state.device.destroy_kernel(state.device.native, state.native)
+        release_device(state.device)
+        free(state) in memory.heap
+
+# mark: Bindings ==============================================================================
+## What a dispatch binds at one binding of set 0: element `n` of a dispatch's
+## bindings is binding `n`. Bindings the kernel does not use may stay closed.
+pub struct Binding:
+    ## A storage buffer, bound whole.
+    pub var buffer: Buffer
+
+# mark: Recording =============================================================================
+let command_dispatch: u8 = 0
+let command_indirect: u8 = 1
+let command_copy: u8 = 2
+let command_fill: u8 = 3
+
+## One recorded command, with the references it holds until it is encoded.
+## Every command is preceded by a barrier against all earlier ones; a command
+## that waives it can be added as a flag here without changing the API.
+struct ComputeCommand:
+    var kind: u8
+    var kernel: KernelState*?
+    var buffers: BufferState*?[16]
+    var uniforms: u8[128]
+    var groups: u32[3]
+    ## The indirect arguments, the copy's source or the fill's target.
+    var buffer: BufferState*?
+    ## The copy's destination.
+    var target: BufferState*?
+    var offset: usize
+    var target_offset: usize
+    var bytes: usize
+    var value: u32
+
+func release_command(command: ComputeCommand*):
+    if let kernel = command.kernel: release_kernel(kernel)
+    for slot in command.buffers:
+        if let buffer = slot: release_buffer(buffer)
+    if let buffer = command.buffer: release_buffer(buffer)
+    if let target = command.target: release_buffer(target)
+    *command = ComputeCommand()
+
+## One submission of compute work on a device: record dispatches, copies and
+## fills, `submit` once, then poll `done` or `wait`. The zero value is closed;
+## `close` gives up an unsubmitted recording. Main thread only, like every
+## GPU call. Resources may be destroyed as soon as they are recorded: the
+## pass and then the submitted work keep them alive.
+pub struct Compute:
+    var state: ComputeState*?
+
+    ## Begin recording compute work for `device`.
+    pub static func begin(device: Device) -> Compute!:
+        let owner = try device.checked()
+        let state = try new ComputeState(device = owner) in memory.heap
+        owner.references += 1
+        return Compute(state = state)
+
+    ## Run `kernel` over `x` by `y` by `z` workgroups with `bindings` (element n
+    ## is binding n) and up to 128 `uniforms` bytes as its push constants. A
+    ## zero count records nothing.
+    pub func dispatch(kernel: Kernel, bindings: const Binding[], uniforms: const u8[], x: u32, y: u32 = 1, z: u32 = 1) -> !:
+        let state = try self.recording()
+        let limits = state.device.limits
+        if x > limits.group_count[0] or y > limits.group_count[1] or z > limits.group_count[2]:
+            error(invalid_geometry, "a dispatch launches more workgroups than the device's limits().group_count")
+        if x == 0 or y == 0 or z == 0:
+            return
+        var command = try state.bound(command_dispatch, kernel, bindings, uniforms)
+        command.groups = [x, y, z]
+        try state.append(&command)
+
+    ## Run `kernel` over the workgroup counts the GPU wrote to `arguments` at
+    ## `offset`: three u32s, x, y and z, as earlier commands left them.
+    pub func dispatch_indirect(kernel: Kernel, bindings: const Binding[], uniforms: const u8[], arguments: Buffer, offset: usize) -> !:
+        let state = try self.recording()
+        let source = try state.own(arguments)
+        try check_buffer_range(source, offset, 12)
+        var command = try state.bound(command_indirect, kernel, bindings, uniforms)
+        command.buffer = source
+        command.offset = offset
+        source.references += 1
+        try state.append(&command)
+
+    ## Copy `bytes` from `source` at `source_offset` to `destination` at
+    ## `destination_offset`; offsets and length four-byte aligned, the ranges
+    ## inside their buffers and apart when the buffers are the same.
+    pub func copy(source: Buffer, source_offset: usize, destination: Buffer, destination_offset: usize, bytes: usize) -> !:
+        let state = try self.recording()
+        let origin = try state.own(source)
+        let goal = try state.own(destination)
+        try check_buffer_range(origin, source_offset, bytes)
+        try check_buffer_range(goal, destination_offset, bytes)
+        if origin == goal and source_offset < destination_offset + bytes and destination_offset < source_offset + bytes:
+            error(invalid_geometry, "a buffer copy's ranges overlap")
+        if bytes == 0: return
+        var command = ComputeCommand(kind = command_copy, buffer = origin, target = goal, offset = source_offset, target_offset = destination_offset, bytes = bytes)
+        origin.references += 1
+        goal.references += 1
+        try state.append(&command)
+
+    ## Set every 32-bit word of `bytes` of `buffer` from `offset` to `value`
+    ## (zero clears); offset and length four-byte aligned.
+    pub func fill(buffer: Buffer, offset: usize, bytes: usize, value: u32 = 0) -> !:
+        let state = try self.recording()
+        let target = try state.own(buffer)
+        try check_buffer_range(target, offset, bytes)
+        if bytes == 0: return
+        var command = ComputeCommand(kind = command_fill, buffer = target, offset = offset, bytes = bytes, value = value)
+        target.references += 1
+        try state.append(&command)
+
+    ## Submit the recorded commands as one submission, without waiting. Work
+    ## submitted later, frames and reads included, sees their results.
+    pub func submit() -> !:
+        let state = try self.recording()
+        defer state.release_commands()
+        state.ticket = backend_compute_submit(state.device, state.commands[..<state.count]) catch failure:
+            # Nothing reached the queue: the pass is over and reports the failure.
+            state.phase = 2
+            state.failed = true
+            error(failure.code, failure.message)
+        state.phase = 1
+
+    ## Whether the submitted work has finished, without waiting; the way to keep
+    ## a long render from stopping the UI: poll once a frame. An execution
+    ## failure is reported here or by `wait`.
+    pub func done() -> bool!:
+        let state = try self.submitted()
+        if state.phase == 2:
+            return true
+        if not (try backend_read_ready(state.device, state.ticket)):
+            return false
+        try self.wait()
+        return true
+
+    ## Wait for the submitted work, reporting `execution_failed` if it failed.
+    pub func wait() -> !:
+        let state = try self.submitted()
+        if state.phase == 2:
+            if state.failed: error(execution_failed, "the GPU failed while running compute work")
+            return
+        state.phase = 2
+        let ticket = state.ticket
+        state.ticket = Ticket()
+        backend_read_wait(state.device, ticket) catch failure:
+            state.failed = true
+            error(failure.code, failure.message)
+
+    pub func is_open() -> bool:
+        return self.state != none
+
+    ## End the pass: an unsubmitted recording is given up; submitted work runs
+    ## to completion on its own. Idempotent.
+    pub func close():
+        let state = self.state else return
+        require_thread()
+        self.state = none
+        state.release_commands()
+        if state.commands.length > 0:
+            free(state.commands) in memory.heap
+        backend_ticket_drop(state.device, state.ticket)
+        release_device(state.device)
+        free(state) in memory.heap
+
+    func recording() -> ComputeState*!:
+        try check_thread()
+        let state = self.state else error(closed, "the compute pass is closed")
+        if state.phase != 0:
+            error(frame_finished, "a submitted compute pass records nothing more; begin another")
+        return state
+
+    func submitted() -> ComputeState*!:
+        try check_thread()
+        let state = self.state else error(closed, "the compute pass is closed")
+        if state.phase == 0:
+            error(invalid_geometry, "submit a compute pass before waiting for it")
+        return state
+
+struct ComputeState:
+    var device: DeviceState*
+    var commands: ComputeCommand[]
+    var count: usize
+    ## 0 recording, 1 submitted, 2 complete.
+    var phase: u8
+    var ticket: Ticket
+    var failed: bool
+
+    ## A buffer handle's state, checked to belong to this pass's device.
+    func own(buffer: Buffer) -> BufferState*!:
+        let state = buffer.state else error(closed, "a compute pass was given a closed buffer")
+        if state.device != self.device:
+            error(wrong_device, "a compute pass uses buffers of its own device")
+        return state
+
+    ## A dispatch of `kernel` holding its bindings and uniforms, checked
+    ## against what the kernel declares; it holds a reference to each.
+    func bound(kind: u8, kernel: Kernel, bindings: const Binding[], uniforms: const u8[]) -> ComputeCommand!:
+        let program = try kernel.checked()
+        if program.device != self.device:
+            error(wrong_device, "the kernel belongs to another GPU device")
+        if uniforms.length > uniform_limit:
+            error(invalid_geometry, "a dispatch carries at most 128 uniform bytes")
+        if bindings.length > binding_limit:
+            error(invalid_geometry, "a dispatch has at most 16 bindings")
+        var command = ComputeCommand(kind = kind, kernel = program)
+        memory.copy(command.uniforms[..<uniforms.length], uniforms, uniforms.length)
+        for index in 0..<binding_limit:
+            let declared = program.bindings[index]
+            if declared == 0:
+                continue
+            if index >= bindings.length:
+                error(invalid_geometry, "a dispatch leaves out a binding its kernel uses")
+            if declared == (u8)BindingKind.storage_buffer:
+                command.buffers[index] = try self.own(bindings[index].buffer)
+            else:
+                error(unsupported, "image bindings are not supported yet")
+        program.references += 1
+        for slot in command.buffers:
+            if let buffer = slot: buffer.references += 1
+        return command
+
+    func append(command: ComputeCommand*) -> !:
+        errdefer release_command(command)
+        if self.count == self.commands.length:
+            let grown = try new ComputeCommand[self.commands.length * 2 + 16] --- in memory.heap
+            memory.copy(grown, self.commands, self.count)
+            if self.commands.length > 0:
+                free(self.commands) in memory.heap
+            self.commands = grown
+        self.commands[self.count] = *command
+        self.count += 1
+
+    func release_commands():
+        for index in 0..<self.count:
+            release_command(&self.commands[index])
+        self.count = 0
+
+# mark: Dispatch ==============================================================================
+
+func backend_kernel_create(device: DeviceState*, spirv: const u32[], msl: c.str, group: u32[3], bindings: u8[16]) -> void*!:
+    if (platform.windows or platform.linux) and device.backend == Backend.vulkan:
+        return (void*)try vulkan_kernel_create((VulkanDevice*)device.native, spirv, bindings)
+    if platform.macos and platform.arm64:
+        if device.backend == Backend.metal:
+            return try metal_kernel_create((MetalDevice*)device.native, msl, group)
+    error(unsupported, "compute kernels are unavailable on this backend")
+
+func backend_kernel_destroyer(backend: Backend) -> func(void*, void*) -> unit:
+    if (platform.windows or platform.linux) and backend == Backend.vulkan: return vulkan_kernel_release
+    if platform.macos and platform.arm64 and backend == Backend.metal: return metal_kernel_release
+    trap("compute kernels are unavailable on this backend")
+
+func backend_compute_submit(device: DeviceState*, commands: const ComputeCommand[]) -> Ticket!:
+    if (platform.windows or platform.linux) and device.backend == Backend.vulkan:
+        return try vulkan_compute_submit((VulkanDevice*)device.native, commands)
+    if platform.macos and platform.arm64:
+        if device.backend == Backend.metal:
+            return try metal_compute_submit((MetalDevice*)device.native, commands)
+    error(unsupported, "compute work is unavailable on this backend")
+
+## Let go of a ticket nobody will wait for; its work finishes on its own.
+func backend_ticket_drop(device: DeviceState*, ticket: Ticket):
+    _ = device
+    if platform.macos and platform.arm64:
+        if let command = ticket.command:
+            metal_void(command, metal_sel("release"))

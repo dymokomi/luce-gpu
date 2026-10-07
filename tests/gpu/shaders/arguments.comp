@@ -1,0 +1,11 @@
+#version 450
+// Turn a count into dispatch_indirect arguments: one group per 64 items.
+layout(local_size_x = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer Counters { uint count; } counters;
+layout(set = 0, binding = 1, std430) writeonly buffer Arguments { uint groups[3]; } arguments;
+
+void main() {
+    arguments.groups[0] = (counters.count + 63u) / 64u;
+    arguments.groups[1] = 1u;
+    arguments.groups[2] = 1u;
+}

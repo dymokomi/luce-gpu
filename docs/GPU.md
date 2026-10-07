@@ -7,9 +7,9 @@ triangles, coverage masks and image draws into scoped drawing regions that end o
 the screen or in a texture. All implementation code is Base calling system APIs
 directly. There is no SDL dependency or C/Objective-C implementation shim.
 
-Client fragment shaders are written once in GLSL and embedded for both
-backends; compute is a subsequent increment. The API remains provisional while
-those contracts are exercised.
+Client fragment shaders and compute kernels are written once in GLSL and
+embedded for both backends. The API remains provisional while those contracts
+are exercised.
 
 ## Retained geometry (Base API)
 
@@ -49,8 +49,9 @@ Vulkan runtime verification requires Windows/Linux hardware.
 
 ## Buffers and mesh draws (Base API)
 
-`Buffer.create(device, bytes)` uploads device storage (4 bytes to 128 MiB, a
-multiple of four); `buffer.upload(offset, bytes)` rewrites part of it. The copy
+`Buffer.create(device, bytes)` uploads device storage (4 bytes up to the
+device's `limits().buffer_bytes`, a multiple of four); `buffer.upload(offset,
+bytes)` rewrites part of it. Compute uses the same buffers; see Compute below. The copy
 is ordered on the device's queue: draws recorded before it read the old bytes,
 later ones the new, and nothing waits for work in flight (Metal blits from a
 staging copy; Vulkan copies from the upload ring, then a barrier makes the
@@ -236,7 +237,9 @@ The files under `src/gpu/` share one standard module scope:
 | `module.lucb` | Portable values, errors, validation, and thread policy. |
 | `device.lucb`, `surface.lucb`, `frame.lucb`, `texture.lucb`, `shader.lucb` | Public ownership, device references, window leases, textures, shaders, pipelines, and API contracts. |
 | `shaders/`, `shaders.lucb` | The vertex stage (Vulkan) and built-in fill fragment in GLSL, and the module `tools/embed_shaders.py` generates from them for both backends. |
-| `mesh.lucb`, `mesh_shaders.lucb`, `metal/mesh.lucb`, `vulkan/mesh.lucb` | Buffers and mesh draws: the portable API, the embedded mesh stages (`shaders/mesh*.vert`, `mesh.frag`, `mesh_id.frag`), and each backend's buffers, pipelines and bindings. |
+| `buffer.lucb`, `metal/buffer.lucb` | Buffers: allocation, uploads, reads and shared views. |
+| `mesh.lucb`, `mesh_shaders.lucb`, `metal/mesh.lucb`, `vulkan/mesh.lucb` | Mesh draws: the portable API, the embedded mesh stages (`shaders/mesh*.vert`, `mesh.frag`, `mesh_id.frag`), and each backend's pipelines and bindings (Vulkan's buffers too). |
+| `compute.lucb`, `compute_shaders.lucb`, `metal/compute.lucb`, `vulkan/compute.lucb` | Kernels and compute passes: the portable recording, the built-in fill kernel (`shaders/fill.comp`), and each backend's pipelines and encoding. |
 | `params.lucb`, `canvas.lucb`, `mask.lucb` | The recorded command list and the 48-byte per-draw parameters both shaders read. |
 | `backend.lucb` | Backend selection and device dispatch using opaque device payloads. |
 | `presentation.lucb`, `resources.lucb` | Surface and texture dispatch using opaque payloads; a device alone never reaches them. |
@@ -439,3 +442,144 @@ A pipeline recorded into a frame of another target format is refused at
 `present` with `wrong_target`; one from another device with `wrong_device`.
 Shaders and pipelines are manual Base resources like textures, and a draw
 keeps them alive until its canvas is cleared.
+
+## Compute
+
+Compute runs GLSL compute shaders on the device's one queue, beside drawing.
+If you know CUDA, a `Kernel` is a compiled `__global__` function, a dispatch is
+a launch with a grid of workgroups (CUDA's blocks), and a `Compute` is a stream
+you fill and then submit once. In Metal terms a `Compute` is one command buffer;
+in Vulkan terms one submitted command buffer with the barriers already placed.
+
+### Writing a kernel
+
+Write the kernel in GLSL 4.5 against this contract:
+
+```glsl
+#version 450
+layout(local_size_x = 64) in;                                  // the workgroup size
+layout(set = 0, binding = 0, std430) readonly buffer X { float x[]; };
+layout(set = 0, binding = 1, std430) buffer Y { float y[]; };   // bindings 0..15
+layout(push_constant) uniform Params { float a; uint n; } params;   // up to 128 bytes
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i < params.n)
+        y[i] = params.a * x[i] + y[i];
+}
+```
+
+Everything lives in descriptor set 0 at bindings 0..15, one resource per
+binding: storage buffers, and (soon) storage images and sampled images. Small
+per-dispatch values go in the push-constant block. Uniform buffers, separate
+samplers and arrays of resources are refused when embedding. Pass counts in
+push constants instead of calling `.length()` on a runtime array, which Metal
+cannot answer without an extra buffer. Atomics on storage buffers (`atomicAdd`,
+`atomicMin`, `atomicMax`, `atomicExchange`, `atomicCompSwap` on 32-bit ints)
+work everywhere; image atomics are refused.
+
+`tools/embed_shaders.py OUTPUT.lucb --public FILE.comp...` turns each kernel
+into four declarations, the arguments of `Kernel.create`:
+
+| Name | Holds |
+| --- | --- |
+| `<stem>_comp_words` | SPIR-V for Vulkan |
+| `<stem>_comp_msl` | Metal Shading Language 3.0 from spirv-cross, entry `luce_compute`, push constants moved to buffer index 30 |
+| `<stem>_comp_group` | the workgroup size, read from the shader |
+| `<stem>_comp_bindings` | what each binding holds (`BindingKind`) |
+
+On macOS the tool compiles each Metal translation with `xcrun metal`, so a
+kernel Metal would refuse fails here rather than at run time. Kernels that need
+newer SPIR-V (ray queries) take `--target-env vulkan1.2`.
+
+Two features keep shared GLSL manageable across many kernels:
+
+- **Includes.** `#include "name.glsl"` resolves beside the kernel, then in each
+  `-I DIR`. `--depfile FILE` writes a Makefile rule naming every source and
+  include the output came from, so a build script can re-embed when a shared
+  library changes.
+- **Variants.** `FILE.comp:STEM:NAME=VALUE,...` embeds one source under another
+  stem with preprocessor defines. `trace.comp:trace:SPECTRAL=1
+  trace.comp:trace_rgb:SPECTRAL=0` gives `trace_comp_*` and `trace_rgb_comp_*`.
+  Use this where Vulkan code would use specialization constants; the workgroup
+  size must be a number, not `local_size_x_id`.
+
+### Kernels, passes and dispatches
+
+```luce
+var saxpy = try gpu.Kernel.create(device, kernels.saxpy_comp_words, kernels.saxpy_comp_msl,
+                                  kernels.saxpy_comp_group, kernels.saxpy_comp_bindings)
+defer saxpy.destroy()
+var pass = try gpu.Compute.begin(device)
+defer pass.close()
+let bindings: gpu.Binding[2] = [gpu.Binding(buffer = x), gpu.Binding(buffer = y)]
+try pass.dispatch(saxpy, bindings, uniforms, (count + 63) // 64)
+try pass.submit()
+try pass.wait()
+try y.read(0, result)
+```
+
+| Operation | Contract |
+| --- | --- |
+| `Kernel.create(device, words, msl, group, bindings)` | Builds the pipeline. `invalid_shader` when either form is rejected or the workgroup exceeds `limits()`. `group()` returns the size. |
+| `Compute.begin(device)` | Starts recording. Commands are recorded portably and encoded at `submit`, so other work on the device (uploads, frames, reads) goes on meanwhile. |
+| `dispatch(kernel, bindings, uniforms, x, y = 1, z = 1)` | Runs `x * y * z` workgroups. Element `n` of `bindings` is binding `n`; bindings the kernel does not use may be left closed (`Binding()`). `uniforms` fill the push-constant block (at most 128 bytes, zero-padded). A zero count records nothing. |
+| `dispatch_indirect(kernel, bindings, uniforms, arguments, offset)` | Takes the three u32 workgroup counts from `arguments` at `offset`, as earlier commands left them (Vulkan's `vkCmdDispatchIndirect`, Metal's indirect threadgroups). |
+| `copy(source, source_offset, destination, destination_offset, bytes)` | Copies between buffers; ranges four-byte aligned and apart when the buffer is the same. |
+| `fill(buffer, offset, bytes, value = 0)` | Sets every 32-bit word in the range. Metal fills bytes, so a value whose four bytes differ runs a small built-in kernel. |
+| `submit()` | Sends the commands as one submission and returns at once. |
+| `done()` | Polls for completion without waiting. |
+| `wait()` | Waits; `execution_failed` if the GPU failed, reported again on later calls. |
+| `close()` | Ends the pass. An unsubmitted recording is dropped; submitted work finishes on its own. Idempotent. |
+
+Each command sees everything the commands before it wrote: Metal encodes
+dispatches into a serial compute encoder over hazard-tracked buffers, and
+Vulkan puts a memory barrier between commands. Ten or twenty dependent
+dispatches in one pass (a reduction, a compaction feeding an indirect dispatch)
+need no synchronization from you. Independent dispatches pay for that ordering
+too; an option to waive it between chosen dispatches can come later without
+changing these calls.
+
+Work is ordered by when it reaches the queue: `upload` and `read` act when
+called, a `Compute` when submitted. A frame, read or pass submitted after a
+`Compute` sees its results. Resources may be destroyed as soon as they are
+recorded: the pass, and then the submitted work, keep them alive. Like every GPU
+call, recording happens on the main thread.
+
+### Buffers for compute
+
+`Buffer.allocate(device, bytes, memory = Memory.device)` makes a zeroed buffer.
+`Memory.device` is the GPU's own memory (Metal private storage, Vulkan
+device-local). `Memory.shared` is also mapped for the CPU (Metal shared
+storage, Vulkan host-visible and coherent): `view()` returns the bytes the GPU
+uses, not a copy, so write them only while no submitted work uses the buffer.
+`read(offset, out)` waits for earlier work and copies through the readback
+ring; `ReadBatch.copy_buffer(buffer, offset, bytes, slot_offset)` reads
+without waiting, beside texture reads. Every buffer can be a storage buffer, a
+copy source or destination, indirect arguments, or mesh data.
+
+`device.limits()` reports what the device allows:
+
+| Field | Meaning | Metal | Vulkan |
+| --- | --- | --- | --- |
+| `buffer_bytes` | largest buffer | `maxBufferLength` | `maxStorageBufferRange`, capped by the largest allocation |
+| `group_threads` | invocations per workgroup | 1024 | `maxComputeWorkGroupInvocations` |
+| `group_size` | workgroup size per dimension | 1024 each | `maxComputeWorkGroupSize` |
+| `group_count` | workgroups per dispatch dimension | 2^32 - 1 | `maxComputeWorkGroupCount` |
+| `shared_bytes` | GLSL `shared` memory | `maxThreadgroupMemoryLength` | `maxComputeSharedMemorySize` |
+| `float_atomic_add` | `atomicAdd` on floats in buffers | Metal 3 GPUs | `VK_EXT_shader_atomic_float` |
+
+### Long-running work
+
+A submission that runs for seconds stalls everything else on the queue,
+presentation included, and the system may reset a GPU that does not finish
+(Windows' TDR allows about two seconds). Split long work, such as a path
+tracer's samples, into passes a few milliseconds to tens of milliseconds long.
+Each UI frame, submit the next pass only once `done()` reports the last one
+finished. The UI never waits, and the GPU always has work. Recording a pass
+takes microseconds, so the main-thread rule costs nothing here.
+
+### Status
+
+The Metal backend runs compute. Vulkan kernels and passes return `unsupported`
+until that backend lands; buffers already allocate there.

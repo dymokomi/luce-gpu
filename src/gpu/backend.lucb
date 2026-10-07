@@ -43,6 +43,14 @@ func backend_memory(device: DeviceState*) -> DeviceMemory:
             return metal_memory_report((MetalDevice*)device.native)
     return DeviceMemory()
 
+func backend_limits(backend: Backend, native: void*) -> Limits:
+    if (platform.windows or platform.linux) and backend == Backend.vulkan:
+        return vulkan_limits((VulkanDevice*)native)
+    if platform.macos and platform.arm64:
+        if backend == Backend.metal:
+            return metal_limits((MetalDevice*)native)
+    return Limits()
+
 func backend_device_destroy(backend: Backend, native: void*):
     if (platform.windows or platform.linux) and backend == Backend.vulkan:
         vulkan_device_destroy((VulkanDevice*)native)

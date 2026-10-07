@@ -1,0 +1,284 @@
+import c
+from luce_gpu import gpu
+import memory
+import kernels
+
+## Compute contracts on a device: kernels from embedded GLSL, chained dispatches
+## that read what earlier ones wrote, atomics, indirect dispatch, copies, fills,
+## readback, large buffers, and resources destroyed while work still uses them.
+pub func checks(device: gpu.Device) -> !:
+    let limits = try device.limits()
+    assert(limits.buffer_bytes >= 134217728 and limits.group_threads >= 256 and limits.shared_bytes >= 16384)
+    try saxpy(device)
+    try reduction(device)
+    try compaction(device)
+    try transfers(device)
+    try large(device, limits)
+    try refusals(device)
+
+func kernel(device: gpu.Device, words: const u32[], msl: c.str, group: const u32[], bindings: const u8[]) -> gpu.Kernel!:
+    return try gpu.Kernel.create(device, words, msl, group, bindings)
+
+func word_bytes(values: const u32[]) -> u8[]!:
+    let bytes = try new u8[values.length * 4] in memory.heap
+    for index in 0..<values.length:
+        memory.write[u32]((void*)&bytes[index * 4], values[index])
+    return bytes
+
+func word(bytes: const u8[], index: usize) -> u32:
+    return memory.read[u32]((const void*)&bytes[index * 4])
+
+func float_at(bytes: const u8[], index: usize) -> f32:
+    return memory.read[f32]((const void*)&bytes[index * 4])
+
+## y = 2x + y over 1000 floats, polled to completion.
+func saxpy(device: gpu.Device) -> !:
+    var program = try kernel(device, kernels.saxpy_comp_words, kernels.saxpy_comp_msl, kernels.saxpy_comp_group, kernels.saxpy_comp_bindings)
+    defer program.destroy()
+    let group = try program.group()
+    assert(group[0] == 64 and group[1] == 1 and group[2] == 1)
+    let count: usize = 1000
+    var x_bytes: u8[4000]
+    var y_bytes: u8[4000]
+    for index in 0..<count:
+        memory.write[f32]((void*)&x_bytes[index * 4], (f32)index)
+        memory.write[f32]((void*)&y_bytes[index * 4], 1.0)
+    var x = try gpu.Buffer.create(device, x_bytes)
+    defer x.destroy()
+    var y = try gpu.Buffer.create(device, y_bytes)
+    defer y.destroy()
+    var uniforms: u8[8]
+    memory.write[f32]((void*)&uniforms[0], 2.0)
+    memory.write[u32]((void*)&uniforms[4], (u32)count)
+    var pass = try gpu.Compute.begin(device)
+    defer pass.close()
+    let bindings: gpu.Binding[2] = [gpu.Binding(buffer = x), gpu.Binding(buffer = y)]
+    try pass.dispatch(program, bindings, uniforms, 16)
+    try pass.submit()
+    var polls: usize = 0
+    while not (try pass.done()):
+        polls += 1
+        assert(polls < 100000000)
+    try pass.wait()
+    var result: u8[4000]
+    try y.read(0, result)
+    for index in 0..<count:
+        assert(float_at(result, index) == 2.0 * (f32)index + 1.0)
+
+## Twelve dependent dispatches halve 4096 values into their sum. The kernel
+## and the values' handle are destroyed before the work is submitted.
+func reduction(device: gpu.Device) -> !:
+    var program = try kernel(device, kernels.reduce_comp_words, kernels.reduce_comp_msl, kernels.reduce_comp_group, kernels.reduce_comp_bindings)
+    let count: usize = 4096
+    var values = try new u32[count] in memory.heap
+    defer free(values) in memory.heap
+    for index in 0..<count:
+        values[index] = (u32)index + 1
+    let bytes = try word_bytes(values)
+    defer free(bytes) in memory.heap
+    var data = try gpu.Buffer.create(device, bytes)
+    var total = try gpu.Buffer.allocate(device, 4)
+    defer total.destroy()
+    var pass = try gpu.Compute.begin(device)
+    defer pass.close()
+    let bindings: gpu.Binding[1] = [gpu.Binding(buffer = data)]
+    var half = count // 2
+    while half > 0:
+        var uniforms: u8[4]
+        memory.write[u32]((void*)&uniforms[0], (u32)half)
+        try pass.dispatch(program, bindings, uniforms, (u32)((half + 63) // 64))
+        half = half // 2
+    try pass.copy(data, 0, total, 0, 4)
+    program.destroy()
+    data.destroy()
+    try pass.submit()
+    try pass.wait()
+    var result: u8[4]
+    try total.read(0, result)
+    assert(word(result, 0) == 8390656)
+
+## Compaction with atomics feeds dispatch_indirect: the odd values of 0..999
+## are kept, a kernel turns their count into workgroup counts, and an indirect
+## dispatch doubles exactly the kept ones.
+func compaction(device: gpu.Device) -> !:
+    var compact = try kernel(device, kernels.compact_comp_words, kernels.compact_comp_msl, kernels.compact_comp_group, kernels.compact_comp_bindings)
+    defer compact.destroy()
+    var arguments = try kernel(device, kernels.arguments_comp_words, kernels.arguments_comp_msl, kernels.arguments_comp_group, kernels.arguments_comp_bindings)
+    defer arguments.destroy()
+    var doubled = try kernel(device, kernels.double_comp_words, kernels.double_comp_msl, kernels.double_comp_group, kernels.double_comp_bindings)
+    defer doubled.destroy()
+    let count: usize = 1000
+    var values = try new u32[count] in memory.heap
+    defer free(values) in memory.heap
+    for index in 0..<count:
+        values[index] = (u32)index
+    let bytes = try word_bytes(values)
+    defer free(bytes) in memory.heap
+    var input = try gpu.Buffer.create(device, bytes)
+    defer input.destroy()
+    var kept = try gpu.Buffer.allocate(device, count * 4)
+    defer kept.destroy()
+    var counters = try gpu.Buffer.allocate(device, 20)
+    defer counters.destroy()
+    var groups = try gpu.Buffer.allocate(device, 16)
+    defer groups.destroy()
+    var pass = try gpu.Compute.begin(device)
+    defer pass.close()
+    # smallest starts at i32 max (a word fill), largest at zero (a byte fill).
+    try pass.fill(counters, 0, 20, 0)
+    try pass.fill(counters, 4, 4, 0x7fffffff)
+    var uniforms: u8[4]
+    memory.write[u32]((void*)&uniforms[0], (u32)count)
+    let compact_bindings: gpu.Binding[3] = [gpu.Binding(buffer = input), gpu.Binding(buffer = kept), gpu.Binding(buffer = counters)]
+    try pass.dispatch(compact, compact_bindings, uniforms, 16)
+    let argument_bindings: gpu.Binding[2] = [gpu.Binding(buffer = counters), gpu.Binding(buffer = groups)]
+    var none_given: u8[]
+    try pass.dispatch(arguments, argument_bindings, none_given, 1)
+    let double_bindings: gpu.Binding[2] = [gpu.Binding(buffer = kept), gpu.Binding(buffer = counters)]
+    try pass.dispatch_indirect(doubled, double_bindings, none_given, groups, 0)
+    try pass.submit()
+    try pass.wait()
+    var counted: u8[20]
+    try counters.read(0, counted)
+    assert(word(counted, 0) == 500)
+    assert(word(counted, 1) == 1 and word(counted, 2) == 999)
+    assert(word(counted, 3) % 2 == 1)
+    assert(word(counted, 4) >= 1 and word(counted, 4) <= 1000)
+    var arguments_read: u8[12]
+    try groups.read(0, arguments_read)
+    assert(word(arguments_read, 0) == 8 and word(arguments_read, 1) == 1 and word(arguments_read, 2) == 1)
+    var results: u8[2000]
+    try kept.read(0, results)
+    var sum: u64 = 0
+    var seen: bool[1000]
+    for index in 0..<(usize)500:
+        let value = word(results, index)
+        assert(value % 4 == 2 and value < 2000 and not seen[value // 2])
+        seen[value // 2] = true
+        sum += (u64)value
+    assert(sum == 500000)
+
+## Allocation zeroes; fills by word and by byte; buffer-to-buffer copies; a
+## shared buffer's CPU view; and reads at an offset.
+func transfers(device: gpu.Device) -> !:
+    let size: usize = 1 << 20
+    var first = try gpu.Buffer.allocate(device, size)
+    defer first.destroy()
+    assert(first.bytes() == size and (try first.memory_kind()) == gpu.Memory.device)
+    var second = try gpu.Buffer.allocate(device, size)
+    defer second.destroy()
+    var shared = try gpu.Buffer.allocate(device, 64, gpu.Memory.shared)
+    defer shared.destroy()
+    var everything = try new u8[size] in memory.heap
+    defer free(everything) in memory.heap
+    try first.read(0, everything)
+    for byte in everything:
+        assert(byte == 0)
+    let view = try shared.view()
+    assert(view.length == 64)
+    for index in 0..<(usize)16:
+        assert(word(view, index) == 0)
+        memory.write[u32]((void*)&view[index * 4], (u32)index * 3)
+    var pass = try gpu.Compute.begin(device)
+    defer pass.close()
+    try pass.fill(first, 0, size, 0xdeadbeef)
+    try pass.fill(first, 4096, 4096, 0x01010101)
+    try pass.copy(first, 0, second, 8, 8192)
+    try pass.copy(shared, 0, second, 65536, 64)
+    try pass.fill(shared, 0, 16, 0xffffffff)
+    try pass.submit()
+    try pass.wait()
+    var back: u8[16]
+    try first.read(4092, back)
+    assert(word(back, 0) == 0xdeadbeef and word(back, 1) == 0x01010101)
+    try first.read(8192, back)
+    assert(word(back, 0) == 0xdeadbeef)
+    try second.read(0, back)
+    assert(word(back, 0) == 0 and word(back, 1) == 0 and word(back, 2) == 0xdeadbeef)
+    try second.read(4104, back)
+    assert(word(back, 0) == 0x01010101)
+    var copied: u8[64]
+    try second.read(65536, copied)
+    for index in 0..<(usize)16:
+        assert(word(copied, index) == (u32)index * 3)
+    assert(word(view, 0) == 0xffffffff and word(view, 3) == 0xffffffff and word(view, 4) == 12)
+
+## A buffer past the old 128 MiB cap, written at its far end by a word fill
+## and read back there, where the device allows one.
+func large(device: gpu.Device, limits: gpu.Limits) -> !:
+    let size: usize = 256 << 20
+    if limits.buffer_bytes < (u64)size:
+        print("skip large buffer: the device allows less than 256 MiB")
+        return
+    var big = try gpu.Buffer.allocate(device, size)
+    defer big.destroy()
+    var pass = try gpu.Compute.begin(device)
+    defer pass.close()
+    try pass.fill(big, size - 4096, 4096, 0x12345678)
+    try pass.submit()
+    try pass.wait()
+    var back: u8[16]
+    try big.read(size - 4100, back)
+    assert(word(back, 0) == 0 and word(back, 1) == 0x12345678 and word(back, 3) == 0x12345678)
+
+## Mismatched bindings, oversized uniforms, misaligned ranges and recording
+## after submission are refused before anything reaches the GPU.
+func refusals(device: gpu.Device) -> !:
+    var program = try kernel(device, kernels.saxpy_comp_words, kernels.saxpy_comp_msl, kernels.saxpy_comp_group, kernels.saxpy_comp_bindings)
+    defer program.destroy()
+    var buffer = try gpu.Buffer.allocate(device, 256)
+    defer buffer.destroy()
+    var pass = try gpu.Compute.begin(device)
+    defer pass.close()
+    var nothing: u8[]
+    var refused = false
+    let one: gpu.Binding[1] = [gpu.Binding(buffer = buffer)]
+    pass.dispatch(program, one, nothing, 1) catch failure:
+        assert(failure.code == gpu.invalid_geometry)
+        refused = true
+    assert(refused)
+    refused = false
+    let two: gpu.Binding[2] = [gpu.Binding(buffer = buffer), gpu.Binding()]
+    pass.dispatch(program, two, nothing, 1) catch failure:
+        assert(failure.code == gpu.closed)
+        refused = true
+    assert(refused)
+    refused = false
+    var big: u8[132]
+    let both: gpu.Binding[2] = [gpu.Binding(buffer = buffer), gpu.Binding(buffer = buffer)]
+    pass.dispatch(program, both, big, 1) catch failure:
+        assert(failure.code == gpu.invalid_geometry)
+        refused = true
+    assert(refused)
+    refused = false
+    pass.fill(buffer, 2, 8, 0) catch failure:
+        assert(failure.code == gpu.invalid_geometry)
+        refused = true
+    assert(refused)
+    refused = false
+    pass.copy(buffer, 0, buffer, 4, 8) catch failure:
+        assert(failure.code == gpu.invalid_geometry)
+        refused = true
+    assert(refused)
+    refused = false
+    _ = gpu.Buffer.allocate(device, 6) catch failure:
+        assert(failure.code == gpu.invalid_geometry)
+        refused = true
+        recover gpu.Buffer()
+    assert(refused)
+    refused = false
+    _ = buffer.view() catch failure:
+        assert(failure.code == gpu.invalid_geometry)
+        refused = true
+        recover nothing
+    assert(refused)
+    try pass.dispatch(program, both, nothing, 1)
+    try pass.submit()
+    refused = false
+    pass.fill(buffer, 0, 4, 0) catch failure:
+        assert(failure.code == gpu.frame_finished)
+        refused = true
+    assert(refused)
+    try pass.wait()
+    pass.close()
+    pass.close()

@@ -1,0 +1,162 @@
+#==============================================================================================
+#
+#   buffer - Device buffers
+#
+#   DESCRIPTION:
+#       A Buffer is device storage: mesh draws pull vertices from it (mesh.lucb) and compute
+#       kernels read and write it (compute.lucb). Device memory is the GPU's own; shared memory
+#       is also mapped for the CPU. Every transfer (upload, read, a Compute's copy and fill)
+#       is ordered on the device's one queue, so it sees what was submitted before it.
+#
+#==============================================================================================
+
+# mark: Buffers ================================================================================
+## Where a buffer's memory lives. `device` is the GPU's own (private storage on
+## Metal, device-local on Vulkan); `shared` is also mapped for the CPU (Metal
+## shared storage; Vulkan host-visible and coherent, device-local too where the
+## device offers it), reached through `Buffer.view`.
+pub enum Memory as u8:
+    device = 0
+    shared = 1
+
+## Device storage. Copies alias ownership; one owner destroys it on the main
+## thread. Recorded draws and submitted compute work keep it alive until they finish.
+pub struct Buffer:
+    var state: BufferState*?
+
+    ## A buffer holding `data`: at least 4 bytes, a multiple of four, at most
+    ## the device's `limits().buffer_bytes`.
+    pub static func create(device: Device, data: const u8[]) -> Buffer!:
+        let owner = try device.checked()
+        try check_buffer_size(owner, (u64)data.length)
+        let native = try backend_buffer_create(owner, data)
+        return try adopt_buffer(owner, native, (usize)data.length, Memory.device)
+
+    ## A zeroed buffer of `bytes` (at least 4, a multiple of four, at most the
+    ## device's `limits().buffer_bytes`) in `memory`.
+    pub static func allocate(device: Device, bytes: usize, memory_kind: Memory = Memory.device) -> Buffer!:
+        let owner = try device.checked()
+        try check_buffer_size(owner, (u64)bytes)
+        let native = try backend_buffer_allocate(owner, bytes, memory_kind)
+        return try adopt_buffer(owner, native, bytes, memory_kind)
+
+    ## Replace `data.length` bytes at `offset`. Work submitted before this call
+    ## sees the old contents and later work the new: the copy is ordered on the
+    ## device's queue, so nothing waits for work in flight.
+    pub func upload(offset: usize, data: const u8[]) -> !:
+        try check_thread()
+        let state = self.state else error(closed, "the GPU buffer is closed")
+        try check_buffer_range(state, offset, data.length)
+        if data.length == 0: return
+        try backend_buffer_upload(state.device, state.native, offset, data)
+
+    ## Copy `out.length` bytes from `offset` into `out`, once every submission
+    ## before this call has completed: a read after `Compute.submit` sees its
+    ## results. It waits; a `ReadBatch` reads without waiting.
+    pub func read(offset: usize, out: u8[]) -> !:
+        try check_thread()
+        let state = self.state else error(closed, "the GPU buffer is closed")
+        try check_buffer_range(state, offset, out.length)
+        if out.length == 0: return
+        try read_buffer(state, offset, out)
+
+    ## The CPU's view of a shared buffer's bytes. It is the memory the GPU uses,
+    ## not a copy: write it only while no submitted work uses the buffer, and
+    ## read results after waiting for the work that wrote them.
+    pub func view() -> u8[]!:
+        try check_thread()
+        let state = self.state else error(closed, "the GPU buffer is closed")
+        let data = state.data else error(invalid_geometry, "only a shared buffer has a CPU view")
+        return u8[](data, state.bytes)
+
+    ## The size in bytes; zero when closed.
+    pub func bytes() -> usize:
+        let state = self.state else return 0
+        return state.bytes
+
+    ## Where the buffer's memory lives.
+    pub func memory_kind() -> Memory!:
+        let state = self.state else error(closed, "the GPU buffer is closed")
+        return state.memory_kind
+
+    pub func is_open() -> bool:
+        return self.state != none
+
+    pub func destroy():
+        if let state = self.state:
+            require_thread()
+            self.state = none
+            release_buffer(state)
+
+    func checked() -> BufferState*!:
+        try check_thread()
+        return self.state else error(closed, "the GPU buffer is closed")
+
+struct BufferState:
+    let device: DeviceState*
+    let native: void*
+    var references: usize
+    let bytes: usize
+    let memory_kind: Memory
+    ## A shared buffer's mapping.
+    var data: u8*?
+
+func check_buffer_size(device: DeviceState*, bytes: u64) -> !:
+    if bytes < 4 or bytes % 4 != 0 or bytes > device.limits.buffer_bytes:
+        error(invalid_geometry, "a GPU buffer holds a multiple of four bytes, from 4 to the device's limits().buffer_bytes")
+
+func check_buffer_range(state: BufferState*, offset: usize, length: usize) -> !:
+    if offset % 4 != 0 or length % 4 != 0 or offset > state.bytes or length > state.bytes - offset:
+        error(invalid_geometry, "a buffer range must be four-byte aligned and inside the buffer")
+
+func adopt_buffer(owner: DeviceState*, native: void*, bytes: usize, memory_kind: Memory) -> Buffer!:
+    errdefer owner.destroy_buffer(owner.native, native)
+    let state = try new BufferState(device = owner, native = native, references = 1, bytes = bytes, memory_kind = memory_kind) in memory.heap
+    if memory_kind == Memory.shared:
+        state.data = backend_buffer_contents(owner, native)
+    owner.references += 1
+    return Buffer(state)
+
+func release_buffer(state: BufferState*):
+    state.references -= 1
+    if state.references == 0:
+        state.device.destroy_buffer(state.device.native, state.native)
+        release_device(state.device)
+        free(state) in memory.heap
+
+# mark: Dispatch ==============================================================================
+
+func backend_buffer_create(device: DeviceState*, data: const u8[]) -> void*!:
+    if (platform.windows or platform.linux) and device.backend == Backend.vulkan:
+        return (void*)try vulkan_buffer_create((VulkanDevice*)device.native, data)
+    if platform.macos and platform.arm64:
+        return try metal_buffer_create((MetalDevice*)device.native, data)
+    error(unsupported, "GPU buffers are unavailable on this backend")
+
+func backend_buffer_allocate(device: DeviceState*, bytes: usize, memory_kind: Memory) -> void*!:
+    if (platform.windows or platform.linux) and device.backend == Backend.vulkan:
+        return (void*)try vulkan_buffer_allocate((VulkanDevice*)device.native, bytes, memory_kind)
+    if platform.macos and platform.arm64:
+        return try metal_buffer_allocate((MetalDevice*)device.native, bytes, memory_kind)
+    error(unsupported, "GPU buffers are unavailable on this backend")
+
+func backend_buffer_contents(device: DeviceState*, native: void*) -> u8*?:
+    if (platform.windows or platform.linux) and device.backend == Backend.vulkan:
+        return vulkan_buffer_contents((VulkanBuffer*)native)
+    if platform.macos and platform.arm64:
+        return metal_buffer_contents(native)
+    return none
+
+func backend_buffer_upload(device: DeviceState*, native: void*, offset: usize, data: const u8[]) -> !:
+    if (platform.windows or platform.linux) and device.backend == Backend.vulkan:
+        try vulkan_buffer_upload((VulkanDevice*)device.native, (VulkanBuffer*)native, offset, data)
+        return
+    if platform.macos and platform.arm64:
+        try metal_buffer_upload((MetalDevice*)device.native, native, offset, data)
+        return
+    error(unsupported, "GPU buffers are unavailable on this backend")
+
+func backend_buffer_destroyer(backend: Backend) -> func(void*, void*) -> unit:
+    if (platform.windows or platform.linux) and backend == Backend.vulkan: return vulkan_buffer_release
+    if platform.macos and platform.arm64 and backend == Backend.metal: return metal_buffer_release
+    trap("GPU buffers are unavailable on this backend")

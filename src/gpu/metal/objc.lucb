@@ -24,6 +24,21 @@ extern struct LuceGpuMetalScissor:
     width: u64
     height: u64
 
+extern struct LuceGpuMetalOrigin:
+    x: u64
+    y: u64
+    z: u64
+
+extern struct LuceGpuMetalExtent:
+    width: u64
+    height: u64
+    depth: u64
+
+## NSRange.
+extern struct LuceGpuMetalRange:
+    location: u64
+    length: u64
+
 extern struct LuceGpuMetalViewport:
     x: f64
     y: f64

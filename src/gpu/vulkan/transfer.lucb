@@ -88,7 +88,7 @@ func vulkan_read_acquire(device: VulkanDevice*) -> ReadSlot!:
 ## interleaved rows) are writes to the same range as far as Vulkan's hazard rules
 ## go, so a transfer-to-transfer barrier on the slot separates such a copy from
 ## the earlier ones it overlaps. Packed batches never overlap and get none.
-func vulkan_read_submit(device: VulkanDevice*, index: usize, entries: const ReadEntry[]) -> ReadTicket!:
+func vulkan_read_submit(device: VulkanDevice*, index: usize, entries: const ReadEntry[]) -> Ticket!:
     let ring = &device.reads[index]
     let slot = try vulkan_begin(device)
     # The copies recorded since the last barrier start here.
@@ -100,7 +100,11 @@ func vulkan_read_submit(device: VulkanDevice*, index: usize, entries: const Read
                 vulkan_ring_write_barrier(slot.command, ring.buffer)
                 since = position
                 break
-        let texture = (VulkanTexture*)entry.texture.native
+        if let buffer = entry.buffer:
+            var range = VkBufferCopy(srcOffset = (u64)entry.source_offset, dstOffset = (u64)entry.offset, size = (u64)entry.bytes)
+            vkCmdCopyBuffer(slot.command, ((VulkanBuffer*)buffer.native).buffer, ring.buffer, 1, &range)
+            continue
+        let texture = vulkan_entry_texture(entry)
         vulkan_transition(slot.command, texture, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL)
         var copy = vulkan_copy_region(entry.region)
         copy.bufferOffset = (u64)entry.offset
@@ -108,12 +112,18 @@ func vulkan_read_submit(device: VulkanDevice*, index: usize, entries: const Read
         vkCmdCopyImageToBuffer(slot.command, texture.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, ring.buffer, 1, &copy)
     # Back to sampling, once per image however many regions it gave.
     for entry in entries:
-        vulkan_transition(slot.command, (VulkanTexture*)entry.texture.native, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+        if entry.texture != none: vulkan_transition(slot.command, vulkan_entry_texture(entry), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
     let serial = try vulkan_end(device, slot)
     for entry in entries:
-        ((VulkanTexture*)entry.texture.native).last_use = serial
+        if let buffer = entry.buffer: ((VulkanBuffer*)buffer.native).last_use = serial
+        if entry.texture != none: vulkan_entry_texture(entry).last_use = serial
     ring.serial = serial
-    return ReadTicket(serial = serial)
+    return Ticket(serial = serial)
+
+## The image a texture read copies from.
+func vulkan_entry_texture(entry: ReadEntry) -> VulkanTexture*:
+    let texture = entry.texture else trap("a Vulkan texture read has no texture")
+    return (VulkanTexture*)texture.native
 
 ## Order earlier transfer writes to `buffer` before later ones.
 func vulkan_ring_write_barrier(command: u64, buffer: u64):

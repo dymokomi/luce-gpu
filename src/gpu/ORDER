@@ -4,6 +4,7 @@ geometry.lucb
 geometry_shaders.lucb
 mesh.lucb
 mesh_shaders.lucb
+buffer.lucb
 params.lucb
 canvas.lucb
 mask.lucb
@@ -14,6 +15,8 @@ readback.lucb
 upload.lucb
 shader.lucb
 shaders.lucb
+compute.lucb
+compute_shaders.lucb
 backend.lucb
 presentation.lucb
 resources.lucb
@@ -22,6 +25,8 @@ metal/device.lucb
 metal/drawing.lucb
 metal/geometry.lucb
 metal/mesh.lucb
+metal/buffer.lucb
+metal/compute.lucb
 metal/texture.lucb
 metal/transfer.lucb
 metal/surface.lucb
@@ -33,6 +38,7 @@ vulkan/presentation/x11.lucb
 vulkan/device.lucb
 vulkan/geometry.lucb
 vulkan/mesh.lucb
+vulkan/compute.lucb
 vulkan/texture.lucb
 vulkan/transfer.lucb
 vulkan/shader.lucb

@@ -14,16 +14,6 @@ struct MetalTexture:
     var height: u32
     var format: Format
 
-extern struct LuceGpuMetalOrigin:
-    x: u64
-    y: u64
-    z: u64
-
-extern struct LuceGpuMetalExtent:
-    width: u64
-    height: u64
-    depth: u64
-
 extern func metal_copy_to_texture as "objc_msgSend"(object: void*, selector: void*, buffer: void*, offset: u64, bytes_per_row: u64, bytes_per_image: u64,
                                                     size: LuceGpuMetalExtent, texture: void*, slice: u64, level: u64, origin: LuceGpuMetalOrigin)
 extern func metal_copy_from_texture as "objc_msgSend"(object: void*, selector: void*, texture: void*, slice: u64, level: u64, origin: LuceGpuMetalOrigin,

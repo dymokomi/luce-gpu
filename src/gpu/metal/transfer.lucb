@@ -42,14 +42,19 @@ func metal_read_acquire(device: MetalDevice*) -> ReadSlot!:
 
 ## Blit every region of a batch into slot `index` in one command buffer, and
 ## commit it; the ticket holds the command buffer until it is waited for.
-func metal_read_submit(device: MetalDevice*, index: usize, entries: const ReadEntry[]) -> ReadTicket!:
+func metal_read_submit(device: MetalDevice*, index: usize, entries: const ReadEntry[]) -> Ticket!:
     let pool = objc_autoreleasePoolPush()
     defer objc_autoreleasePoolPop(pool)
     let ring = &device.reads[index]
     let command = metal_ptr(metal_required(device.queue), metal_sel("commandBuffer")) else error(failed, "could not create a Metal command buffer")
     let blit = metal_ptr(command, metal_sel("blitCommandEncoder")) else error(failed, "could not create a Metal blit encoder")
     for entry in entries:
-        let texture = (MetalTexture*)entry.texture.native
+        if let buffer = entry.buffer:
+            metal_copy_buffer(blit, metal_sel("copyFromBuffer:sourceOffset:toBuffer:destinationOffset:size:"), buffer.native, (u64)entry.source_offset,
+                              metal_required(ring.buffer), (u64)entry.offset, (u64)entry.bytes)
+            continue
+        let source = entry.texture else trap("a read entry has no source")
+        let texture = (MetalTexture*)source.native
         let texel = (u64)texel_bytes(texture.format)
         let row = (u64)(entry.row_texels if entry.row_texels > 0 else entry.region.width) * texel
         metal_copy_from_texture(blit, metal_sel("copyFromTexture:sourceSlice:sourceLevel:sourceOrigin:sourceSize:toBuffer:destinationOffset:destinationBytesPerRow:destinationBytesPerImage:"),
@@ -60,10 +65,10 @@ func metal_read_submit(device: MetalDevice*, index: usize, entries: const ReadEn
     # Kept past the pool: the wait needs it.
     metal_void(command, metal_sel("retain"))
     metal_void(command, metal_sel("commit"))
-    return ReadTicket(command = command)
+    return Ticket(command = command)
 
 ## Wait for a batch's command buffer and let it go, reporting execution failure.
-func metal_read_wait(ticket: ReadTicket) -> !:
+func metal_read_wait(ticket: Ticket) -> !:
     let command = ticket.command else return
     let pool = objc_autoreleasePoolPush()
     defer objc_autoreleasePoolPop(pool)
@@ -75,13 +80,13 @@ func metal_read_wait(ticket: ReadTicket) -> !:
 
 ## Whether a batch's command buffer has finished, completed or failed
 ## (MTLCommandBufferStatus 4 or 5), without waiting.
-func metal_read_ready(ticket: ReadTicket) -> bool:
+func metal_read_ready(ticket: Ticket) -> bool:
     let command = ticket.command else return true
     return metal_uint(command, metal_sel("status")) >= 4
 
 ## Give slot `index` back; a batch still on the GPU is waited for first, so the
 ## next one never shares its bytes.
-func metal_read_release(device: MetalDevice*, index: usize, ticket: ReadTicket, pending: bool):
+func metal_read_release(device: MetalDevice*, index: usize, ticket: Ticket, pending: bool):
     if pending:
         metal_read_wait(ticket) catch failure:
             _ = failure

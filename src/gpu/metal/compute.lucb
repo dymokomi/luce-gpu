@@ -1,0 +1,184 @@
+#==============================================================================================
+#
+#   compute - Metal compute pipelines and passes
+#
+#   DESCRIPTION:
+#       A kernel is a compute pipeline state made from its Metal source's `luce_compute`, plus
+#       the workgroup size Metal takes at each dispatch. A pass is one command buffer: runs of
+#       dispatches share a serial compute encoder, runs of copies and fills a blit encoder.
+#       Buffers are hazard-tracked, so each dispatch sees what earlier ones wrote and every
+#       later command buffer on the queue sees the results; the command buffer retains what it
+#       binds, so handles may be destroyed once their commands are recorded.
+#
+#==============================================================================================
+
+## The Metal buffer index of a kernel's push constants (embed_shaders.py moves
+## them there, clear of storage buffers 0..15).
+let metal_uniform_index: u64 = 30
+# MTLGPUFamilyMetal3: atomic_float on device memory.
+let metal_family_metal3: u64 = 5001
+
+struct MetalKernel:
+    var pipeline: void*?
+    var group: u32[3]
+
+## Device-level compute state: the built-in fill kernel, made on first use.
+struct MetalCompute:
+    var fill: MetalKernel*?
+
+func metal_limits(device: MetalDevice*) -> Limits:
+    let native = device.device else return Limits()
+    let float_atomics = (metal_uint_with(native, metal_sel("supportsFamily:"), metal_family_metal3) & 0xff) != 0
+    # Every Apple-silicon GPU allows 1024 threads per threadgroup in each
+    # dimension and in all (the Metal feature set tables); a kernel's own
+    # pipeline may allow fewer, which Kernel.create checks.
+    return Limits(buffer_bytes = metal_uint(native, metal_sel("maxBufferLength")), group_threads = 1024,
+                  group_size = [1024, 1024, 1024], group_count = [0xffffffffu32, 0xffffffffu32, 0xffffffffu32],
+                  shared_bytes = (u32)metal_uint(native, metal_sel("maxThreadgroupMemoryLength")), float_atomic_add = float_atomics)
+
+func metal_kernel_create(device: MetalDevice*, msl: c.str, group: u32[3]) -> void*!:
+    let pool = objc_autoreleasePoolPush()
+    defer objc_autoreleasePoolPop(pool)
+    let native = metal_required(device.device)
+    let library = try metal_compile(native, msl)
+    defer metal_void(library, metal_sel("release"))
+    let function = metal_with_object(library, metal_sel("newFunctionWithName:"), try metal_text("luce_compute")) else error(invalid_shader, "the compute shader has no luce_compute entry")
+    defer metal_void(function, metal_sel("release"))
+    var failure: void*? = none
+    let pipeline = metal_pipeline(native, metal_sel("newComputePipelineStateWithFunction:error:"), function, &failure) else error(invalid_shader, "could not build a Metal compute pipeline")
+    errdefer metal_void(pipeline, metal_sel("release"))
+    if (u64)group[0] * (u64)group[1] * (u64)group[2] > metal_uint(pipeline, metal_sel("maxTotalThreadsPerThreadgroup")):
+        error(invalid_shader, "the kernel's workgroup is larger than its Metal pipeline allows")
+    return (void*)try new MetalKernel(pipeline = pipeline, group = group) in memory.heap
+
+func metal_kernel_release(device: void*, native: void*):
+    _ = device
+    metal_kernel_destroy((MetalKernel*)native)
+
+func metal_kernel_destroy(kernel: MetalKernel*):
+    if let pipeline = kernel.pipeline:
+        metal_void(pipeline, metal_sel("release"))
+    free(kernel) in memory.heap
+
+func metal_compute_destroy(device: MetalDevice*):
+    let compute = device.compute else return
+    if let fill = compute.fill:
+        metal_kernel_destroy(fill)
+    free(compute) in memory.heap
+    device.compute = none
+
+## The built-in kernel writing 32-bit words (shaders/fill.comp).
+func metal_fill_kernel(device: MetalDevice*) -> MetalKernel*!:
+    if device.compute == none:
+        device.compute = try new MetalCompute() in memory.heap
+    let compute = metal_required_compute(device)
+    if let fill = compute.fill:
+        return fill
+    let fill = (MetalKernel*)try metal_kernel_create(device, fill_comp_msl, fill_comp_group)
+    compute.fill = fill
+    return fill
+
+func metal_required_compute(device: MetalDevice*) -> MetalCompute*:
+    return device.compute else trap("Metal compute state is missing")
+
+## The encoder a run of commands records into: dispatches into a compute
+## encoder, copies and fills into a blit encoder, one open at a time.
+struct MetalEncoding:
+    var command: void*
+    var encoder: void*?
+    var blit: bool
+
+    func compute() -> void*!:
+        if let encoder = self.encoder:
+            if not self.blit: return encoder
+            self.end()
+        let encoder = metal_ptr(self.command, metal_sel("computeCommandEncoder")) else error(failed, "could not create a Metal compute encoder")
+        self.encoder = encoder
+        self.blit = false
+        return encoder
+
+    func transfer() -> void*!:
+        if let encoder = self.encoder:
+            if self.blit: return encoder
+            self.end()
+        let encoder = metal_ptr(self.command, metal_sel("blitCommandEncoder")) else error(failed, "could not create a Metal blit encoder")
+        self.encoder = encoder
+        self.blit = true
+        return encoder
+
+    func end():
+        if let encoder = self.encoder:
+            metal_void(encoder, metal_sel("endEncoding"))
+        self.encoder = none
+
+## Encode `commands` into one command buffer and commit it; the ticket holds
+## the command buffer until it is waited for or dropped.
+func metal_compute_submit(device: MetalDevice*, commands: const ComputeCommand[]) -> Ticket!:
+    let pool = objc_autoreleasePoolPush()
+    defer objc_autoreleasePoolPop(pool)
+    let command = metal_ptr(metal_required(device.queue), metal_sel("commandBuffer")) else error(failed, "could not create a Metal command buffer")
+    var encoding = MetalEncoding(command = command)
+    for index in 0..<commands.length:
+        let recorded = &commands[index]
+        if recorded.kind == command_copy:
+            let origin = recorded.buffer else trap("a copy lost its source")
+            let goal = recorded.target else trap("a copy lost its destination")
+            metal_copy_buffer(try encoding.transfer(), metal_sel("copyFromBuffer:sourceOffset:toBuffer:destinationOffset:size:"), origin.native, (u64)recorded.offset, goal.native, (u64)recorded.target_offset, (u64)recorded.bytes)
+        elif recorded.kind == command_fill:
+            try metal_encode_fill(device, &encoding, recorded)
+        else:
+            let kernel = recorded.kernel else trap("a dispatch lost its kernel")
+            let encoder = try encoding.compute()
+            metal_encode_bindings(encoder, (MetalKernel*)kernel.native, recorded)
+            let group = metal_group((MetalKernel*)kernel.native)
+            if recorded.kind == command_indirect:
+                let arguments = recorded.buffer else trap("an indirect dispatch lost its arguments")
+                metal_dispatch_indirect(encoder, metal_sel("dispatchThreadgroupsWithIndirectBuffer:indirectBufferOffset:threadsPerThreadgroup:"), arguments.native, (u64)recorded.offset, group)
+            else:
+                metal_dispatch(encoder, metal_sel("dispatchThreadgroups:threadsPerThreadgroup:"),
+                               LuceGpuMetalExtent((u64)recorded.groups[0], (u64)recorded.groups[1], (u64)recorded.groups[2]), group)
+    encoding.end()
+    # Kept past the pool: the ticket waits on it.
+    metal_void(command, metal_sel("retain"))
+    metal_void(command, metal_sel("commit"))
+    return Ticket(command = command)
+
+func metal_group(kernel: MetalKernel*) -> LuceGpuMetalExtent:
+    return LuceGpuMetalExtent((u64)kernel.group[0], (u64)kernel.group[1], (u64)kernel.group[2])
+
+## Bind a dispatch's pipeline, buffers and its 128 uniform bytes (the block
+## may be padded past the bytes given, so Metal sees all of it).
+func metal_encode_bindings(encoder: void*, kernel: MetalKernel*, recorded: const ComputeCommand*):
+    metal_object(encoder, metal_sel("setComputePipelineState:"), metal_required(kernel.pipeline))
+    for index in 0..<binding_limit:
+        if let buffer = recorded.buffers[index]:
+            metal_bind_buffer(encoder, metal_sel("setBuffer:offset:atIndex:"), buffer.native, 0, (u64)index)
+    var uniforms = recorded.uniforms
+    metal_inline_bytes(encoder, metal_sel("setBytes:length:atIndex:"), &uniforms, (u64)uniform_limit, metal_uniform_index)
+
+## A fill: a blit when the value's four bytes are equal (Metal fills bytes),
+## otherwise the built-in word kernel, in runs of at most 2^30 words.
+func metal_encode_fill(device: MetalDevice*, encoding: MetalEncoding*, recorded: const ComputeCommand*) -> !:
+    let target = recorded.buffer else trap("a fill lost its buffer")
+    let value = recorded.value
+    let low = (u8)(value & 0xff)
+    if value == (u32)low * 0x01010101u32:
+        metal_fill_buffer(try encoding.transfer(), metal_sel("fillBuffer:range:value:"), target.native, LuceGpuMetalRange((u64)recorded.offset, (u64)recorded.bytes), (u64)low)
+        return
+    let kernel = try metal_fill_kernel(device)
+    let encoder = try encoding.compute()
+    metal_object(encoder, metal_sel("setComputePipelineState:"), metal_required(kernel.pipeline))
+    let run: usize = 1 << 30
+    var done: usize = 0
+    let words = recorded.bytes // 4
+    while done < words:
+        let count = run if words - done > run else words - done
+        metal_bind_buffer(encoder, metal_sel("setBuffer:offset:atIndex:"), target.native, (u64)(recorded.offset + done * 4), 0)
+        var uniforms: u32[3] = [0, (u32)count, value]
+        metal_inline_bytes(encoder, metal_sel("setBytes:length:atIndex:"), &uniforms, 12, metal_uniform_index)
+        metal_dispatch(encoder, metal_sel("dispatchThreadgroups:threadsPerThreadgroup:"), LuceGpuMetalExtent((u64)((count + 63) // 64), 1, 1), metal_group(kernel))
+        done += count
+
+extern func metal_uint_with as "objc_msgSend"(object: void*, selector: void*, value: u64) -> u64
+extern func metal_dispatch as "objc_msgSend"(object: void*, selector: void*, grid: LuceGpuMetalExtent, size: LuceGpuMetalExtent)
+extern func metal_dispatch_indirect as "objc_msgSend"(object: void*, selector: void*, arguments: void*, offset: u64, size: LuceGpuMetalExtent)

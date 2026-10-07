@@ -1,73 +1,15 @@
 #==============================================================================================
 #
-#   mesh - Device buffers and indexed mesh drawing
+#   mesh - Indexed mesh drawing
 #
 #   DESCRIPTION:
-#       A Buffer is device storage a program fills and later rewrites in part: a mesh's
-#       positions, topology, normals or colors. A mesh draw pulls its vertices from up to
-#       seven buffers (shaders/mesh.glsl), so a changed position array redraws after one
-#       upload with no per-vertex CPU work. The same buffers draw surfaces, constant-width
+#       A mesh draw pulls its vertices from up to seven buffers (buffer.lucb, shaders/mesh.glsl):
+#       a mesh's positions, topology, normals or colors, so a changed position array redraws
+#       after one upload with no per-vertex CPU work. The same buffers draw surfaces, constant-width
 #       wires and face ids for picking; the shading (Lambert, flat, zebra, isophotes, normals)
 #       is a parameter, so switching it re-uploads nothing.
 #
 #==============================================================================================
-
-# mark: Buffers ================================================================================
-## The most bytes one buffer holds: Vulkan's guaranteed storage-buffer range.
-pub let buffer_limit: usize = 134217728
-
-## Device storage. Copies alias ownership; one owner destroys it on the main
-## thread. Recorded draws keep it alive until their frame finishes.
-pub struct Buffer:
-    var state: BufferState*?
-
-    ## A buffer holding `data` (at least 4 bytes, at most `buffer_limit`).
-    pub static func create(device: Device, data: const u8[]) -> Buffer!:
-        let owner = try device.checked()
-        if data.length < 4 or data.length > buffer_limit or data.length % 4 != 0:
-            error(invalid_geometry, "a GPU buffer holds 4 to 134217728 bytes, a multiple of four")
-        let native = try backend_buffer_create(owner, data)
-        errdefer owner.destroy_buffer(owner.native, native)
-        let state = try new BufferState(owner, native, 1, data.length) in memory.heap
-        owner.references += 1
-        return Buffer(state)
-
-    ## Replace `data.length` bytes at `offset`. Draws recorded before this call
-    ## see the old contents and later ones the new: the copy is ordered on the
-    ## device's queue, so nothing waits for work in flight.
-    pub func upload(offset: usize, data: const u8[]) -> !:
-        try check_thread()
-        let state = self.state else error(closed, "the GPU buffer is closed")
-        if offset % 4 != 0 or data.length % 4 != 0 or offset > state.bytes or data.length > state.bytes - offset:
-            error(invalid_geometry, "a buffer upload must be four-byte aligned and inside the buffer")
-        if data.length == 0: return
-        try backend_buffer_upload(state.device, state.native, offset, data)
-
-    pub func bytes() -> usize:
-        let state = self.state else return 0
-        return state.bytes
-
-    pub func is_open() -> bool:
-        return self.state != none
-
-    pub func destroy():
-        if let state = self.state:
-            require_thread()
-            self.state = none
-            release_buffer(state)
-
-struct BufferState:
-    let device: DeviceState*
-    let native: void*
-    var references: usize
-    let bytes: usize
-
-func release_buffer(state: BufferState*):
-    state.references -= 1
-    if state.references == 0:
-        state.device.destroy_buffer(state.device.native, state.native)
-        release_device(state.device)
-        free(state) in memory.heap
 
 # mark: Mesh draws =============================================================================
 ## What a mesh draw produces: shaded surfaces, wires between point pairs, or
@@ -184,24 +126,3 @@ pub func draw_mesh(target: const RenderTarget*, buffers: const MeshBuffers*, ver
     target.frame.canvas.mesh(draw, target.clipping, region, vertices, (f32)depth_slope) catch failure:
         release_mesh_draw(draw)
         error(failure.code, failure.message)
-
-func backend_buffer_create(device: DeviceState*, data: const u8[]) -> void*!:
-    if (platform.windows or platform.linux) and device.backend == Backend.vulkan:
-        return (void*)try vulkan_buffer_create((VulkanDevice*)device.native, data)
-    if platform.macos and platform.arm64:
-        return try metal_buffer_create((MetalDevice*)device.native, data)
-    error(unsupported, "GPU buffers are unavailable on this backend")
-
-func backend_buffer_upload(device: DeviceState*, native: void*, offset: usize, data: const u8[]) -> !:
-    if (platform.windows or platform.linux) and device.backend == Backend.vulkan:
-        try vulkan_buffer_upload((VulkanDevice*)device.native, (VulkanBuffer*)native, offset, data)
-        return
-    if platform.macos and platform.arm64:
-        try metal_buffer_upload((MetalDevice*)device.native, native, offset, data)
-        return
-    error(unsupported, "GPU buffers are unavailable on this backend")
-
-func backend_buffer_destroyer(backend: Backend) -> func(void*, void*) -> unit:
-    if (platform.windows or platform.linux) and backend == Backend.vulkan: return vulkan_buffer_release
-    if platform.macos and platform.arm64 and backend == Backend.metal: return metal_buffer_release
-    trap("GPU buffers are unavailable on this backend")

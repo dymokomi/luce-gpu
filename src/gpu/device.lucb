@@ -21,7 +21,8 @@ pub struct Device:
         let native = try backend_device_open(selected)
         errdefer backend_device_destroy(selected, native)
         let state = try new DeviceState(backend = selected, native = native, references = 1, destroy_texture = backend_texture_destroyer(selected), destroy_shader = backend_shader_destroyer(selected),
-                                        destroy_pipeline = backend_pipeline_destroyer(selected), destroy_geometry = backend_geometry_destroyer(selected), destroy_buffer = backend_buffer_destroyer(selected), destroy_device = backend_device_destroy) in memory.heap
+                                        destroy_pipeline = backend_pipeline_destroyer(selected), destroy_geometry = backend_geometry_destroyer(selected), destroy_buffer = backend_buffer_destroyer(selected), destroy_kernel = backend_kernel_destroyer(selected),
+                                        destroy_device = backend_device_destroy, limits = backend_limits(selected, native)) in memory.heap
         return Device(state = state)
 
     ## Whether this handle still owns a device (the zero value is closed).
@@ -52,6 +53,11 @@ pub struct Device:
         let state = try self.checked()
         return backend_memory(state)
 
+    ## What the device can do: buffer sizes, compute group sizes and counts,
+    ## and optional features such as float atomics.
+    pub func limits() -> Limits!:
+        return (try self.checked()).limits
+
     ## Whether `other` is the same device.
     pub func same(other: const Device*) -> bool:
         return self.state != none and self.state == other.state
@@ -77,6 +83,23 @@ pub struct DeviceMemory:
     pub var used: u64 = 0
     pub var unified: bool = false
 
+## A device's limits and optional features, as its backend reports them.
+pub struct Limits:
+    ## The most bytes one buffer holds (Metal's maxBufferLength; Vulkan's
+    ## maxStorageBufferRange, capped by the largest single allocation).
+    pub var buffer_bytes: u64 = 0
+    ## The most invocations one compute workgroup holds, in all.
+    pub var group_threads: u32 = 0
+    ## The largest workgroup size in each dimension.
+    pub var group_size: u32[3]
+    ## The most workgroups one dispatch launches in each dimension.
+    pub var group_count: u32[3]
+    ## The bytes of workgroup-shared memory (GLSL `shared`) a kernel may use.
+    pub var shared_bytes: u32 = 0
+    ## Whether kernels may add to 32-bit floats atomically in storage buffers
+    ## (GL_EXT_shader_atomic_float's atomicAdd).
+    pub var float_atomic_add: bool = false
+
 struct DeviceState:
     var backend: Backend
     var native: void*
@@ -90,7 +113,9 @@ struct DeviceState:
     var destroy_pipeline: func(void*, void*) -> unit
     var destroy_geometry: func(void*, void*) -> unit
     var destroy_buffer: func(void*, void*) -> unit
+    var destroy_kernel: func(void*, void*) -> unit
     var destroy_device: func(Backend, void*) -> unit
+    var limits: Limits
 
 func release_device(state: DeviceState*):
     state.references -= 1

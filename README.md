@@ -1,6 +1,6 @@
 # luce-gpu
 
-GPU devices, textures, shaders, masks and frames, presenting to luce-window windows. Shaders are GLSL compiled ahead of time and embedded (`tools/embed_shaders.py`); the Vulkan bindings are generated from the Khronos headers (`tools/generate_vulkan.py`).
+GPU devices, textures, shaders, compute kernels, masks and frames, presenting to luce-window windows. Shaders are GLSL compiled ahead of time and embedded (`tools/embed_shaders.py`); the Vulkan bindings are generated from the Khronos headers (`tools/generate_vulkan.py`).
 
 ## Modules
 
