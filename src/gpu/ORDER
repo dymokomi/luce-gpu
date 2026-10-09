@@ -5,6 +5,8 @@ geometry.lucb
 geometry_shaders.lucb
 mesh.lucb
 mesh_shaders.lucb
+quads.lucb
+quad_shaders.lucb
 buffer.lucb
 params.lucb
 canvas.lucb

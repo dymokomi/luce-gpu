@@ -1,0 +1,126 @@
+#==============================================================================================
+#
+#   quads - Instanced quads read from GPU buffers
+#
+#   DESCRIPTION:
+#       shade_quads draws one quad per instance with a client pipeline, its records pulled
+#       from a buffer (shaders/quads.vert) that a compute pass may have just written, in the
+#       order an index buffer gives, as many as a count the GPU wrote: Gaussian splats sorted
+#       by depth, particles and billboards, without a round trip through the CPU.
+#
+#==============================================================================================
+
+# mark: Quads ==================================================================================
+## The vertices one quad takes (a triangle strip): the first of the four u32
+## indirect arguments `Quads.arguments` holds.
+pub let quad_vertex_count: u32 = 4
+
+## The four u32 indirect arguments that draw `count` quads, as `Quads.arguments`
+## holds them (Vulkan's VkDrawIndirectCommand, Metal's
+## MTLDrawPrimitivesIndirectArguments): 4 vertices, `count` instances, 0, 0.
+pub func quad_arguments(count: u32) -> u32[4]:
+    return [quad_vertex_count, count, 0, 0]
+
+## What `shade_quads` draws. Record r of `records` is `2 + data` vec4s (16
+## bytes each) from r * (2 + data) * 16 bytes: the quad's clip-space center
+## (x, y, z, w; y up, as `Vertex` positions are), its two half axes in clip
+## units (a.x, a.y, b.x, b.y, already multiplied by w), then `data` vec4s its
+## fragments read flat at locations 1.. (0..3 of them). Corner (u, v), u and v
+## in -1..1, lies at center + u·a + v·b. Unused buffers stay closed.
+pub struct Quads:
+    ## The records.
+    pub var records: Buffer
+    ## The vec4s of fragment data per record, 0..3.
+    pub var data: usize
+    ## u32 record indices: quad i draws record order[i] (Gaussian splats in
+    ## sorted order). Closed: quad i draws record i.
+    pub var order: Buffer
+    ## Four u32 indirect arguments at `arguments_offset` (quad_arguments):
+    ## the quad count a compute pass wrote. Closed: `count` quads are drawn.
+    pub var arguments: Buffer
+    pub var arguments_offset: usize
+    ## The quads to draw without `arguments`.
+    pub var count: usize
+
+## A recorded quad draw: its retained buffers, the vertex stage's parameters
+## (stride, data, ordered, clip-space Y sign) and, without arguments, its count.
+struct QuadDraw:
+    var records: BufferState*
+    var order: BufferState*?
+    var arguments: BufferState*?
+    var arguments_offset: usize
+    var count: usize
+    var control: f32[4]
+
+func release_quad_draw(draw: QuadDraw*):
+    release_buffer(draw.records)
+    if let order = draw.order: release_buffer(order)
+    if let arguments = draw.arguments: release_buffer(arguments)
+    free(draw) in memory.heap
+
+## Draw instanced quads on `target` with a client `pipeline`, their records in
+## GPU buffers (see `Quads`): `uniforms` fill its push-constant block, `images`
+## its sampled bindings 1.. with `filter`. Each fragment gets the corner's
+## quad coordinates (u, v, 0, 1), interpolated, at location 0 and its record's
+## data flat at locations 1..3 (zero past `data`). Quads draw in instance
+## order, mapped onto the target as `RenderTarget.triangles` maps clip space,
+## clipped like every draw; one call is one draw against the frame's draw
+## limit. A pipeline made with `depth_test` hides quads behind nearer depth and
+## writes none (splats over and behind meshes). Records, order and arguments
+## are read when the frame runs: a compute pass submitted before the frame
+## presents may write them. The GPU must keep the count and indices inside the
+## buffers; with `arguments` the CPU cannot check them. A standalone frame
+## draws nothing.
+pub func shade_quads(target: const RenderTarget*, pipeline: Pipeline, quads: const Quads*, uniforms: const u8[]? = none,
+                     images: const Texture[]? = none, filter: Filter = Filter.linear) -> !:
+    try target.frame.check()
+    let state = try pipeline.checked()
+    var sampled: TextureState*?[4]
+    var count: usize = 0
+    if let list = images:
+        for image in list:
+            if count == image_limit:
+                error(invalid_geometry, "a draw samples at most 4 images")
+            sampled[count] = try image.checked()
+            count += 1
+    var bytes: u8[128]
+    var byte_count: usize = 0
+    if let data = uniforms:
+        if data.length > uniform_limit:
+            error(invalid_geometry, "a draw carries at most 128 uniform bytes")
+        memory.copy(bytes[..<data.length], data, data.length)
+        byte_count = data.length
+    let records = quads.records.state else error(invalid_geometry, "shade_quads needs its records buffer")
+    if quads.data > 3:
+        error(invalid_geometry, "a quad record carries at most 3 vec4s of fragment data")
+    let stride = 2 + quads.data
+    if records.bytes < stride * 16:
+        error(invalid_geometry, "a quad records buffer holds at least one record")
+    let device = target.frame.device else return
+    for handle in [quads.records, quads.order, quads.arguments]:
+        if let buffer = handle.state:
+            if buffer.device != device: error(wrong_device, "a quad buffer belongs to another device")
+    if let arguments = quads.arguments.state:
+        if quads.arguments_offset % 4 != 0 or quads.arguments_offset > arguments.bytes or arguments.bytes - quads.arguments_offset < 16:
+            error(invalid_geometry, "quad arguments are four u32s, four-byte aligned, inside their buffer")
+    else:
+        if quads.count == 0: return
+        if quads.count > records.bytes // (stride * 16) and quads.order.state == none:
+            error(invalid_geometry, "more quads than the records buffer holds")
+        if let order = quads.order.state:
+            if quads.count > order.bytes // 4: error(invalid_geometry, "more quads than the order buffer holds")
+        if quads.count > 4294967295: error(invalid_geometry, "a quad draw holds at most 2^32 - 1 quads")
+    let size = try target.size()
+    if size.width <= 0.0 or size.height <= 0.0: return
+    let scale_x = frame_scale(target.frame.size.pixel_width, target.frame.size.width)
+    let scale_y = frame_scale(target.frame.size.pixel_height, target.frame.size.height)
+    let viewport = Viewport(target.rectangle.x * scale_x, target.rectangle.y * scale_y, size.pixel_width, size.pixel_height)
+    let draw = try new QuadDraw(records = records, order = quads.order.state, arguments = quads.arguments.state, arguments_offset = quads.arguments_offset,
+                                count = quads.count, control = [(f32)stride, (f32)quads.data, 1.0 if quads.order.state != none else 0.0,
+                                                                -1.0 if device.backend == Backend.vulkan else 1.0]) in memory.heap
+    records.references += 1
+    if let order = draw.order: order.references += 1
+    if let arguments = draw.arguments: arguments.references += 1
+    target.frame.canvas.quads(draw, state, bytes[..<byte_count], sampled[..<count], filter, target.clipping, viewport) catch failure:
+        release_quad_draw(draw)
+        error(failure.code, failure.message)

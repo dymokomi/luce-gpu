@@ -14,7 +14,8 @@ struct VulkanShader:
 
 struct VulkanPipelineEntry:
     var format: u32
-    var instanced: bool
+    # The vertex stage (client_variant): 0 ordinary, 1 instanced, 2 quads.
+    var variant: usize
     var pipeline: u64
 
 struct VulkanPipeline:
@@ -23,7 +24,7 @@ struct VulkanPipeline:
     var format: Format?
     # Depth tested without writing depth (Pipeline.create's depth_test).
     var depth_test: bool
-    var entries: VulkanPipelineEntry[12]
+    var entries: VulkanPipelineEntry[18]
     var count: usize
 
 func vulkan_shader_create(device: VulkanDevice*, spirv: const u32[]) -> VulkanShader*!:
@@ -53,15 +54,16 @@ func vulkan_pipeline_destroy(device: VulkanDevice*, state: VulkanPipeline*):
     free(state) in memory.heap
 
 ## The client pipeline compiled for color attachments of `format`, for
-## ordinary or for instanced draws.
-func vulkan_pipeline_for(device: VulkanDevice*, state: VulkanPipeline*, pixel_format: u32, instanced: bool = false) -> u64!:
+## for the vertex stage `variant` (client_variant).
+func vulkan_pipeline_for(device: VulkanDevice*, state: VulkanPipeline*, pixel_format: u32, variant: usize = 0) -> u64!:
     for entry in state.entries[..<state.count]:
-        if entry.format == pixel_format and entry.instanced == instanced:
+        if entry.format == pixel_format and entry.variant == variant:
             return entry.pipeline
     if state.count == state.entries.length:
         error(failed, "a Vulkan pipeline was drawn into too many color formats")
     let formats = try vulkan_format_state(device, pixel_format)
-    let pipeline = try vulkan_build_pipeline(device, formats.pass_texture, state.shader.module, state.blend, false, instanced = instanced, depth_read = state.depth_test)
-    state.entries[state.count] = VulkanPipelineEntry(format = pixel_format, instanced = instanced, pipeline = pipeline)
+    let pipeline = try vulkan_build_pipeline(device, formats.pass_texture, state.shader.module, state.blend, false, instanced = variant == 1,
+                                             depth_read = state.depth_test, quads = variant == 2)
+    state.entries[state.count] = VulkanPipelineEntry(format = pixel_format, variant = variant, pipeline = pipeline)
     state.count += 1
     return pipeline

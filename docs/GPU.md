@@ -260,6 +260,7 @@ The files under `src/gpu/` share one standard module scope:
 | `device.lucb`, `surface.lucb`, `frame.lucb`, `texture.lucb`, `shader.lucb` | Public ownership, device references, window leases, textures, shaders, pipelines, and API contracts. |
 | `shaders/`, `shaders.lucb` | The vertex stage (Vulkan) and built-in fill fragment in GLSL, and the module `tools/embed_shaders.py` generates from them for both backends. |
 | `buffer.lucb`, `metal/buffer.lucb` | Buffers: allocation, uploads, reads and shared views. |
+| `quads.lucb`, `quad_shaders.lucb` | shade_quads: instanced quads from GPU buffers, and the embedded vertex stage (`shaders/quads.vert`) both backends draw them with. |
 | `mesh.lucb`, `mesh_shaders.lucb`, `metal/mesh.lucb`, `vulkan/mesh.lucb` | Mesh draws: the portable API, the embedded mesh stages (`shaders/mesh*.vert`, `mesh.frag`, `mesh_id.frag`), and each backend's pipelines and bindings (Vulkan's buffers too). |
 | `compute.lucb`, `compute_shaders.lucb`, `metal/compute.lucb`, `vulkan/compute.lucb` | Kernels and compute passes: the portable recording, the built-in fill kernel (`shaders/fill.comp`), and each backend's pipelines and encoding. |
 | `params.lucb`, `canvas.lucb`, `mask.lucb` | The recorded command list and the 48-byte per-draw parameters both shaders read. |
@@ -542,6 +543,33 @@ luce-3d ray-marches fog volumes through, then hides behind nearer meshes, shows
 over farther ones, and layers over itself. Metal sets a less-without-write depth
 state for such draws; Vulkan builds the pipeline with depth testing on and
 writes off. tests/gpu/depth_read.lucb checks the pixels on both.
+
+`shade_quads(target, pipeline, quads, uniforms?, images?, filter)` draws instanced
+quads whose records live in GPU buffers, so a compute pass can make, cull and sort
+millions of them (Gaussian splats, particles, billboards) and the frame draws them
+without a round trip through the CPU. `Quads` names the buffers:
+
+| Field | Holds |
+| --- | --- |
+| `records` | Per quad, `2 + data` vec4s: the clip-space center (x, y, z, w; y up), two half axes in clip units (a.x, a.y, b.x, b.y, already times w), then `data` vec4s of fragment data. |
+| `data` | 0..3: how many vec4s each record carries for locations 1..3. |
+| `order` | Optional u32 record indices: quad i draws record `order[i]` (splats in sorted order). |
+| `arguments`, `arguments_offset` | Optional: four u32s, `quad_arguments(count)` = 4 vertices, count, 0, 0 (Vulkan's `VkDrawIndirectCommand`, Metal's `MTLDrawPrimitivesIndirectArguments`), which a compute pass may write. |
+| `count` | The quads to draw when there are no arguments. |
+
+Corner (u, v), with u and v in -1..1, lies at center + u·a + v·b. Each fragment
+gets (u, v, 0, 1) at location 0, interpolated, and the record's data flat at
+locations 1..3 (zero past `data`); the fragment contract is otherwise `shade`'s.
+The vertex stage (`shaders/quads.vert`) is a strip of four vertices per instance
+(Metal `drawPrimitives` with an instance count or an indirect buffer; Vulkan
+`vkCmdDraw` or `vkCmdDrawIndirect`), reading records at binding 6, its parameters at
+7 and the order at 8. A pipeline made with `depth_test` hides quads behind nearer
+meshes and writes no depth, so sorted translucent quads layer back to front over a
+scene. The buffers are read when the frame runs: a `Compute` submitted before the
+frame presents may write them. The CPU checks a direct count against the buffers; an
+indirect count and the order's indices are the GPU's to keep inside them.
+`tests/gpu/quads.lucb` checks corners, quad coordinates, data, order, indirect
+arguments a pass copied, and depth testing on Metal and Vulkan.
 
 A pipeline recorded into a frame of another target format is refused at
 `present` with `wrong_target`; one from another device with `wrong_device`.

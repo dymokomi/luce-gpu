@@ -50,14 +50,17 @@ func vulkan_drawing(device: VulkanDevice*) -> !:
     errdefer vulkan_drawing_destroy(device)
     try vulkan_slots_create(device)
     # The fragment contract: sampled images at bindings 1..4, coverage words at 5,
-    # uniforms as push constants.
-    var bindings: VkDescriptorSetLayoutBinding[7]
+    # uniforms as push constants. Vertex stages pull from 6 and 7 (retained
+    # geometry and its parameters; shade_quads' records and parameters) and 8
+    # (shade_quads' order).
+    var bindings: VkDescriptorSetLayoutBinding[8]
     for index in 0..<(usize)4:
         bindings[index] = VkDescriptorSetLayoutBinding(binding = (u32)index + 1, descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, descriptorCount = 1, stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT)
     bindings[4] = VkDescriptorSetLayoutBinding(binding = 5, descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, descriptorCount = 1, stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT)
     bindings[5] = VkDescriptorSetLayoutBinding(binding = 6, descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, descriptorCount = 1, stageFlags = VK_SHADER_STAGE_VERTEX_BIT)
     bindings[6] = VkDescriptorSetLayoutBinding(binding = 7, descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, descriptorCount = 1, stageFlags = VK_SHADER_STAGE_VERTEX_BIT)
-    var descriptor_info = VkDescriptorSetLayoutCreateInfo(sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, bindingCount = 7, pBindings = &bindings[0])
+    bindings[7] = VkDescriptorSetLayoutBinding(binding = 8, descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, descriptorCount = 1, stageFlags = VK_SHADER_STAGE_VERTEX_BIT)
+    var descriptor_info = VkDescriptorSetLayoutCreateInfo(sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, bindingCount = 8, pBindings = &bindings[0])
     try vulkan_check(vkCreateDescriptorSetLayout(device.device, &descriptor_info, none, &device.descriptor_layout), "the Vulkan draw layout could not be created")
     var push = VkPushConstantRange(stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT, size = (u32)uniform_limit)
     var layout_info = VkPipelineLayoutCreateInfo(sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,

@@ -79,6 +79,7 @@ struct VulkanFunctions:
     var vkCmdSetScissor: (func(u64, u32, u32, VkRect2D*?) -> unit)?
     var vkCmdBindVertexBuffers: (func(u64, u32, u32, u64*?, u64*?) -> unit)?
     var vkCmdDraw: (func(u64, u32, u32, u32, u32) -> unit)?
+    var vkCmdDrawIndirect: (func(u64, u64, u64, u32, u32) -> unit)?
     var vkCreateSemaphore: (func(u64, VkSemaphoreCreateInfo*?, void*?, u64*?) -> i32)?
     var vkDestroySemaphore: (func(u64, u64, void*?) -> unit)?
     var vkCreateFence: (func(u64, VkFenceCreateInfo*?, void*?, u64*?) -> i32)?
@@ -250,6 +251,8 @@ func vulkan_load() -> !:
         table.vkCmdBindVertexBuffers = (func(u64, u32, u32, u64*?, u64*?) -> unit)found
     if let found = vulkan_symbol(library, "vkCmdDraw"):
         table.vkCmdDraw = (func(u64, u32, u32, u32, u32) -> unit)found
+    if let found = vulkan_symbol(library, "vkCmdDrawIndirect"):
+        table.vkCmdDrawIndirect = (func(u64, u64, u64, u32, u32) -> unit)found
     if let found = vulkan_symbol(library, "vkCreateSemaphore"):
         table.vkCreateSemaphore = (func(u64, VkSemaphoreCreateInfo*?, void*?, u64*?) -> i32)found
     if let found = vulkan_symbol(library, "vkDestroySemaphore"):
@@ -593,6 +596,10 @@ func vkCmdBindVertexBuffers(commandBuffer: u64, firstBinding: u32, bindingCount:
 func vkCmdDraw(commandBuffer: u64, vertexCount: u32, instanceCount: u32, firstVertex: u32, firstInstance: u32):
     let call = vulkan_entry().vkCmdDraw else trap("the Vulkan loader lacks vkCmdDraw")
     call(commandBuffer, vertexCount, instanceCount, firstVertex, firstInstance)
+
+func vkCmdDrawIndirect(commandBuffer: u64, buffer: u64, offset: u64, drawCount: u32, stride: u32):
+    let call = vulkan_entry().vkCmdDrawIndirect else trap("the Vulkan loader lacks vkCmdDrawIndirect")
+    call(commandBuffer, buffer, offset, drawCount, stride)
 
 func vkCreateSemaphore(device: u64, pCreateInfo: VkSemaphoreCreateInfo*?, pAllocator: void*?, pSemaphore: u64*?) -> i32:
     let call = vulkan_entry().vkCreateSemaphore else trap("the Vulkan loader lacks vkCreateSemaphore")

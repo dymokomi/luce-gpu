@@ -74,6 +74,8 @@ struct Draw:
     # An instanced draw (shade_instances): `first..<first + count` of the
     # canvas's instances rather than of its vertices.
     var instanced: bool
+    # Instanced quads from GPU buffers (shade_quads), retained until cleared.
+    var quads: QuadDraw*?
 
 ## A reusable CPU command list, independent of any backend or window. triangles
 ## copies its input, so callers may reuse it immediately. A failed append leaves
@@ -134,6 +136,8 @@ pub struct Canvas:
                 release_geometry(geometry)
             if let mesh = draw.mesh:
                 release_mesh_draw(mesh)
+            if let quads = draw.quads:
+                release_quad_draw(quads)
 
     func retained(geometry: GeometryState*, clip: Clip, viewport: Viewport, uniforms: f32[28], depth_slope: f32 = 0.0) -> !:
         if clip.width == 0 or clip.height == 0: return
@@ -287,6 +291,24 @@ pub struct Canvas:
             return
         attach_client(&self.draws[self.draw_count - 1], pipeline, uniforms, images, filter)
 
+    ## Quads from GPU buffers drawn with a client pipeline into `viewport`
+    ## (backing pixels); the canvas takes `quads` and releases it when
+    ## cleared. On failure the caller still owns it. The pipeline and images
+    ## stay retained until the canvas is cleared.
+    func quads(quads: QuadDraw*, pipeline: PipelineState*, uniforms: const u8[], images: TextureState*?[], filter: Filter, clip: Clip, viewport: Viewport) -> !:
+        if uniforms.length > uniform_limit:
+            error(invalid_geometry, "a draw carries at most 128 uniform bytes")
+        if images.length > image_limit:
+            error(invalid_geometry, "a draw samples at most 4 images")
+        if clip.width == 0 or clip.height == 0 or viewport.width == 0.0 or viewport.height == 0.0:
+            release_quad_draw(quads)
+            return
+        try self.reserve_draw()
+        var draw = Draw(first = 0, count = quads.count, clip = clip, viewport = viewport, quads = quads)
+        attach_client(&draw, pipeline, uniforms, images, filter)
+        self.draws[self.draw_count] = draw
+        self.draw_count += 1
+
     ## Release the recorded storage.
     pub func destroy():
         self.release_textures()
@@ -319,6 +341,12 @@ func attach_client(draw: Draw*, pipeline: PipelineState*, uniforms: const u8[], 
             texture.references += 1
     draw.pipeline = pipeline
     pipeline.references += 1
+
+## Which vertex stage a client pipeline's draw runs: 0 the ordinary one, 1
+## shade_instances', 2 shade_quads'. Backends build a pipeline per variant.
+func client_variant(draw: Draw) -> usize:
+    if draw.quads != none: return 2
+    return 1 if draw.instanced else 0
 
 # mark: Geometry helpers ======================================================================
 ## Two clip-space triangles covering `rectangle`, given in backing pixels of a

@@ -74,6 +74,9 @@ func vulkan_upload(device: VulkanDevice*, canvas: Canvas) -> VulkanUpload!:
         memory.copy(u8[]((u8*)destination + instance_offset, instance_bytes), u8[]((u8*)canvas.instances.data, instance_bytes), instance_bytes)
     for index in 0..<canvas.draw_count:
         var uniforms = canvas.draws[index].geometry_uniforms
+        # A quad draw's vertex stage reads its own parameters there instead.
+        if let quads = canvas.draws[index].quads:
+            memory.copy(uniforms[..<4], quads.control, 4)
         memory.copy(u8[]((u8*)destination + parameter_offset + index * 256, 112), u8[]((u8*)&uniforms, 112), 112)
     var placed: usize = 0
     for draw in canvas.draws[..<canvas.draw_count]:
@@ -83,7 +86,7 @@ func vulkan_upload(device: VulkanDevice*, canvas: Canvas) -> VulkanUpload!:
             placed += 1
     let count = (u32)canvas.draw_count
     var pool_sizes: VkDescriptorPoolSize[2] = [
-        VkDescriptorPoolSize(descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, descriptorCount = count * 3 + (u32)meshes * 8),
+        VkDescriptorPoolSize(descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, descriptorCount = count * 4 + (u32)meshes * 8),
         VkDescriptorPoolSize(descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, descriptorCount = count * (u32)image_limit)]
     var pool_info = VkDescriptorPoolCreateInfo(sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, maxSets = count + (u32)meshes, poolSizeCount = 2, pPoolSizes = &pool_sizes[0])
     try vulkan_check(vkCreateDescriptorPool(device.device, &pool_info, none, &upload.descriptor_pool), "Vulkan draw descriptors could not be created")
@@ -99,7 +102,7 @@ func vulkan_upload(device: VulkanDevice*, canvas: Canvas) -> VulkanUpload!:
     for index in 0..<canvas.draw_count:
         let draw = canvas.draws[index]
         var image_infos: VkDescriptorImageInfo[4]
-        var writes: VkWriteDescriptorSet[7]
+        var writes: VkWriteDescriptorSet[8]
         for slot in 0..<image_limit:
             var image = placeholder
             if let texture = draw.images[slot]:
@@ -116,10 +119,20 @@ func vulkan_upload(device: VulkanDevice*, canvas: Canvas) -> VulkanUpload!:
             geometry_info.buffer = native.buffer
             geometry_info.offset = 0
             geometry_info.range = native.bytes
+        # Binding 8 is read only by shade_quads' vertex stage (its order).
+        var order_info = geometry_info
+        if let quads = draw.quads:
+            let records = (VulkanBuffer*)quads.records.native
+            geometry_info = VkDescriptorBufferInfo(buffer = records.buffer, range = records.bytes)
+            order_info = geometry_info
+            if let order = quads.order:
+                let native = (VulkanBuffer*)order.native
+                order_info = VkDescriptorBufferInfo(buffer = native.buffer, range = native.bytes)
         var parameter_info = VkDescriptorBufferInfo(buffer = upload.buffer, offset = upload.base + (u64)(parameter_offset + index * 256), range = 112)
         writes[5] = VkWriteDescriptorSet(sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, dstSet = upload.descriptors[index], dstBinding = 6, descriptorCount = 1, descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, pBufferInfo = &geometry_info)
         writes[6] = VkWriteDescriptorSet(sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, dstSet = upload.descriptors[index], dstBinding = 7, descriptorCount = 1, descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, pBufferInfo = &parameter_info)
-        vkUpdateDescriptorSets(device.device, 7, &writes[0], 0, none)
+        writes[7] = VkWriteDescriptorSet(sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, dstSet = upload.descriptors[index], dstBinding = 8, descriptorCount = 1, descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, pBufferInfo = &order_info)
+        vkUpdateDescriptorSets(device.device, 8, &writes[0], 0, none)
     if meshes > 0:
         upload.mesh_descriptors = try new u64[canvas.draw_count] --- in memory.heap
         placed = 0
@@ -153,6 +166,8 @@ func vulkan_encode(device: VulkanDevice*, command: u64, formats: VulkanFormatSta
             if serial != 0: ((VulkanGeometry*)geometry.native).last_use = serial
             if formats.geometry == 0:
                 formats.geometry = try vulkan_build_pipeline(device, formats.pass_texture, device.fill, Blend.over, true, true)
+        if let quads = canvas.draws[index].quads:
+            vulkan_quads_used(quads, serial)
         for slot in 0..<image_limit:
             if let texture = canvas.draws[index].images[slot]:
                 let image = (VulkanTexture*)texture.native
@@ -194,7 +209,7 @@ func vulkan_encode(device: VulkanDevice*, command: u64, formats: VulkanFormatSta
                 continue
             var selected = formats.depth_test if draw.depth else formats.overlay
             if let custom = draw.pipeline:
-                selected = try vulkan_pipeline_for(device, (VulkanPipeline*)custom.native, formats.format, draw.instanced)
+                selected = try vulkan_pipeline_for(device, (VulkanPipeline*)custom.native, formats.format, client_variant(draw))
             if draw.geometry != none: selected = formats.geometry
             vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, selected)
             var descriptor = upload.descriptors[index]
@@ -207,12 +222,26 @@ func vulkan_encode(device: VulkanDevice*, command: u64, formats: VulkanFormatSta
                 if encoded:
                     params.mode = params.mode | draw_encoded
                 vkCmdPushConstants(command, device.layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 48, &params)
+            if let quads = draw.quads:
+                # A strip of four vertices per quad, as many as counted.
+                if let arguments = quads.arguments:
+                    vkCmdDrawIndirect(command, ((VulkanBuffer*)arguments.native).buffer, (u64)quads.arguments_offset, 1, 16)
+                else:
+                    vkCmdDraw(command, quad_vertex_count, (u32)quads.count, 0, 0)
+                continue
             if draw.instanced:
                 # Six vertices per rectangle, the draw's run of instances.
                 vkCmdDraw(command, 6, (u32)draw.count, 0, (u32)draw.first)
             else:
                 vkCmdDraw(command, (u32)draw.count, 1, (u32)draw.first, 0)
     vkCmdEndRenderPass(command)
+
+## Record that submission `serial` reads a quad draw's buffers.
+func vulkan_quads_used(quads: const QuadDraw*, serial: u64):
+    if serial == 0: return
+    ((VulkanBuffer*)quads.records.native).last_use = serial
+    if let order = quads.order: ((VulkanBuffer*)order.native).last_use = serial
+    if let arguments = quads.arguments: ((VulkanBuffer*)arguments.native).last_use = serial
 
 func vulkan_drain(device: VulkanDevice*):
     _ = vkDeviceWaitIdle(device.device)

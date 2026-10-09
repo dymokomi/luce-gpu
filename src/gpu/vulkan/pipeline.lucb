@@ -88,13 +88,19 @@ func vulkan_pipelines(device: VulkanDevice*, state: VulkanFormatState*) -> !:
     state.overlay = try vulkan_build_pipeline(device, state.pass_texture, device.fill, Blend.over, false)
     state.depth_test = try vulkan_build_pipeline(device, state.pass_texture, device.fill, Blend.over, true)
 
-## One graphics pipeline: the quad vertex stage (the geometry one, or the
-## instanced one of shade_instances), `fragment` (a shader module with the
-## fragment contract), `blend`, and depth testing or not, compatible with every
-## render pass of `pass`'s color format. `depth_read` tests depth without
-## writing it (a client pipeline's depth_test).
-func vulkan_build_pipeline(device: VulkanDevice*, pass: u64, fragment: u64, blend: Blend, depth: bool, geometry: bool = false, instanced: bool = false, depth_read: bool = false) -> u64!:
+## One graphics pipeline: the quad vertex stage (the geometry one, the
+## instanced one of shade_instances, or shade_quads' strips pulled from
+## buffers), `fragment` (a shader module with the fragment contract), `blend`,
+## and depth testing or not, compatible with every render pass of `pass`'s
+## color format. `depth_read` tests depth without writing it (a client
+## pipeline's depth_test).
+func vulkan_build_pipeline(device: VulkanDevice*, pass: u64, fragment: u64, blend: Blend, depth: bool, geometry: bool = false, instanced: bool = false, depth_read: bool = false,
+                           quads: bool = false) -> u64!:
     var vertex_shader: u64 = 0
+    if quads:
+        vertex_shader = try vulkan_shader(device, quads_vert_words)
+        defer vkDestroyShaderModule(device.device, vertex_shader, none)
+        return try vulkan_graphics_pipeline(device, pass, vertex_shader, fragment, device.layout, blend, depth, VulkanVertexInput.pulled, depth_read, true)
     if geometry:
         vertex_shader = try vulkan_shader(device, geometry_vert_words)
     elif instanced:
@@ -123,7 +129,9 @@ enum VulkanVertexInput as u8:
     ## The instanced stage's 64-byte instances (ShadeInstance) at binding 1.
     instances = 2
 
-func vulkan_graphics_pipeline(device: VulkanDevice*, pass: u64, vertex_shader: u64, fragment: u64, layout: u64, blend: Blend, depth: bool, vertex_input: VulkanVertexInput, depth_read: bool = false) -> u64!:
+## `strip` assembles triangle strips (shade_quads) instead of triangle lists.
+func vulkan_graphics_pipeline(device: VulkanDevice*, pass: u64, vertex_shader: u64, fragment: u64, layout: u64, blend: Blend, depth: bool, vertex_input: VulkanVertexInput,
+                              depth_read: bool = false, strip: bool = false) -> u64!:
     var stages: VkPipelineShaderStageCreateInfo[2] = [
         VkPipelineShaderStageCreateInfo(sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, stage = VK_SHADER_STAGE_VERTEX_BIT, module = vertex_shader, pName = "main"),
         VkPipelineShaderStageCreateInfo(sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, stage = VK_SHADER_STAGE_FRAGMENT_BIT, module = fragment, pName = "main")]
@@ -134,7 +142,8 @@ func vulkan_graphics_pipeline(device: VulkanDevice*, pass: u64, vertex_shader: u
     var vertex_info = VkPipelineVertexInputStateCreateInfo(sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
                                                            vertexBindingDescriptionCount = 1, pVertexBindingDescriptions = &binding,
                                                            vertexAttributeDescriptionCount = 2, pVertexAttributeDescriptions = &attributes[0])
-    var assembly = VkPipelineInputAssemblyStateCreateInfo(sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO, topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
+    var assembly = VkPipelineInputAssemblyStateCreateInfo(sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+                                                          topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP if strip else VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
     var instance_binding = VkVertexInputBindingDescription(binding = 1, stride = 64, inputRate = VK_VERTEX_INPUT_RATE_INSTANCE)
     var instance_attributes: VkVertexInputAttributeDescription[4]
     for index in 0..<(usize)4:

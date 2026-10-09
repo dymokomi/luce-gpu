@@ -137,6 +137,7 @@ let VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT: u32 = 1
 let VK_PIPELINE_STAGE_TRANSFER_BIT: u32 = 4096
 let VK_PRESENT_MODE_FIFO_KHR: u32 = 2
 let VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST: u32 = 3
+let VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP: u32 = 4
 let VK_QUERY_RESULT_64_BIT: u32 = 1
 let VK_QUERY_TYPE_TIMESTAMP: u32 = 2
 let VK_QUEUE_FAMILY_IGNORED: u32 = 4294967295
@@ -1487,6 +1488,7 @@ let VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR: u32 = 1000004000
 # func vkCmdSetScissor(commandBuffer: u64, firstScissor: u32, scissorCount: u32, pScissors: VkRect2D*?)
 # func vkCmdBindVertexBuffers(commandBuffer: u64, firstBinding: u32, bindingCount: u32, pBuffers: u64*?, pOffsets: u64*?)
 # func vkCmdDraw(commandBuffer: u64, vertexCount: u32, instanceCount: u32, firstVertex: u32, firstInstance: u32)
+# func vkCmdDrawIndirect(commandBuffer: u64, buffer: u64, offset: u64, drawCount: u32, stride: u32)
 # func vkCreateSemaphore(device: u64, pCreateInfo: VkSemaphoreCreateInfo*?, pAllocator: void*?, pSemaphore: u64*?) -> i32
 # func vkDestroySemaphore(device: u64, semaphore: u64, pAllocator: void*?)
 # func vkCreateFence(device: u64, pCreateInfo: VkFenceCreateInfo*?, pAllocator: void*?, pFence: u64*?) -> i32

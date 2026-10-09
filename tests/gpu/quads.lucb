@@ -1,0 +1,209 @@
+## shade_quads: quads whose records live in GPU buffers. Their corners land
+## where center ± axes put them with (u, v) interpolated across; the data
+## vec4s reach the fragments; an order buffer changes which record each quad
+## draws, so translucent quads composite in that order; indirect arguments a
+## compute pass copied set the count; and a depth-tested pipeline hides quads
+## behind nearer depth.
+from luce_gpu import gpu
+import memory
+import shaders
+
+let side: usize = 64
+
+## A record of 4 vec4s (center, axes, data0, data1): a quad centered on pixel
+## (x, y) of a 64-pixel target, `half` pixels to each side, at depth `z`.
+func record(x: f32, y: f32, half: f32, z: f32, color: f32[4], extra: f32[4]) -> f32[16]:
+    let scale: f32 = 2.0 / (f32)side
+    return [x * scale - 1.0, 1.0 - y * scale, z, 1.0, half * scale, 0.0, 0.0, half * scale,
+            color[0], color[1], color[2], color[3], extra[0], extra[1], extra[2], extra[3]]
+
+func bytes_of(values: const f32[]) -> u8[]:
+    return u8[]((u8*)values.data, values.length * 4)
+
+func words_of(values: const u32[]) -> u8[]:
+    return u8[]((u8*)values.data, values.length * 4)
+
+## The 64 by 64 texels of `texture`.
+func texels(texture: gpu.Texture) -> u8[]!:
+    let out = try new u8[side * side * 4] --- in memory.heap
+    errdefer free(out) in memory.heap
+    try texture.read(out)
+    return out
+
+func near(value: u8, wanted: i64) -> bool:
+    let difference = (i64)value - wanted
+    return difference >= -2 and difference <= 2
+
+pub func pixels(device: gpu.Device) -> !:
+    var shader = try gpu.Shader.create(device, shaders.quad_frag_words, shaders.quad_frag_msl)
+    defer shader.destroy()
+    var pipeline = try gpu.Pipeline.create(device, shader, gpu.Blend.over, gpu.Format.rgba8_linear)
+    defer pipeline.destroy()
+    var tested = try gpu.Pipeline.create(device, shader, gpu.Blend.over, gpu.Format.rgba8_linear, depth_test = true)
+    defer tested.destroy()
+    var texture = try gpu.Texture.create(device, (u32)side, (u32)side, gpu.Format.rgba8_linear)
+    defer texture.destroy()
+    let red: f32[4] = [1.0, 0.0, 0.0, 0.5]
+    let blue: f32[4] = [0.0, 0.0, 1.0, 0.5]
+    let green: f32[4] = [0.0, 1.0, 0.0, 1.0]
+    let nothing: f32[4] = [0.0, 0.0, 0.0, 0.0]
+    # Records 0 and 1 overlap at (16, 16), half-transparent red and blue;
+    # record 2 is opaque green at (48, 48) with data1 adding blue; record 3
+    # an opaque green quad at (48, 16).
+    var values: f32[64]
+    memory.copy(values[0..<16], record(16.0, 16.0, 8.0, 0.5, red, nothing), 16)
+    memory.copy(values[16..<32], record(16.0, 16.0, 8.0, 0.5, blue, nothing), 16)
+    memory.copy(values[32..<48], record(48.0, 48.0, 8.0, 0.5, green, [0.0, 0.0, 1.0, 0.0]), 16)
+    memory.copy(values[48..<64], record(48.0, 16.0, 8.0, 0.5, green, nothing), 16)
+    var records = try gpu.Buffer.create(device, bytes_of(values))
+    defer records.destroy()
+    var reversed = try gpu.Buffer.create(device, words_of([(u32)1, 0, 2, 3]))
+    defer reversed.destroy()
+    var off: f32[1] = [0.0]
+    var on: f32[1] = [1.0]
+
+    # In record order: blue over red where they overlap; data1 adds blue to
+    # record 2.
+    var frame = try texture.frame()
+    var root = try frame.value().target()
+    var quads = gpu.Quads(records = records, data = 2, count = 4)
+    try gpu.shade_quads(root.value(), pipeline, &quads, bytes_of(off))
+    root.release()
+    _ = try frame.value().present(gpu.Color(0.0, 0.0, 0.0, 1.0))
+    frame.release()
+    var image = try texels(texture)
+    var at = (16 * side + 16) * 4
+    # Red at half alpha over black, then blue at half over that.
+    assert(near(image[at], 64) and image[at + 1] == 0 and near(image[at + 2], 128))
+    at = (48 * side + 48) * 4
+    assert(image[at] == 0 and image[at + 1] == 255 and image[at + 2] == 255)
+    at = (16 * side + 48) * 4
+    assert(image[at] == 0 and image[at + 1] == 255 and image[at + 2] == 0)
+    # Outside every quad: the clear.
+    at = (32 * side + 32) * 4
+    assert(image[at] == 0 and image[at + 1] == 0 and image[at + 2] == 0)
+    # The quad covers pixels 8..<24 exactly.
+    at = (16 * side + 7) * 4
+    assert(image[at] == 0 and image[at + 2] == 0)
+    at = (16 * side + 8) * 4
+    assert(image[at] > 0)
+    free(image) in memory.heap
+
+    # Through the order buffer: red over blue.
+    frame = try texture.frame()
+    root = try frame.value().target()
+    quads = gpu.Quads(records = records, data = 2, order = reversed, count = 2)
+    try gpu.shade_quads(root.value(), pipeline, &quads, bytes_of(off))
+    root.release()
+    _ = try frame.value().present(gpu.Color(0.0, 0.0, 0.0, 1.0))
+    frame.release()
+    image = try texels(texture)
+    at = (16 * side + 16) * 4
+    assert(near(image[at], 128) and image[at + 1] == 0 and near(image[at + 2], 64))
+    free(image) in memory.heap
+
+    # The quad coordinates: u across, v up, from -1 to 1. Pixel (12, 12) of
+    # the quad at (16, 16) is 3.5 pixels left of and above its center.
+    frame = try texture.frame()
+    root = try frame.value().target()
+    quads = gpu.Quads(records = records, data = 2, count = 1)
+    try gpu.shade_quads(root.value(), pipeline, &quads, bytes_of(on))
+    root.release()
+    _ = try frame.value().present(gpu.Color(0.0, 0.0, 0.0, 1.0))
+    frame.release()
+    image = try texels(texture)
+    at = (12 * side + 12) * 4
+    assert(near(image[at], 72) and near(image[at + 1], 183))
+    at = (19 * side + 22) * 4
+    assert(near(image[at], 231) and near(image[at + 1], 72))
+    free(image) in memory.heap
+
+    # A count a compute pass wrote: four arguments copied into a device
+    # buffer at offset 16, drawing records 2 and 3 through the order buffer.
+    var arguments = try gpu.Buffer.allocate(device, 32)
+    defer arguments.destroy()
+    let wanted = gpu.quad_arguments(2)
+    var staged = try gpu.Buffer.create(device, words_of(wanted))
+    defer staged.destroy()
+    var shifted = try gpu.Buffer.create(device, words_of([(u32)2, 3]))
+    defer shifted.destroy()
+    var pass = try gpu.Compute.begin(device)
+    defer pass.close()
+    try pass.copy(staged, 0, arguments, 16, 16)
+    try pass.submit()
+    frame = try texture.frame()
+    root = try frame.value().target()
+    quads = gpu.Quads(records = records, data = 2, order = shifted, arguments = arguments, arguments_offset = 16)
+    try gpu.shade_quads(root.value(), pipeline, &quads, bytes_of(off))
+    root.release()
+    _ = try frame.value().present(gpu.Color(0.0, 0.0, 0.0, 1.0))
+    frame.release()
+    image = try texels(texture)
+    at = (16 * side + 16) * 4
+    assert(image[at] == 0 and image[at + 1] == 0 and image[at + 2] == 0)
+    at = (48 * side + 48) * 4
+    assert(image[at + 1] == 255 and image[at + 2] == 255)
+    at = (16 * side + 48) * 4
+    assert(image[at + 1] == 255 and image[at + 2] == 0)
+    free(image) in memory.heap
+
+    # Depth: an opaque white band at depth 0.25 over the top half hides the
+    # tested quads (at 0.5) there; untested, the green quad draws over it.
+    frame = try texture.frame()
+    root = try frame.value().target()
+    let native = try root.get()
+    let white = gpu.Vertex(red = 1.0, green = 1.0, blue = 1.0)
+    var band: gpu.Vertex[6] = [white, white, white, white, white, white]
+    let corners: f32[12] = [-1.0, 0.0, 1.0, 0.0, 1.0, 1.0, -1.0, 0.0, 1.0, 1.0, -1.0, 1.0]
+    for index in 0..<(usize)6:
+        band[index].x = corners[index * 2]
+        band[index].y = corners[index * 2 + 1]
+        band[index].z = 0.25
+    try native.triangles(band, true)
+    quads = gpu.Quads(records = records, data = 2, count = 3)
+    try gpu.shade_quads(native, tested, &quads, bytes_of(off))
+    quads = gpu.Quads(records = records, data = 2, order = shifted, count = 2)
+    try gpu.shade_quads(native, pipeline, &quads, bytes_of(off))
+    root.release()
+    _ = try frame.value().present(gpu.Color(0.0, 0.0, 0.0, 1.0))
+    frame.release()
+    image = try texels(texture)
+    # (16, 16) is in the white band: the tested red and blue are hidden.
+    at = (16 * side + 16) * 4
+    assert(image[at] == 255 and image[at + 1] == 255 and image[at + 2] == 255)
+    # (48, 48) is below it: tested green-and-blue, then untested again.
+    at = (48 * side + 48) * 4
+    assert(image[at] == 0 and image[at + 1] == 255 and image[at + 2] == 255)
+    # (48, 16): the untested quad draws over the band.
+    at = (16 * side + 48) * 4
+    assert(image[at] == 0 and image[at + 1] == 255 and image[at + 2] == 0)
+    free(image) in memory.heap
+
+    # Refusals: four vec4s of data, misplaced arguments, more quads than the
+    # records hold, buffers of another frame's making are fine but none at all
+    # is not.
+    let again = try texture.frame()
+    defer again.release()
+    let target = try again.value().target()
+    defer target.release()
+    var refused: usize = 0
+    quads = gpu.Quads(records = records, data = 4, count = 1)
+    gpu.shade_quads(target.value(), pipeline, &quads) catch failure:
+        assert(failure.code == gpu.invalid_geometry)
+        refused += 1
+    quads = gpu.Quads(records = records, data = 2, arguments = arguments, arguments_offset = 20)
+    gpu.shade_quads(target.value(), pipeline, &quads) catch failure:
+        assert(failure.code == gpu.invalid_geometry)
+        refused += 1
+    quads = gpu.Quads(records = records, data = 2, count = 5)
+    gpu.shade_quads(target.value(), pipeline, &quads) catch failure:
+        assert(failure.code == gpu.invalid_geometry)
+        refused += 1
+    quads = gpu.Quads(data = 2, count = 1)
+    gpu.shade_quads(target.value(), pipeline, &quads) catch failure:
+        assert(failure.code == gpu.invalid_geometry)
+        refused += 1
+    assert(refused == 4)
+    # No quads record nothing.
+    quads = gpu.Quads(records = records, data = 2, count = 0)
+    try gpu.shade_quads(target.value(), pipeline, &quads)
