@@ -46,19 +46,25 @@ func vulkan_format_state_destroy(device: VulkanDevice*, state: VulkanFormatState
     if state.pass_present != 0: vkDestroyRenderPass(device.device, state.pass_present, none)
     if state.pass_texture != 0: vkDestroyRenderPass(device.device, state.pass_texture, none)
     if state.pass_load != 0: vkDestroyRenderPass(device.device, state.pass_load, none)
+    vulkan_split_passes_destroy(device, state.split)
     *state = VulkanFormatState()
 
 ## A render pass into color attachments of `format` ending in `final_layout`:
 ## cleared, or with `load` drawing over what the attachment holds (which then
-## starts in the attachment layout). Passes of one format differ only in these,
-## so they are compatible: one pipeline and one framebuffer serve them all.
-func vulkan_render_pass(device: VulkanDevice*, pixel_format: u32, final_layout: u32, load: bool = false) -> u64!:
+## starts in the attachment layout). Its depth is cleared and dropped, unless
+## `depth_load` resumes the depth an earlier pass stored (`depth_store`), as a
+## frame split for scene depth copies does. Passes of one format differ only in
+## these, so they are compatible: one pipeline and one framebuffer serve them all.
+func vulkan_render_pass(device: VulkanDevice*, pixel_format: u32, final_layout: u32, load: bool = false, depth_load: bool = false, depth_store: bool = false) -> u64!:
     var attachments: VkAttachmentDescription[2] = [
         VkAttachmentDescription(format = pixel_format, samples = VK_SAMPLE_COUNT_1_BIT, loadOp = VK_ATTACHMENT_LOAD_OP_LOAD if load else VK_ATTACHMENT_LOAD_OP_CLEAR,
                                 storeOp = VK_ATTACHMENT_STORE_OP_STORE, stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE, stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
                                 initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL if load else VK_IMAGE_LAYOUT_UNDEFINED, finalLayout = final_layout),
-        VkAttachmentDescription(format = VK_FORMAT_D32_SFLOAT, samples = VK_SAMPLE_COUNT_1_BIT, loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR, storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
-                                stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE, stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE, finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)]
+        VkAttachmentDescription(format = VK_FORMAT_D32_SFLOAT, samples = VK_SAMPLE_COUNT_1_BIT, loadOp = VK_ATTACHMENT_LOAD_OP_LOAD if depth_load else VK_ATTACHMENT_LOAD_OP_CLEAR,
+                                storeOp = VK_ATTACHMENT_STORE_OP_STORE if depth_store else VK_ATTACHMENT_STORE_OP_DONT_CARE,
+                                stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE, stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+                                initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL if depth_load else VK_IMAGE_LAYOUT_UNDEFINED,
+                                finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)]
     var color_attachment = VkAttachmentReference(attachment = 0, layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
     var depth_attachment = VkAttachmentReference(attachment = 1, layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
     var subpass = VkSubpassDescription(colorAttachmentCount = 1, pColorAttachments = &color_attachment, pDepthStencilAttachment = &depth_attachment)
@@ -83,6 +89,35 @@ func vulkan_render_pass(device: VulkanDevice*, pixel_format: u32, final_layout: 
     var pass: u64 = 0
     try vulkan_check(vkCreateRenderPass(device.device, &render_info, none, &pass), "a Vulkan render pass could not be created")
     return pass
+
+## The passes of a frame split for scene depth copies (`depth_copy_before`).
+let vulkan_split_open_clear: usize = 0
+let vulkan_split_open_load: usize = 1
+let vulkan_split_middle: usize = 2
+let vulkan_split_close_present: usize = 3
+let vulkan_split_close_texture: usize = 4
+
+## Split pass `kind` of `state`'s format, made on first use. Opening passes
+## start as the frame's own pass would and store their depth; the middle one
+## resumes both attachments and stores them again; closing passes resume and
+## end where the frame's pass ends (presentation or sampling).
+func vulkan_split_pass(device: VulkanDevice*, state: VulkanFormatState*, kind: usize) -> u64!:
+    if state.split[kind] != 0: return state.split[kind]
+    let attached = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+    var pass: u64 = 0
+    if kind == vulkan_split_open_clear or kind == vulkan_split_open_load:
+        pass = try vulkan_render_pass(device, state.format, attached, kind == vulkan_split_open_load, false, true)
+    elif kind == vulkan_split_middle:
+        pass = try vulkan_render_pass(device, state.format, attached, true, true, true)
+    else:
+        let final_layout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR if kind == vulkan_split_close_present else VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+        pass = try vulkan_render_pass(device, state.format, final_layout, true, true, false)
+    state.split[kind] = pass
+    return pass
+
+func vulkan_split_passes_destroy(device: VulkanDevice*, split: u64[5]):
+    for pass in split:
+        if pass != 0: vkDestroyRenderPass(device.device, pass, none)
 
 func vulkan_pipelines(device: VulkanDevice*, state: VulkanFormatState*) -> !:
     state.overlay = try vulkan_build_pipeline(device, state.pass_texture, device.fill, Blend.over, false)

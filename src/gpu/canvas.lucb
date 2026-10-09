@@ -227,10 +227,7 @@ pub struct Canvas:
     ## with a client pipeline, under `clip`: one draw against the draw limit.
     ## The pipeline and images stay retained until the canvas is cleared.
     func shade_instances(pipeline: PipelineState*, instances: const ShadeInstance[], uniforms: const u8[], images: TextureState*?[], filter: Filter, clip: Clip) -> !:
-        if uniforms.length > uniform_limit:
-            error(invalid_geometry, "a draw carries at most 128 uniform bytes")
-        if images.length > image_limit:
-            error(invalid_geometry, "a draw samples at most 4 images")
+        try check_client(pipeline, uniforms, images)
         if instances.length == 0 or clip.width == 0 or clip.height == 0:
             return
         if instances.length > canvas_instance_limit - self.instance_count:
@@ -264,10 +261,7 @@ pub struct Canvas:
     ## until the canvas is cleared or destroyed.
     func shade(pipeline: PipelineState*, rectangle: Rect, color: Color, uniforms: const u8[], images: TextureState*?[],
                         filter: Filter, clip: Clip, target_width: f64, target_height: f64) -> !:
-        if uniforms.length > uniform_limit:
-            error(invalid_geometry, "a draw carries at most 128 uniform bytes")
-        if images.length > image_limit:
-            error(invalid_geometry, "a draw samples at most 4 images")
+        try check_client(pipeline, uniforms, images)
         try check_color(color)
         if rectangle.width == 0.0 or rectangle.height == 0.0 or clip.width == 0 or clip.height == 0:
             return
@@ -281,10 +275,7 @@ pub struct Canvas:
     ## pipeline and images stay retained until the canvas is cleared.
     func shade_triangles(pipeline: PipelineState*, vertices: const Vertex[], uniforms: const u8[], images: TextureState*?[],
                          filter: Filter, clip: Clip, viewport: Viewport) -> !:
-        if uniforms.length > uniform_limit:
-            error(invalid_geometry, "a draw carries at most 128 uniform bytes")
-        if images.length > image_limit:
-            error(invalid_geometry, "a draw samples at most 4 images")
+        try check_client(pipeline, uniforms, images)
         let before = self.draw_count
         try self.triangles(vertices, clip, false, viewport)
         if self.draw_count == before:
@@ -296,10 +287,7 @@ pub struct Canvas:
     ## cleared. On failure the caller still owns it. The pipeline and images
     ## stay retained until the canvas is cleared.
     func quads(quads: QuadDraw*, pipeline: PipelineState*, uniforms: const u8[], images: TextureState*?[], filter: Filter, clip: Clip, viewport: Viewport) -> !:
-        if uniforms.length > uniform_limit:
-            error(invalid_geometry, "a draw carries at most 128 uniform bytes")
-        if images.length > image_limit:
-            error(invalid_geometry, "a draw samples at most 4 images")
+        try check_client(pipeline, uniforms, images)
         if clip.width == 0 or clip.height == 0 or viewport.width == 0.0 or viewport.height == 0.0:
             release_quad_draw(quads)
             return
@@ -327,6 +315,43 @@ let canvas_draw_default: usize = 4096
 let canvas_draw_ceiling: usize = 65536
 ## The most instanced rectangles one canvas holds (64 MiB of them).
 let canvas_instance_limit: usize = 1048576
+
+## Whether a client draw of `pipeline` with `uniforms` and `images` fits the
+## fragment contract: 128 uniform bytes, 4 images (3 when binding 4 holds the
+## scene depth).
+func check_client(pipeline: PipelineState*, uniforms: const u8[], images: TextureState*?[]) -> !:
+    if uniforms.length > uniform_limit:
+        error(invalid_geometry, "a draw carries at most 128 uniform bytes")
+    if images.length > image_limit:
+        error(invalid_geometry, "a draw samples at most 4 images")
+    if pipeline.scene_depth and images.length == image_limit:
+        error(invalid_geometry, "a draw reading the scene depth samples at most 3 images: binding 4 is the depth")
+
+## Whether `draw` reads the frame's depth at binding 4 (its pipeline was made
+## with scene_depth).
+func reads_scene_depth(draw: const Draw*) -> bool:
+    let pipeline = draw.pipeline else return false
+    return pipeline.scene_depth
+
+## Whether any draw of `canvas` reads the scene depth.
+func reads_scene_depth_anywhere(canvas: const Canvas*) -> bool:
+    for index in 0..<canvas.draw_count:
+        if reads_scene_depth(&canvas.draws[index]): return true
+    return false
+
+## Whether a backend copies the frame's depth for draw `index` of `canvas`
+## before encoding it: the draw reads the scene depth, and no copy made for an
+## earlier such draw is current (some draw wrote depth since, or there was
+## none). Backends end the render pass there, copy, and resume over both
+## attachments.
+func depth_copy_before(canvas: const Canvas*, index: usize) -> bool:
+    if not reads_scene_depth(&canvas.draws[index]): return false
+    var at = index
+    while at > 0:
+        at -= 1
+        if canvas.draws[at].depth: return true
+        if reads_scene_depth(&canvas.draws[at]): return false
+    return true
 
 ## Make `draw` a client pipeline's: its uniforms, images and filter, the
 ## pipeline and images retained.

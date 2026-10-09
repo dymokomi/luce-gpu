@@ -46,6 +46,9 @@ struct MetalDrawing:
     var depth_texture: void*?
     var width: u64
     var height: u64
+    # The depth copied for draws that read the scene depth (r32float), sized
+    # with the depth attachment.
+    var depth_copy: void*?
 
 func metal_text(value: c.str) -> void*!:
     return metal_string(try metal_class("NSString"), metal_sel("stringWithUTF8String:"), value) else error(failed, "could not create Metal shader text")
@@ -249,11 +252,18 @@ func metal_depth(device: MetalDevice*, state: MetalDrawing*, width: u64, height:
     metal_uint_arg(descriptor, metal_sel("setWidth:"), width)
     metal_uint_arg(descriptor, metal_sel("setHeight:"), height)
     metal_uint_arg(descriptor, metal_sel("setStorageMode:"), 2)
-    metal_uint_arg(descriptor, metal_sel("setUsage:"), 4)
+    # MTLTextureUsageRenderTarget | ShaderRead: a scene depth copy reads it.
+    metal_uint_arg(descriptor, metal_sel("setUsage:"), 5)
     let texture = metal_with_object(metal_required(device.device), metal_sel("newTextureWithDescriptor:"), descriptor) else error(failed, "could not allocate GPU depth storage")
+    # The copy for scene depth draws: r32float, made again at this size.
+    metal_uint_arg(descriptor, metal_sel("setPixelFormat:"), 55)
+    errdefer metal_void(texture, metal_sel("release"))
+    let copy = metal_with_object(metal_required(device.device), metal_sel("newTextureWithDescriptor:"), descriptor) else error(failed, "could not allocate GPU depth storage")
     if let previous = state.depth_texture:
         metal_void(previous, metal_sel("release"))
+    metal_release_optional(state.depth_copy)
     state.depth_texture = texture
+    state.depth_copy = copy
     state.width = width
     state.height = height
     return texture
@@ -261,6 +271,7 @@ func metal_depth(device: MetalDevice*, state: MetalDrawing*, width: u64, height:
 func metal_drawing_destroy(state: MetalDrawing*):
     if let texture = state.depth_texture:
         metal_void(texture, metal_sel("release"))
+    metal_release_optional(state.depth_copy)
     if let texture = state.placeholder:
         metal_void(texture, metal_sel("release"))
     for pipeline in state.pipelines:
@@ -277,9 +288,13 @@ func metal_drawing_destroy(state: MetalDrawing*):
     free(state) in memory.heap
 
 ## Record `canvas` into `target` (a color texture of `slot`'s format) cleared to
-## `color`, or over its contents when `keep`, as a render pass of `command`. Its
+## `color`, or over its contents when `keep`, as render passes of `command`. Its
 ## vertices, coverage and instances go in the upload ring. The encoded slot
-## clears to the encoded color and has the built-in draws encode theirs.
+## clears to the encoded color and has the built-in draws encode theirs. One
+## pass draws everything, unless draws read the scene depth: before each that
+## needs a fresh copy (`depth_copy_before`), the pass ends storing its depth,
+## a copy pass writes the depth to `depth_copy`, and a new pass resumes over
+## both attachments.
 func metal_pass(device: MetalDevice*, command: void*, target: void*, slot: usize, canvas: Canvas, color: Color, width: u64, height: u64, keep: bool = false) -> !:
     let encoded = slot == metal_encoded_slot
     let descriptor = metal_ptr(try metal_class("MTLRenderPassDescriptor"), metal_sel("renderPassDescriptor")) else error(failed, "could not create a Metal render pass")
@@ -291,56 +306,68 @@ func metal_pass(device: MetalDevice*, command: void*, target: void*, slot: usize
     metal_uint_arg(attachment, metal_sel("setStoreAction:"), 1)
     let clear = Color(srgb_encoded(color.red), srgb_encoded(color.green), srgb_encoded(color.blue), color.alpha) if encoded else color
     metal_color_arg(attachment, metal_sel("setClearColor:"), LuceGpuMetalClearColor(red = clear.red * clear.alpha, green = clear.green * clear.alpha, blue = clear.blue * clear.alpha, alpha = clear.alpha))
-    var masks: MetalSpan? = none
-    var buffer: MetalSpan? = none
+    if canvas.draw_count == 0:
+        let encoder = metal_with_object(command, metal_sel("renderCommandEncoderWithDescriptor:"), descriptor) else error(failed, "could not create a Metal render encoder")
+        metal_void(encoder, metal_sel("endEncoding"))
+        return
+    let state = try metal_drawing(device)
+    let depth = metal_required(metal_ptr(descriptor, metal_sel("depthAttachment")))
+    metal_object(depth, metal_sel("setTexture:"), try metal_depth(device, state, width, height))
+    metal_uint_arg(depth, metal_sel("setLoadAction:"), 2)
+    metal_double_arg(depth, metal_sel("setClearDepth:"), 1.0)
+    # Empty arrays still bind a span: the shaders' buffers are never unbound.
+    let vertices = try metal_ring_stage(device, u8[]((u8*)canvas.vertices.data, canvas.vertex_count * 32))
+    let coverage = try metal_ring_stage(device, u8[]((u8*)canvas.coverage.data, canvas.coverage_count * 4))
     var instances: MetalSpan? = none
-    var drawing: MetalDrawing*? = none
-    if canvas.draw_count > 0:
-        let state = try metal_drawing(device)
-        drawing = state
-        let depth = metal_required(metal_ptr(descriptor, metal_sel("depthAttachment")))
-        metal_object(depth, metal_sel("setTexture:"), try metal_depth(device, state, width, height))
-        metal_uint_arg(depth, metal_sel("setLoadAction:"), 2)
-        metal_uint_arg(depth, metal_sel("setStoreAction:"), 0)
-        metal_double_arg(depth, metal_sel("setClearDepth:"), 1.0)
-        # Empty arrays still bind a span: the shaders' buffers are never unbound.
-        buffer = try metal_ring_stage(device, u8[]((u8*)canvas.vertices.data, canvas.vertex_count * 32))
-        masks = try metal_ring_stage(device, u8[]((u8*)canvas.coverage.data, canvas.coverage_count * 4))
-        if canvas.instance_count > 0:
-            instances = try metal_ring_stage(device, u8[]((u8*)canvas.instances.data, canvas.instance_count * memory.size_of(ShadeInstance)))
-        # Client pipeline states are built before encoding, so encoding cannot fail.
-        for draw in canvas.draws[..<canvas.draw_count]:
-            if let custom = draw.pipeline:
-                _ = try metal_client_state(device, (MetalClientPipeline*)custom.native, slot, client_variant(draw))
-    let encoder = metal_with_object(command, metal_sel("renderCommandEncoderWithDescriptor:"), descriptor) else error(failed, "could not create a Metal render encoder")
-    if let state = drawing:
-        let pipeline = metal_pipeline_for(device, state, slot) catch failure:
-            metal_void(encoder, metal_sel("endEncoding"))
-            error(failure.code, failure.message)
-        var geometry_pipeline = pipeline
-        for draw in canvas.draws[..<canvas.draw_count]:
-            if draw.geometry != none:
-                geometry_pipeline = metal_geometry_pipeline(device, state, slot) catch failure:
-                    metal_void(encoder, metal_sel("endEncoding"))
-                    error(failure.code, failure.message)
-                break
-        # Mesh pipelines are built before encoding, so encoding cannot fail.
-        for draw in canvas.draws[..<canvas.draw_count]:
-            if let mesh = draw.mesh:
-                _ = metal_mesh_pipeline(device, state, mesh.kind, slot) catch failure:
-                    metal_void(encoder, metal_sel("endEncoding"))
-                    error(failure.code, failure.message)
-        let vertices = buffer else trap("a Metal pass lost its vertices")
-        let coverage = masks else trap("a Metal pass lost its coverage")
-        metal_encode(encoder, state, pipeline, geometry_pipeline, vertices, coverage, instances, canvas, width, height, slot)
-    metal_void(encoder, metal_sel("endEncoding"))
+    if canvas.instance_count > 0:
+        instances = try metal_ring_stage(device, u8[]((u8*)canvas.instances.data, canvas.instance_count * memory.size_of(ShadeInstance)))
+    # Pipeline states are built before encoding, so encoding cannot fail.
+    var copies: MetalCopies*? = none
+    let pipeline = try metal_pipeline_for(device, state, slot)
+    var geometry_pipeline = pipeline
+    for index in 0..<canvas.draw_count:
+        let draw = canvas.draws[index]
+        if let custom = draw.pipeline:
+            _ = try metal_client_state(device, (MetalClientPipeline*)custom.native, slot, client_variant(draw))
+        if draw.geometry != none and geometry_pipeline == pipeline:
+            geometry_pipeline = try metal_geometry_pipeline(device, state, slot)
+        if let mesh = draw.mesh:
+            _ = try metal_mesh_pipeline(device, state, mesh.kind, slot)
+        if copies == none and depth_copy_before(&canvas, index):
+            let made = try metal_copies(device)
+            _ = try metal_copy_pipeline(device, made, metal_copy_depth, 55)
+            copies = made
+    var start: usize = 0
+    var first = true
+    while true:
+        # This pass draws start..<end; a depth copy follows unless it is the
+        # last. Later passes start at a draw whose copy was just made.
+        var end = start if first else start + 1
+        while end < canvas.draw_count and not depth_copy_before(&canvas, end): end += 1
+        let last = end >= canvas.draw_count
+        # MTLStoreActionStore (1) keeps the depth for the copy; DontCare (0) drops it.
+        metal_uint_arg(depth, metal_sel("setStoreAction:"), 0 if last else 1)
+        let encoder = metal_with_object(command, metal_sel("renderCommandEncoderWithDescriptor:"), descriptor) else error(failed, "could not create a Metal render encoder")
+        metal_encode(encoder, state, pipeline, geometry_pipeline, vertices, coverage, instances, canvas, start, end, width, height, slot)
+        metal_void(encoder, metal_sel("endEncoding"))
+        if last: return
+        try metal_copy_depth_texture(device, command, copies else trap("a Metal depth copy lost its pipeline"), metal_required(state.depth_texture),
+                                     metal_required(state.depth_copy), width, height)
+        # The next pass draws over what this one left, color and depth.
+        metal_uint_arg(attachment, metal_sel("setLoadAction:"), 1)
+        metal_uint_arg(depth, metal_sel("setLoadAction:"), 1)
+        start = end
+        first = false
 
-func metal_encode(encoder: void*, drawing: MetalDrawing*, pipeline: void*, geometry_pipeline: void*, buffer: MetalSpan, masks: MetalSpan, instances: MetalSpan?, canvas: Canvas, width: u64, height: u64, slot: usize):
+## Encode draws `first..<end` of `canvas`; draws reading the scene depth get
+## `drawing.depth_copy` at binding 4.
+func metal_encode(encoder: void*, drawing: MetalDrawing*, pipeline: void*, geometry_pipeline: void*, buffer: MetalSpan, masks: MetalSpan, instances: MetalSpan?, canvas: Canvas,
+                  first: usize, end: usize, width: u64, height: u64, slot: usize):
     metal_bind_buffer(encoder, metal_sel("setVertexBuffer:offset:atIndex:"), buffer.buffer, buffer.offset, 0)
     if let instance_buffer = instances:
         metal_bind_buffer(encoder, metal_sel("setVertexBuffer:offset:atIndex:"), instance_buffer.buffer, instance_buffer.offset, 1)
     metal_bind_buffer(encoder, metal_sel("setFragmentBuffer:offset:atIndex:"), masks.buffer, masks.offset, 5)
-    for draw in canvas.draws[..<canvas.draw_count]:
+    for draw in canvas.draws[first..<end]:
         let x = metal_min((u64)draw.clip.x, width)
         let y = metal_min((u64)draw.clip.y, height)
         let w = metal_min((u64)draw.clip.width, width - x)
@@ -385,6 +412,8 @@ func metal_encode(encoder: void*, drawing: MetalDrawing*, pipeline: void*, geome
             var image = metal_required(drawing.placeholder)
             if let texture = draw.images[index]:
                 image = metal_required(((MetalTexture*)texture.native).texture)
+            if index == image_limit - 1 and reads_scene_depth(&draw):
+                image = metal_required(drawing.depth_copy)
             metal_bind_texture(encoder, metal_sel("setFragmentTexture:atIndex:"), image, (u64)index + 1)
             metal_bind_texture(encoder, metal_sel("setFragmentSamplerState:atIndex:"), sampler, (u64)index + 1)
         if draw.instanced:

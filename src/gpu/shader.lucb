@@ -72,7 +72,11 @@ pub struct Pipeline:
     ## `depth_test`, its fragments are tested against the frame's depth
     ## (nearer passes) without writing it: what `shade_triangles` needs to
     ## draw translucent geometry behind and in front of a depth-tested scene.
-    pub static func create(device: Device, shader: Shader, blend: Blend, pixel_format: Format? = none, depth_test: bool = false) -> Pipeline!:
+    ## With `scene_depth`, its draws read the frame's depth as the draws
+    ## before them left it, at sampled binding 4 (so they take at most 3
+    ## images): the 0..1 depth of each pixel, 1 where nothing was drawn, read
+    ## with `texelFetch` at the fragment's pixel. A volume ray march ends there.
+    pub static func create(device: Device, shader: Shader, blend: Blend, pixel_format: Format? = none, depth_test: bool = false, scene_depth: bool = false) -> Pipeline!:
         let device_state = try device.checked()
         let shader_state = try shader.checked()
         if shader_state.device != device_state:
@@ -82,7 +86,8 @@ pub struct Pipeline:
                 error(invalid_geometry, "32-bit textures are written by compute kernels, not rendered into")
         let native = try backend_pipeline_create(device_state, shader_state.native, blend, pixel_format, depth_test)
         errdefer device_state.destroy_pipeline(device_state.native, native)
-        let state = try new PipelineState(device = device_state, shader = shader_state, native = native, blend = blend, format = pixel_format, depth_test = depth_test) in memory.heap
+        let state = try new PipelineState(device = device_state, shader = shader_state, native = native, blend = blend, format = pixel_format, depth_test = depth_test,
+                                          scene_depth = scene_depth) in memory.heap
         shader_state.references += 1
         device_state.references += 1
         return Pipeline(state = state)
@@ -115,6 +120,8 @@ struct PipelineState:
     var format: Format?
     # Fragments are depth tested (nearer passes) and write no depth.
     var depth_test: bool
+    # Draws read the frame's depth so far at binding 4 (see `create`).
+    var scene_depth: bool
     var references: usize = 1
     var closed: bool
 

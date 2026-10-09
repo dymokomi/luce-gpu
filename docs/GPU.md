@@ -544,6 +544,23 @@ over farther ones, and layers over itself. Metal sets a less-without-write depth
 state for such draws; Vulkan builds the pipeline with depth testing on and
 writes off. tests/gpu/depth_read.lucb checks the pixels on both.
 
+A pipeline made with `Pipeline.create(..., scene_depth = true)` reads the frame's
+depth as the draws before it left it: sampled binding 4 holds the 0..1 depth of
+each pixel (1 where nothing was drawn), read with `texelFetch(image,
+ivec2(gl_FragCoord.xy), 0).r`, so its draws take at most 3 images of their own.
+A ray march through a volume ends there, exactly at the nearest surface, instead
+of at a slab the depth test cut (luce-3d's fog). A depth attachment cannot be
+sampled while it is attached, so the backend copies it: before the first such
+draw of a frame, and before a later one when a draw wrote depth since, the
+render pass ends storing its depth, the depth goes to a copy, and the next pass
+resumes over the color and depth it left. Draws in between need no copy. On
+Metal the copy is a render pass into an r32float texture (`luce_depth` in
+metal/copies.lucb; drawing work opens no blit encoder); on Vulkan it is
+`vkCmdCopyImage` into a sampled D32 image, the frame split into opening, middle
+and closing render passes compatible with its own. A frame with no such draw
+stays one pass. tests/gpu/scene_depth.lucb checks the pixels on both, a copy
+made before and after depth is written, and a third read reusing the copy.
+
 `shade_quads(target, pipeline, quads, uniforms?, images?, filter)` draws instanced
 quads whose records live in GPU buffers, so a compute pass can make, cull and sort
 millions of them (Gaussian splats, particles, billboards) and the frame draws them

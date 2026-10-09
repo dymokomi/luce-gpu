@@ -109,6 +109,9 @@ func vulkan_upload(device: VulkanDevice*, canvas: Canvas) -> VulkanUpload!:
                 image = (VulkanTexture*)texture.native
             image_infos[slot] = VkDescriptorImageInfo(sampler = vulkan_sampler_for(device, draw.filter, image.filterable),
                                                       imageView = image.view, imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+            if slot == image_limit - 1 and reads_scene_depth(&draw):
+                # The scene depth copy, read texel by texel.
+                image_infos[slot] = VkDescriptorImageInfo(sampler = device.nearest, imageView = device.depth_copy_view, imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
             writes[slot] = VkWriteDescriptorSet(sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, dstSet = upload.descriptors[index], dstBinding = (u32)slot + 1, descriptorCount = 1,
                                                 descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, pImageInfo = &image_infos[slot])
         writes[4] = VkWriteDescriptorSet(sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, dstSet = upload.descriptors[index], dstBinding = 5, descriptorCount = 1,
@@ -146,12 +149,16 @@ func vulkan_upload(device: VulkanDevice*, canvas: Canvas) -> VulkanUpload!:
     return upload
 
 # mark: Encoding and rendering ================================================================
-## Record one render pass of `canvas` into `framebuffer` on `command`, clearing to
+## Record `canvas` into `framebuffer` on `command` as `pass`, clearing to
 ## `color`. Presentation clears opaque; texture passes keep the alpha. A nonzero
 ## `serial` is the submission the commands belong to: every sampled image
-## records it as its last use.
+## records it as its last use. One render pass draws everything, unless draws
+## read the scene depth: before each that needs a fresh copy
+## (`depth_copy_before`), the pass ends storing `depth_image`, the depth is
+## copied to the device's depth copy, and a split pass resumes over both
+## attachments; the last ends as `pass` would.
 func vulkan_encode(device: VulkanDevice*, command: u64, formats: VulkanFormatState*, pass: u64, framebuffer: u64,
-                   canvas: Canvas, upload: VulkanUpload, color: Color, width: u32, height: u32, serial: u64, encoded: bool = false) -> !:
+                   canvas: Canvas, upload: VulkanUpload, color: Color, width: u32, height: u32, serial: u64, encoded: bool = false, depth_image: u64 = 0) -> !:
     var clears: VkClearValue[2]
     let clear = Color(srgb_encoded(color.red), srgb_encoded(color.green), srgb_encoded(color.blue), color.alpha) if encoded else color
     clears[0].color = [(f32)(clear.red * clear.alpha), (f32)(clear.green * clear.alpha), (f32)(clear.blue * clear.alpha), (f32)clear.alpha]
@@ -174,67 +181,119 @@ func vulkan_encode(device: VulkanDevice*, command: u64, formats: VulkanFormatSta
                 vulkan_transition(command, image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
                 if serial != 0:
                     image.last_use = serial
-    var begin = VkRenderPassBeginInfo(sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, renderPass = pass, framebuffer = framebuffer,
+    let split = reads_scene_depth_anywhere(&canvas)
+    var opening = pass
+    var middle = pass
+    var closing = pass
+    if split:
+        opening = try vulkan_split_pass(device, formats, vulkan_split_open_load if pass == formats.pass_load else vulkan_split_open_clear)
+        middle = try vulkan_split_pass(device, formats, vulkan_split_middle)
+        closing = try vulkan_split_pass(device, formats, vulkan_split_close_present if pass == formats.pass_present else vulkan_split_close_texture)
+    var begin = VkRenderPassBeginInfo(sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, renderPass = opening, framebuffer = framebuffer,
                                       renderArea = VkRect2D(extent = VkExtent2D(width = width, height = height)), clearValueCount = 2, pClearValues = &clears[0])
-    vkCmdBeginRenderPass(command, &begin, VK_SUBPASS_CONTENTS_INLINE)
-    if canvas.draw_count > 0:
-        # Binding 0: the vertices; binding 1: the instances of shade_instances.
-        var buffers: u64[2] = [upload.buffer, upload.buffer]
-        var offsets: u64[2] = [upload.base + (u64)vulkan_vertex_offset(canvas), upload.base + (u64)vulkan_instance_offset(canvas)]
-        vkCmdBindVertexBuffers(command, 0, 2, &buffers[0], &offsets[0])
-        for index in 0..<canvas.draw_count:
-            let draw = canvas.draws[index]
-            if draw.clip.x >= width or draw.clip.y >= height:
-                continue
-            var scissor = VkRect2D(offset = VkOffset2D(x = (i32)draw.clip.x, y = (i32)draw.clip.y),
-                                   extent = VkExtent2D(width = (u32)canvas_min((usize)draw.clip.width, (usize)(width - draw.clip.x)),
-                                                       height = (u32)canvas_min((usize)draw.clip.height, (usize)(height - draw.clip.y))))
-            if scissor.extent.width == 0 or scissor.extent.height == 0:
-                continue
-            var viewport = VkViewport(width = (f32)width, height = (f32)height, maxDepth = 1.0)
-            if let region = draw.viewport:
-                viewport.x = (f32)region.x
-                viewport.y = (f32)region.y
-                viewport.width = (f32)region.width
-                viewport.height = (f32)region.height
-            vkCmdSetViewport(command, 0, 1, &viewport)
-            vkCmdSetScissor(command, 0, 1, &scissor)
-            # Zero clamp requires no optional depthBiasClamp device feature.
-            vkCmdSetDepthBias(command,0.0,0.0,draw.depth_slope)
-            if let mesh = draw.mesh:
-                vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, formats.mesh[(usize)(u8)mesh.kind])
-                var mesh_set = upload.mesh_descriptors[index]
-                vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, device.mesh_pipeline_layout, 0, 1, &mesh_set, 0, none)
-                vkCmdDraw(command, (u32)draw.count, 1, 0, 0)
-                continue
-            var selected = formats.depth_test if draw.depth else formats.overlay
-            if let custom = draw.pipeline:
-                selected = try vulkan_pipeline_for(device, (VulkanPipeline*)custom.native, formats.format, client_variant(draw))
-            if draw.geometry != none: selected = formats.geometry
-            vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, selected)
-            var descriptor = upload.descriptors[index]
-            vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, device.layout, 0, 1, &descriptor, 0, none)
-            if draw.uniform_count > 0:
-                var uniforms = draw.uniforms
-                vkCmdPushConstants(command, device.layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, (u32)uniform_limit, &uniforms)
-            else:
-                var params = draw.params
-                if encoded:
-                    params.mode = params.mode | draw_encoded
-                vkCmdPushConstants(command, device.layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 48, &params)
-            if let quads = draw.quads:
-                # A strip of four vertices per quad, as many as counted.
-                if let arguments = quads.arguments:
-                    vkCmdDrawIndirect(command, ((VulkanBuffer*)arguments.native).buffer, (u64)quads.arguments_offset, 1, 16)
+    var start: usize = 0
+    var first = true
+    while true:
+        # This pass draws start..<end; a depth copy follows unless it is the
+        # last. Later passes start at a draw whose copy was just made.
+        var end = canvas.draw_count
+        if split:
+            end = start if first else start + 1
+            while end < canvas.draw_count and not depth_copy_before(&canvas, end): end += 1
+        let last = end >= canvas.draw_count
+        if not first: begin.renderPass = closing if last else middle
+        vkCmdBeginRenderPass(command, &begin, VK_SUBPASS_CONTENTS_INLINE)
+        if end > start:
+            # Binding 0: the vertices; binding 1: the instances of shade_instances.
+            var buffers: u64[2] = [upload.buffer, upload.buffer]
+            var offsets: u64[2] = [upload.base + (u64)vulkan_vertex_offset(canvas), upload.base + (u64)vulkan_instance_offset(canvas)]
+            vkCmdBindVertexBuffers(command, 0, 2, &buffers[0], &offsets[0])
+            for index in start..<end:
+                let draw = canvas.draws[index]
+                if draw.clip.x >= width or draw.clip.y >= height:
+                    continue
+                var scissor = VkRect2D(offset = VkOffset2D(x = (i32)draw.clip.x, y = (i32)draw.clip.y),
+                                       extent = VkExtent2D(width = (u32)canvas_min((usize)draw.clip.width, (usize)(width - draw.clip.x)),
+                                                           height = (u32)canvas_min((usize)draw.clip.height, (usize)(height - draw.clip.y))))
+                if scissor.extent.width == 0 or scissor.extent.height == 0:
+                    continue
+                var viewport = VkViewport(width = (f32)width, height = (f32)height, maxDepth = 1.0)
+                if let region = draw.viewport:
+                    viewport.x = (f32)region.x
+                    viewport.y = (f32)region.y
+                    viewport.width = (f32)region.width
+                    viewport.height = (f32)region.height
+                vkCmdSetViewport(command, 0, 1, &viewport)
+                vkCmdSetScissor(command, 0, 1, &scissor)
+                # Zero clamp requires no optional depthBiasClamp device feature.
+                vkCmdSetDepthBias(command,0.0,0.0,draw.depth_slope)
+                if let mesh = draw.mesh:
+                    vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, formats.mesh[(usize)(u8)mesh.kind])
+                    var mesh_set = upload.mesh_descriptors[index]
+                    vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, device.mesh_pipeline_layout, 0, 1, &mesh_set, 0, none)
+                    vkCmdDraw(command, (u32)draw.count, 1, 0, 0)
+                    continue
+                var selected = formats.depth_test if draw.depth else formats.overlay
+                if let custom = draw.pipeline:
+                    selected = try vulkan_pipeline_for(device, (VulkanPipeline*)custom.native, formats.format, client_variant(draw))
+                if draw.geometry != none: selected = formats.geometry
+                vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, selected)
+                var descriptor = upload.descriptors[index]
+                vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, device.layout, 0, 1, &descriptor, 0, none)
+                if draw.uniform_count > 0:
+                    var uniforms = draw.uniforms
+                    vkCmdPushConstants(command, device.layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, (u32)uniform_limit, &uniforms)
                 else:
-                    vkCmdDraw(command, quad_vertex_count, (u32)quads.count, 0, 0)
-                continue
-            if draw.instanced:
-                # Six vertices per rectangle, the draw's run of instances.
-                vkCmdDraw(command, 6, (u32)draw.count, 0, (u32)draw.first)
-            else:
-                vkCmdDraw(command, (u32)draw.count, 1, (u32)draw.first, 0)
-    vkCmdEndRenderPass(command)
+                    var params = draw.params
+                    if encoded:
+                        params.mode = params.mode | draw_encoded
+                    vkCmdPushConstants(command, device.layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 48, &params)
+                if let quads = draw.quads:
+                    # A strip of four vertices per quad, as many as counted.
+                    if let arguments = quads.arguments:
+                        vkCmdDrawIndirect(command, ((VulkanBuffer*)arguments.native).buffer, (u64)quads.arguments_offset, 1, 16)
+                    else:
+                        vkCmdDraw(command, quad_vertex_count, (u32)quads.count, 0, 0)
+                    continue
+                if draw.instanced:
+                    # Six vertices per rectangle, the draw's run of instances.
+                    vkCmdDraw(command, 6, (u32)draw.count, 0, (u32)draw.first)
+                else:
+                    vkCmdDraw(command, (u32)draw.count, 1, (u32)draw.first, 0)
+        vkCmdEndRenderPass(command)
+        if last: return
+        vulkan_copy_depth(device, command, depth_image, width, height)
+        start = end
+        first = false
+
+## Copy `width` by `height` of the depth attachment `depth_image` (stored by
+## the pass that just ended) to the device's depth copy, and make both ready:
+## the attachment for the next pass, the copy for sampling.
+func vulkan_copy_depth(device: VulkanDevice*, command: u64, depth_image: u64, width: u32, height: u32):
+    let depth_range = VkImageSubresourceRange(aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT, levelCount = 1, layerCount = 1)
+    let tests = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT
+    let depth_access = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT
+    var before: VkImageMemoryBarrier[2] = [
+        VkImageMemoryBarrier(sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, srcAccessMask = depth_access, dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
+                             oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                             srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, image = depth_image, subresourceRange = depth_range),
+        # Draws that sampled the previous copy are done before it is written.
+        VkImageMemoryBarrier(sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, srcAccessMask = VK_ACCESS_SHADER_READ_BIT, dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+                             oldLayout = device.depth_copy_layout, newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                             srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, image = device.depth_copy_image, subresourceRange = depth_range)]
+    vkCmdPipelineBarrier(command, tests | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, none, 0, none, 2, &before[0])
+    let layers = VkImageSubresourceLayers(aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT, layerCount = 1)
+    var region = VkImageCopy(srcSubresource = layers, dstSubresource = layers, extent = VkExtent3D(width = width, height = height, depth = 1))
+    vkCmdCopyImage(command, depth_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, device.depth_copy_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region)
+    var after: VkImageMemoryBarrier[2] = [
+        VkImageMemoryBarrier(sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT, dstAccessMask = depth_access,
+                             oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                             srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, image = depth_image, subresourceRange = depth_range),
+        VkImageMemoryBarrier(sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+                             oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                             srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, image = device.depth_copy_image, subresourceRange = depth_range)]
+    vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT, tests | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, none, 0, none, 2, &after[0])
+    device.depth_copy_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
 
 ## Record that submission `serial` reads a quad draw's buffers.
 func vulkan_quads_used(quads: const QuadDraw*, serial: u64):
@@ -270,6 +329,7 @@ func vulkan_render(device: VulkanDevice*, host: window.Presentation, state: Vulk
     # What was recorded before the frame (its textures' passes, uploads) is
     # submitted first; the frame's draw data is then for its own submission.
     try vulkan_flush(device)
+    if reads_scene_depth_anywhere(&canvas): try vulkan_depth_copy_for(device, width, height)
     let upload = try vulkan_upload(device, canvas)
     defer vulkan_upload_destroy(device, upload)
     try vulkan_check(vkResetCommandPool(device.device, state.pool, 0), "the Vulkan command pool could not be reset")
@@ -294,7 +354,7 @@ func vulkan_render(device: VulkanDevice*, host: window.Presentation, state: Vulk
     vulkan_time_start(device, state.command)
     # Presentation waits for the queue below, so the images it samples need no serial.
     try vulkan_encode(device, state.command, formats, formats.pass_present, state.images[(usize)index].framebuffer, canvas, upload,
-                      Color(color.red, color.green, color.blue, 1.0), state.width, state.height, 0, state.encoded)
+                      Color(color.red, color.green, color.blue, 1.0), state.width, state.height, 0, state.encoded, state.depth_image)
     vulkan_time_end(device, state.command)
     try vulkan_check(vkEndCommandBuffer(state.command), "Vulkan command recording could not finish")
     var wait_stage: u32 = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT

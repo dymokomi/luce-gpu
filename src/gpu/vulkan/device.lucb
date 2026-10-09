@@ -24,6 +24,10 @@ struct VulkanFormatState:
     var geometry: u64
     # Mesh pipelines by MeshKind (vulkan/mesh.lucb).
     var mesh: u64[3]
+    # The passes of a frame split for scene depth copies, made on first use
+    # (vulkan_split_pass): opening cleared or loaded, middle, closing to
+    # presentation or to sampling.
+    var split: u64[5]
 
 ## A free range of a memory page.
 struct VulkanRange:
@@ -138,6 +142,14 @@ struct VulkanDevice:
     var depth_view: u64
     var depth_width: u32
     var depth_height: u32
+    # The depth copied for draws reading the scene depth (vulkan_depth_copy_for);
+    # it only grows, and its layout is tracked across submissions.
+    var depth_copy_image: u64
+    var depth_copy_memory: u64
+    var depth_copy_view: u64
+    var depth_copy_width: u32
+    var depth_copy_height: u32
+    var depth_copy_layout: u32
     # The staging rings; see vulkan/transfer.lucb.
     var reads: VulkanRingSlot[3]
     var uploads: VulkanRingSlot[4]

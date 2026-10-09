@@ -99,6 +99,9 @@ func vulkan_drawing_destroy(device: VulkanDevice*):
         device.placeholder = none
         vulkan_texture_destroy(device, placeholder)
     vulkan_depth_destroy(device)
+    vulkan_depth_release(device, &device.depth_copy_image, &device.depth_copy_memory, &device.depth_copy_view)
+    device.depth_copy_width = 0
+    device.depth_copy_height = 0
     vulkan_rings_destroy(device)
     vulkan_slots_destroy(device)
     vulkan_ring_destroy(device)
@@ -111,6 +114,7 @@ func vulkan_drawing_destroy(device: VulkanDevice*):
         if state.pass_present != 0: vkDestroyRenderPass(device.device, state.pass_present, none)
         if state.pass_texture != 0: vkDestroyRenderPass(device.device, state.pass_texture, none)
         if state.pass_load != 0: vkDestroyRenderPass(device.device, state.pass_load, none)
+        vulkan_split_passes_destroy(device, state.split)
     device.format_count = 0
     if device.nearest != 0: vkDestroySampler(device.device, device.nearest, none)
     if device.linear != 0: vkDestroySampler(device.device, device.linear, none)
@@ -126,18 +130,22 @@ func vulkan_drawing_destroy(device: VulkanDevice*):
     device.descriptor_layout = 0
     device.ready = false
 
-## Allocate a 32-bit depth attachment of `width` by `height`: the image, its
+## Allocate a 32-bit depth image of `width` by `height`: the image, its
 ## memory and its view are written to `depth`, `block` and `target`, replacing
-## whatever they held.
-func vulkan_depth_create(device: VulkanDevice*, width: u32, height: u32, depth: u64*, block: u64*, target: u64*) -> !:
+## whatever they held. An attachment is also a copy source (scene depth
+## copies); with `sampled` it is instead a copy target draws sample.
+func vulkan_depth_create(device: VulkanDevice*, width: u32, height: u32, depth: u64*, block: u64*, target: u64*, sampled: bool = false) -> !:
     vulkan_depth_release(device, depth, block, target)
     errdefer vulkan_depth_release(device, depth, block, target)
     var properties: VkFormatProperties
     vkGetPhysicalDeviceFormatProperties(device.physical, VK_FORMAT_D32_SFLOAT, &properties)
     if (properties.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) == 0:
         error(unavailable, "the Vulkan device has no 32-bit depth attachment support")
+    if sampled and (properties.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) == 0:
+        error(unsupported, "the Vulkan device cannot sample 32-bit depth, so draws cannot read the scene depth")
+    let usage = (VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT) if sampled else (VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT)
     var info = VkImageCreateInfo(sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, imageType = VK_IMAGE_TYPE_2D, format = VK_FORMAT_D32_SFLOAT,
-                                 extent = VkExtent3D(width = width, height = height, depth = 1), mipLevels = 1, arrayLayers = 1, samples = VK_SAMPLE_COUNT_1_BIT, usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)
+                                 extent = VkExtent3D(width = width, height = height, depth = 1), mipLevels = 1, arrayLayers = 1, samples = VK_SAMPLE_COUNT_1_BIT, usage = usage)
     try vulkan_check(vkCreateImage(device.device, &info, none, depth), "the Vulkan depth image could not be created")
     var requirements: VkMemoryRequirements
     vkGetImageMemoryRequirements(device.device, *depth, &requirements)
@@ -178,6 +186,26 @@ func vulkan_depth_for(device: VulkanDevice*, width: u32, height: u32) -> u64!:
     device.depth_width = grown_width
     device.depth_height = grown_height
     return device.depth_view
+
+## The image draws reading the scene depth sample, at least `width` by
+## `height`: grown and retired as `vulkan_depth_for` grows the attachment.
+func vulkan_depth_copy_for(device: VulkanDevice*, width: u32, height: u32) -> !:
+    if device.depth_copy_view != 0 and width <= device.depth_copy_width and height <= device.depth_copy_height:
+        return
+    let grown_width = width if width > device.depth_copy_width else device.depth_copy_width
+    let grown_height = height if height > device.depth_copy_height else device.depth_copy_height
+    device.depth_copy_width = 0
+    device.depth_copy_height = 0
+    if device.depth_copy_image != 0:
+        vulkan_retire_latest(device, VulkanRetired(kind = vulkan_retired_image, handle = device.depth_copy_image, view = device.depth_copy_view,
+                                                   allocation = VulkanAllocation(memory = device.depth_copy_memory)))
+        device.depth_copy_image = 0
+        device.depth_copy_view = 0
+        device.depth_copy_memory = 0
+    try vulkan_depth_create(device, grown_width, grown_height, &device.depth_copy_image, &device.depth_copy_memory, &device.depth_copy_view, sampled = true)
+    device.depth_copy_width = grown_width
+    device.depth_copy_height = grown_height
+    device.depth_copy_layout = VK_IMAGE_LAYOUT_UNDEFINED
 
 func vulkan_depth_destroy(device: VulkanDevice*):
     vulkan_depth_release(device, &device.depth_image, &device.depth_memory, &device.depth_view)
@@ -392,6 +420,7 @@ func vulkan_texture_render(device: VulkanDevice*, state: VulkanTexture*, canvas:
     var framebuffer: u64 = 0
     try vulkan_check(vkCreateFramebuffer(device.device, &framebuffer_info, none, &framebuffer), "a Vulkan framebuffer could not be created")
     defer vulkan_framebuffer_release(device, framebuffer)
+    if reads_scene_depth_anywhere(&canvas): try vulkan_depth_copy_for(device, state.width, state.height)
     var upload = try vulkan_upload(device, canvas)
     defer vulkan_upload_destroy(device, upload)
     let slot = try vulkan_begin(device)
@@ -412,7 +441,7 @@ func vulkan_texture_render(device: VulkanDevice*, state: VulkanTexture*, canvas:
     else:
         # The pass begins from an undefined layout and clears; only the bookkeeping moves.
         state.layout = VK_IMAGE_LAYOUT_UNDEFINED
-    try vulkan_encode(device, slot.command, formats, pass, framebuffer, canvas, upload, color, state.width, state.height, serial)
+    try vulkan_encode(device, slot.command, formats, pass, framebuffer, canvas, upload, color, state.width, state.height, serial, depth_image = device.depth_image)
     state.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
     try vulkan_retire(slot, VulkanRetired(kind = vulkan_retired_framebuffer, handle = framebuffer))
     framebuffer = 0

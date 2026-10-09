@@ -10,6 +10,7 @@ import targets
 import copies
 import instances
 import depth_read
+import scene_depth
 import quads
 
 ## Vulkan batching contracts: texture passes and uploads do not wait, results are
@@ -33,6 +34,7 @@ pub func main(arguments: str[]) -> i32!:
     try copies.pixels(device)
     try instances.pixels(device)
     try depth_read.pixels(device)
+    try scene_depth.pixels(device)
     try quads.pixels(device)
     try ordering(device)
     try batched_reads(device)

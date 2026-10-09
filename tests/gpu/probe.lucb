@@ -12,6 +12,7 @@ import targets
 import copies
 import instances
 import depth_read
+import scene_depth
 import quads
 import allocation
 import memory
@@ -223,6 +224,7 @@ pub func main(arguments: str[]) -> i32!:
         try copies.pixels(device)
         try instances.pixels(device)
         try depth_read.pixels(device)
+        try scene_depth.pixels(device)
         try quads.pixels(device)
         device.destroy()
         print("ok GPU device")

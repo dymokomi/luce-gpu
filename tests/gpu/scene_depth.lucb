@@ -1,0 +1,63 @@
+## Client pipelines made with scene_depth read the frame's depth at binding 4
+## as the draws before them left it: a copy is made before the first such
+## draw and again after depth is written, and the colors drawn before each
+## copy stay.
+from luce_gpu import gpu
+import memory
+import depth_shaders
+
+## Two triangles covering x0..x1, y0..y1 of clip space at depth `z`, colored `color`.
+func box(x0: f32, x1: f32, y0: f32, y1: f32, z: f32, color: gpu.Vertex) -> gpu.Vertex[6]:
+    var a = color
+    a.x = x0
+    a.y = y0
+    a.z = z
+    var b = a
+    b.x = x1
+    var c = b
+    c.y = y1
+    var d = a
+    d.y = y1
+    return [a, b, c, a, c, d]
+
+pub func pixels(device: gpu.Device) -> !:
+    var shader = try gpu.Shader.create(device, depth_shaders.scene_depth_frag_words, depth_shaders.scene_depth_frag_msl)
+    defer shader.destroy()
+    var reading = try gpu.Pipeline.create(device, shader, gpu.Blend.over, gpu.Format.rgba8_linear, scene_depth = true)
+    defer reading.destroy()
+    var target = try gpu.Texture.create(device, 64, 32, gpu.Format.rgba8_linear)
+    defer target.destroy()
+    let frame = try target.frame()
+    let root = try frame.value().target()
+    let native = try root.get()
+    var red: f32[4] = [1.0, 0.0, 0.0, 0.0]
+    var green: f32[4] = [0.0, 1.0, 0.0, 0.0]
+    # Opaque blue over the left half at depth 0.5, writing depth.
+    try native.triangles(box(-1.0, 0.0, -1.0, 1.0, 0.5, gpu.Vertex(blue = 1.0)), true)
+    # The top half's red is the depth: 0.5 on the left, 1 (nothing drawn) on the right.
+    try gpu.shade_triangles(native, reading, box(-1.0, 1.0, 0.0, 1.0, 0.0, gpu.Vertex()), u8[]((u8*)&red[0], 16))
+    # Opaque blue over the bottom right at depth 0.25: a new copy for the next read.
+    try native.triangles(box(0.0, 1.0, -1.0, 0.0, 0.25, gpu.Vertex(blue = 1.0)), true)
+    # The bottom half's green: 0.5 on the left, 0.25 on the right.
+    try gpu.shade_triangles(native, reading, box(-1.0, 1.0, -1.0, 0.0, 0.0, gpu.Vertex()), u8[]((u8*)&green[0], 16))
+    # A third read with no depth written since reuses the copy: the top
+    # right's blue becomes its depth, 1.
+    var blue: f32[4] = [0.0, 0.0, 1.0, 0.0]
+    try gpu.shade_triangles(native, reading, box(0.5, 1.0, 0.5, 1.0, 0.0, gpu.Vertex()), u8[]((u8*)&blue[0], 16))
+    root.release()
+    _ = try frame.value().present(gpu.Color(0.0, 0.0, 0.0))
+    frame.release()
+    let bytes = try new u8[64 * 32 * 4] --- in memory.heap
+    defer free(bytes) in memory.heap
+    try target.read(bytes)
+    # Rows run top down: the top half is rows 0..15.
+    let top_left = (8 * 64 + 16) * 4
+    assert(bytes[top_left] >= 126 and bytes[top_left] <= 129 and bytes[top_left + 1] == 0 and bytes[top_left + 2] == 0)
+    let top_right = (8 * 64 + 40) * 4
+    assert(bytes[top_right] == 255 and bytes[top_right + 2] == 0)
+    let corner = (4 * 64 + 60) * 4
+    assert(bytes[corner] == 0 and bytes[corner + 2] == 255)
+    let bottom_left = (24 * 64 + 16) * 4
+    assert(bytes[bottom_left] == 0 and bytes[bottom_left + 1] >= 126 and bytes[bottom_left + 1] <= 129)
+    let bottom_right = (24 * 64 + 48) * 4
+    assert(bytes[bottom_right + 1] >= 62 and bytes[bottom_right + 1] <= 66 and bytes[bottom_right + 2] == 0)
