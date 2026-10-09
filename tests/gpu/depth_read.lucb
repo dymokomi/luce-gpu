@@ -1,0 +1,53 @@
+## shade_triangles with a depth-tested client pipeline: hidden behind a nearer
+## opaque draw, shown in front of the clear, and writing no depth, so a second
+## translucent layer farther away still draws where the first one did.
+from luce_gpu import gpu
+import memory
+import shaders
+
+## Two triangles covering x0..x1 of clip space at depth `z`, colored `color`.
+func band(x0: f32, x1: f32, z: f32, color: gpu.Vertex) -> gpu.Vertex[6]:
+    var a = color
+    a.x = x0
+    a.y = -1.0
+    a.z = z
+    var b = a
+    b.x = x1
+    var c = b
+    c.y = 1.0
+    var d = a
+    d.y = 1.0
+    return [a, b, c, a, c, d]
+
+pub func pixels(device: gpu.Device) -> !:
+    var shader = try gpu.Shader.create(device, shaders.tint_frag_words, shaders.tint_frag_msl)
+    defer shader.destroy()
+    var tested = try gpu.Pipeline.create(device, shader, gpu.Blend.over, gpu.Format.rgba8_linear, depth_test = true)
+    defer tested.destroy()
+    var white = try gpu.Texture.create(device, 1, 1, gpu.Format.rgba8_linear)
+    defer white.destroy()
+    try white.upload([(u8)255, (u8)255, (u8)255, (u8)255])
+    var target = try gpu.Texture.create(device, 64, 32, gpu.Format.rgba8_linear)
+    defer target.destroy()
+    # tint, rectangle, offset scale: the vertex color as is.
+    var uniforms: f32[9] = [1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 64.0, 32.0, 0.0]
+    let frame = try target.frame()
+    let root = try frame.value().target()
+    let native = try root.get()
+    # Opaque red over the left half at depth 0.5, writing depth.
+    try native.triangles(band(-1.0, 0.0, 0.5, gpu.Vertex(red = 1.0)), true)
+    # Opaque green everywhere at 0.75: hidden on the left, drawn on the right.
+    try gpu.shade_triangles(native, tested, band(-1.0, 1.0, 0.75, gpu.Vertex(green = 1.0)), u8[]((u8*)&uniforms[0], 36), [white, white])
+    # Half-alpha blue everywhere at 0.9: green wrote no depth, so it blends
+    # over green on the right and is still hidden by red on the left.
+    try gpu.shade_triangles(native, tested, band(-1.0, 1.0, 0.9, gpu.Vertex(blue = 1.0, alpha = 0.5)), u8[]((u8*)&uniforms[0], 36), [white, white])
+    root.release()
+    _ = try frame.value().present(gpu.Color(0.0, 0.0, 0.0))
+    frame.release()
+    let bytes = try new u8[64 * 32 * 4] --- in memory.heap
+    defer free(bytes) in memory.heap
+    try target.read(bytes)
+    let left = (16 * 64 + 16) * 4
+    assert(bytes[left] == 255 and bytes[left + 1] == 0 and bytes[left + 2] == 0)
+    let right = (16 * 64 + 48) * 4
+    assert(bytes[right] == 0 and bytes[right + 1] >= 126 and bytes[right + 1] <= 129 and bytes[right + 2] >= 126 and bytes[right + 2] <= 129)

@@ -270,16 +270,22 @@ pub struct Canvas:
         try self.triangles(quad_vertices(rectangle, color, target_width, target_height), clip)
         var draw = &self.draws[self.draw_count - 1]
         draw.params = DrawParams((f32)rectangle.x, (f32)rectangle.y, (f32)rectangle.width, (f32)rectangle.height, 0, 0, 0, draw_solid, 0.0, 0.0, 0.0, 0.0)
-        if uniforms.length > 0:
-            memory.copy(draw.uniforms[..<uniforms.length], uniforms, uniforms.length)
-        draw.uniform_count = (u32)uniforms.length
-        draw.filter = filter
-        for index in 0..<images.length:
-            if let texture = images[index]:
-                draw.images[index] = texture
-                texture.references += 1
-        draw.pipeline = pipeline
-        pipeline.references += 1
+        attach_client(draw, pipeline, uniforms, images, filter)
+
+    ## Clip-space triangles drawn with a client pipeline into `viewport`
+    ## (backing pixels): each vertex color reaches the fragment stage. The
+    ## pipeline and images stay retained until the canvas is cleared.
+    func shade_triangles(pipeline: PipelineState*, vertices: const Vertex[], uniforms: const u8[], images: TextureState*?[],
+                         filter: Filter, clip: Clip, viewport: Viewport) -> !:
+        if uniforms.length > uniform_limit:
+            error(invalid_geometry, "a draw carries at most 128 uniform bytes")
+        if images.length > image_limit:
+            error(invalid_geometry, "a draw samples at most 4 images")
+        let before = self.draw_count
+        try self.triangles(vertices, clip, false, viewport)
+        if self.draw_count == before:
+            return
+        attach_client(&self.draws[self.draw_count - 1], pipeline, uniforms, images, filter)
 
     ## Release the recorded storage.
     pub func destroy():
@@ -299,6 +305,20 @@ let canvas_draw_default: usize = 4096
 let canvas_draw_ceiling: usize = 65536
 ## The most instanced rectangles one canvas holds (64 MiB of them).
 let canvas_instance_limit: usize = 1048576
+
+## Make `draw` a client pipeline's: its uniforms, images and filter, the
+## pipeline and images retained.
+func attach_client(draw: Draw*, pipeline: PipelineState*, uniforms: const u8[], images: TextureState*?[], filter: Filter):
+    if uniforms.length > 0:
+        memory.copy(draw.uniforms[..<uniforms.length], uniforms, uniforms.length)
+    draw.uniform_count = (u32)uniforms.length
+    draw.filter = filter
+    for index in 0..<images.length:
+        if let texture = images[index]:
+            draw.images[index] = texture
+            texture.references += 1
+    draw.pipeline = pipeline
+    pipeline.references += 1
 
 # mark: Geometry helpers ======================================================================
 ## Two clip-space triangles covering `rectangle`, given in backing pixels of a

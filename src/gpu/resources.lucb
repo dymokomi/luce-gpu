@@ -88,9 +88,9 @@ func backend_shader_create(device: DeviceState*, spirv: const u32[], msl: c.str,
             return (void*)try metal_shader_create((MetalDevice*)device.native, msl, fast_math)
     error(unsupported, "the GPU backend is not implemented")
 
-func backend_pipeline_create(device: DeviceState*, shader: void*, blend: Blend, pixel_format: Format?) -> void*!:
+func backend_pipeline_create(device: DeviceState*, shader: void*, blend: Blend, pixel_format: Format?, depth_test: bool) -> void*!:
     if (platform.windows or platform.linux) and device.backend == Backend.vulkan:
-        return (void*)try vulkan_pipeline_create((VulkanDevice*)device.native, (VulkanShader*)shader, blend, pixel_format)
+        return (void*)try vulkan_pipeline_create((VulkanDevice*)device.native, (VulkanShader*)shader, blend, pixel_format, depth_test)
     if platform.macos and platform.arm64:
         if device.backend == Backend.metal:
             return (void*)try metal_pipeline_create((MetalDevice*)device.native, shader, blend, pixel_format)

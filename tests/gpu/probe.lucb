@@ -11,6 +11,7 @@ import rays
 import targets
 import copies
 import instances
+import depth_read
 import allocation
 import memory
 import native
@@ -220,6 +221,7 @@ pub func main(arguments: str[]) -> i32!:
         try targets.pixels(device)
         try copies.pixels(device)
         try instances.pixels(device)
+        try depth_read.pixels(device)
         device.destroy()
         print("ok GPU device")
     elif arguments.length > 1 and arguments[1] == "gui":

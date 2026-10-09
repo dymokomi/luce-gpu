@@ -35,6 +35,8 @@ struct MetalDrawing:
     var mesh_pipelines: void*?[18]
     var depth_on: void*?
     var depth_off: void*?
+    # Tested (less) without writing: client pipelines made with depth_test.
+    var depth_read: void*?
     var nearest: void*?
     var linear: void*?
     var trilinear: void*?
@@ -89,6 +91,8 @@ func metal_drawing_open(device: MetalDevice*) -> MetalDrawing*!:
     metal_uint_arg(depth, metal_sel("setDepthCompareFunction:"), 7)
     metal_bool_arg(depth, metal_sel("setDepthWriteEnabled:"), false)
     state.depth_off = metal_with_object(native, metal_sel("newDepthStencilStateWithDescriptor:"), depth) else error(failed, "could not create GPU overlay state")
+    metal_uint_arg(depth, metal_sel("setDepthCompareFunction:"), 1)
+    state.depth_read = metal_with_object(native, metal_sel("newDepthStencilStateWithDescriptor:"), depth) else error(failed, "could not create GPU depth reading")
     state.nearest = try metal_sampler(native, 0)
     state.linear = try metal_sampler(native, 1)
     state.trilinear = try metal_sampler(native, 1, true)
@@ -258,7 +262,7 @@ func metal_drawing_destroy(state: MetalDrawing*):
         if let value = pipeline: metal_void(value, metal_sel("release"))
     for pipeline in state.mesh_pipelines:
         if let value = pipeline: metal_void(value, metal_sel("release"))
-    for object in [state.depth_on, state.depth_off, state.nearest, state.linear, state.trilinear, state.library, state.fill, state.geometry_library,
+    for object in [state.depth_on, state.depth_off, state.depth_read, state.nearest, state.linear, state.trilinear, state.library, state.fill, state.geometry_library,
                    state.mesh_library, state.mesh_wire_library, state.mesh_fragment_library, state.mesh_id_library, state.mesh_placeholder]:
         if let value = object:
             metal_void(value, metal_sel("release"))
@@ -338,7 +342,10 @@ func metal_encode(encoder: void*, drawing: MetalDrawing*, pipeline: void*, geome
         let region = draw.viewport else Viewport(width = (f64)width, height = (f64)height)
         metal_viewport(encoder, metal_sel("setViewport:"), LuceGpuMetalViewport(x = region.x, y = region.y, width = region.width, height = region.height, near = 0.0, far = 1.0))
         metal_scissor(encoder, metal_sel("setScissorRect:"), LuceGpuMetalScissor(x = x, y = y, width = w, height = h))
-        metal_object(encoder, metal_sel("setDepthStencilState:"), drawing.depth_on if draw.depth else drawing.depth_off)
+        var depth_state = drawing.depth_on if draw.depth else drawing.depth_off
+        if let custom = draw.pipeline:
+            if custom.depth_test: depth_state = drawing.depth_read
+        metal_object(encoder, metal_sel("setDepthStencilState:"), depth_state)
         # Always reset between draws: neither wires nor UI inherit fill bias.
         metal_depth_bias(encoder,metal_sel("setDepthBias:slopeScale:clamp:"),0.0,draw.depth_slope,0.0)
         if let mesh = draw.mesh:

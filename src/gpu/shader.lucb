@@ -68,8 +68,11 @@ pub struct Pipeline:
     var state: PipelineState*?
 
     ## Build a pipeline drawing `shader` with `blend` into targets of `format`,
-    ## or into presentation surfaces when `format` is `none`.
-    pub static func create(device: Device, shader: Shader, blend: Blend, pixel_format: Format? = none) -> Pipeline!:
+    ## or into presentation surfaces when `format` is `none`. With
+    ## `depth_test`, its fragments are tested against the frame's depth
+    ## (nearer passes) without writing it: what `shade_triangles` needs to
+    ## draw translucent geometry behind and in front of a depth-tested scene.
+    pub static func create(device: Device, shader: Shader, blend: Blend, pixel_format: Format? = none, depth_test: bool = false) -> Pipeline!:
         let device_state = try device.checked()
         let shader_state = try shader.checked()
         if shader_state.device != device_state:
@@ -77,9 +80,9 @@ pub struct Pipeline:
         if let target = pixel_format:
             if not renderable(target):
                 error(invalid_geometry, "32-bit textures are written by compute kernels, not rendered into")
-        let native = try backend_pipeline_create(device_state, shader_state.native, blend, pixel_format)
+        let native = try backend_pipeline_create(device_state, shader_state.native, blend, pixel_format, depth_test)
         errdefer device_state.destroy_pipeline(device_state.native, native)
-        let state = try new PipelineState(device = device_state, shader = shader_state, native = native, blend = blend, format = pixel_format) in memory.heap
+        let state = try new PipelineState(device = device_state, shader = shader_state, native = native, blend = blend, format = pixel_format, depth_test = depth_test) in memory.heap
         shader_state.references += 1
         device_state.references += 1
         return Pipeline(state = state)
@@ -110,6 +113,8 @@ struct PipelineState:
     var native: void*
     var blend: Blend
     var format: Format?
+    # Fragments are depth tested (nearer passes) and write no depth.
+    var depth_test: bool
     var references: usize = 1
     var closed: bool
 

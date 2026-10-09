@@ -21,6 +21,8 @@ struct VulkanPipeline:
     var shader: VulkanShader*
     var blend: Blend
     var format: Format?
+    # Depth tested without writing depth (Pipeline.create's depth_test).
+    var depth_test: bool
     var entries: VulkanPipelineEntry[12]
     var count: usize
 
@@ -36,8 +38,8 @@ func vulkan_shader_destroy(device: VulkanDevice*, state: VulkanShader*):
     if state.module != 0: vkDestroyShaderModule(device.device, state.module, none)
     free(state) in memory.heap
 
-func vulkan_pipeline_create(device: VulkanDevice*, shader: VulkanShader*, blend: Blend, pixel_format: Format?) -> VulkanPipeline*!:
-    let state = try new VulkanPipeline(shader = shader, blend = blend, format = pixel_format) in memory.heap
+func vulkan_pipeline_create(device: VulkanDevice*, shader: VulkanShader*, blend: Blend, pixel_format: Format?, depth_test: bool) -> VulkanPipeline*!:
+    let state = try new VulkanPipeline(shader = shader, blend = blend, format = pixel_format, depth_test = depth_test) in memory.heap
     errdefer vulkan_pipeline_destroy(device, state)
     # A texture target's format is known now; build eagerly so failures surface at creation.
     if let target = pixel_format:
@@ -59,7 +61,7 @@ func vulkan_pipeline_for(device: VulkanDevice*, state: VulkanPipeline*, pixel_fo
     if state.count == state.entries.length:
         error(failed, "a Vulkan pipeline was drawn into too many color formats")
     let formats = try vulkan_format_state(device, pixel_format)
-    let pipeline = try vulkan_build_pipeline(device, formats.pass_texture, state.shader.module, state.blend, false, instanced = instanced)
+    let pipeline = try vulkan_build_pipeline(device, formats.pass_texture, state.shader.module, state.blend, false, instanced = instanced, depth_read = state.depth_test)
     state.entries[state.count] = VulkanPipelineEntry(format = pixel_format, instanced = instanced, pipeline = pipeline)
     state.count += 1
     return pipeline

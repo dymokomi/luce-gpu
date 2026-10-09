@@ -396,6 +396,38 @@ pub func shade_instances(target: const RenderTarget*, pipeline: Pipeline, instan
                                               (f32)(right * 2.0 / pixel_width - 1.0), (f32)(1.0 - bottom * 2.0 / pixel_height)], data = instance.data)
     try target.frame.canvas.shade_instances(state, placed, bytes[..<byte_count], sampled[..<count], filter, target.clipping)
 
+## Draw clip-space `vertices` (whole triangles, mapped onto `target` as
+## `RenderTarget.triangles` maps them) with a client `pipeline`: `uniforms`
+## fill its push-constant block, `images` its sampled bindings 1.., and each
+## vertex's color (finite, 0..1) reaches the fragment stage at location 0,
+## interpolated with perspective. A pipeline made with `depth_test` is hidden
+## behind nearer depth-tested draws and writes no depth. Clipped like every
+## other draw; vertices are copied.
+pub func shade_triangles(target: const RenderTarget*, pipeline: Pipeline, vertices: const Vertex[], uniforms: const u8[]? = none,
+                         images: const Texture[]? = none, filter: Filter = Filter.linear) -> !:
+    try target.frame.check()
+    let state = try pipeline.checked()
+    var sampled: TextureState*?[4]
+    var count: usize = 0
+    if let list = images:
+        for image in list:
+            if count == image_limit:
+                error(invalid_geometry, "a draw samples at most 4 images")
+            sampled[count] = try image.checked()
+            count += 1
+    var bytes: u8[128]
+    var byte_count: usize = 0
+    if let data = uniforms:
+        if data.length > uniform_limit:
+            error(invalid_geometry, "a draw carries at most 128 uniform bytes")
+        memory.copy(bytes[..<data.length], data, data.length)
+        byte_count = data.length
+    let scale_x = frame_scale(target.frame.size.pixel_width, target.frame.size.width)
+    let scale_y = frame_scale(target.frame.size.pixel_height, target.frame.size.height)
+    let viewport = Viewport(target.rectangle.x * scale_x, target.rectangle.y * scale_y,
+                            target.rectangle.width * scale_x, target.rectangle.height * scale_y)
+    try target.frame.canvas.shade_triangles(state, vertices, bytes[..<byte_count], sampled[..<count], filter, target.clipping, viewport)
+
 ## Draw `rectangle` of `target` (in points) with a client `pipeline`: `uniforms`
 ## fill its push-constant block, `images` its sampled bindings 1.., all with
 ## `filter`; `color` is the vertex color each fragment starts from. Clipped

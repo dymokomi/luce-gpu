@@ -531,6 +531,18 @@ buffer 1 by `instance_id`, `drawPrimitives` with an instance count), and Vulkan 
 second pipeline with an instance-rate vertex binding (`shaders/instance.vert`,
 `vkCmdDraw(6, count, 0, first)`).
 
+`shade_triangles(target, pipeline, vertices, uniforms?, images?, filter)` draws
+clip-space triangles (`Vertex` records, mapped onto the target as
+`RenderTarget.triangles` maps them) with a client pipeline; each vertex's color
+reaches location 0 interpolated with perspective, so it can carry coordinates in
+0..1 (a volume's texture coordinates, say). A pipeline made with
+`Pipeline.create(..., depth_test = true)` tests its fragments against the frame's
+depth (nearer passes) and writes none: translucent geometry, such as the slabs
+luce-3d ray-marches fog volumes through, then hides behind nearer meshes, shows
+over farther ones, and layers over itself. Metal sets a less-without-write depth
+state for such draws; Vulkan builds the pipeline with depth testing on and
+writes off. tests/gpu/depth_read.lucb checks the pixels on both.
+
 A pipeline recorded into a frame of another target format is refused at
 `present` with `wrong_target`; one from another device with `wrong_device`.
 Shaders and pipelines are manual Base resources like textures, and a draw
