@@ -3,7 +3,7 @@
 #   accel - Metal acceleration structures
 #
 #   DESCRIPTION:
-#       A Blas is a primitive acceleration structure of one triangle geometry, a Tlas an
+#       A Blas is a primitive acceleration structure of one triangle or bounding-box geometry, a Tlas an
 #       instance acceleration structure with user-id instance descriptors. Their storage is
 #       sized when they are created and grown at a build whose real descriptor needs more (a
 #       Tlas's size depends on the Blases it instances); builds and refits are encoded on an
@@ -18,6 +18,7 @@ struct MetalAccel:
     var size: u64
     var top: bool
     var opaque: bool
+    var boxes: bool
     var refit: bool
 
 ## A pass's scratch memory for builds (autoreleased; its command buffers keep it).
@@ -36,26 +37,44 @@ let metal_usage_refit: u64 = 1
 ## acceleration structure index and user id, all u32.
 let metal_instance_bytes: usize = 68
 
-## A primitive descriptor of one triangle geometry; buffers are set only for builds.
-func metal_blas_descriptor(vertex_count: u32, triangle_count: u32, opaque: bool, refit: bool, vertices: void*?, triangles: const TriangleRecord*?, indices: void*?) -> void*!:
-    let geometry = metal_ptr(try metal_class("MTLAccelerationStructureTriangleGeometryDescriptor"), metal_sel("descriptor")) else error(failed, "could not describe Metal triangles")
-    metal_uint_arg(geometry, metal_sel("setVertexFormat:"), metal_float3)
-    metal_uint_arg(geometry, metal_sel("setVertexStride:"), 12)
-    metal_uint_arg(geometry, metal_sel("setIndexType:"), metal_index_u32)
-    metal_uint_arg(geometry, metal_sel("setTriangleCount:"), (u64)triangle_count)
-    metal_bool_arg(geometry, metal_sel("setOpaque:"), opaque)
-    if let record = triangles:
-        metal_object(geometry, metal_sel("setVertexBuffer:"), vertices)
-        metal_uint_arg(geometry, metal_sel("setVertexBufferOffset:"), (u64)record.vertex_offset)
-        metal_uint_arg(geometry, metal_sel("setVertexStride:"), (u64)record.stride)
-        metal_object(geometry, metal_sel("setIndexBuffer:"), indices)
-        metal_uint_arg(geometry, metal_sel("setIndexBufferOffset:"), (u64)record.index_offset)
-    _ = vertex_count
+## A primitive descriptor of one triangle geometry, or one bounding-box
+## geometry when `boxes`; buffers are set only for builds (`record`, with
+## `vertices` the vertex or box buffer).
+func metal_blas_descriptor(count: u32, opaque: bool, boxes: bool, refit: bool, vertices: void*?, record: const GeometryRecord*?, indices: void*?) -> void*!:
+    let geometry = try metal_box_geometry(count, vertices, record) if boxes else try metal_triangle_geometry(count, opaque, vertices, record, indices)
     let descriptor = metal_ptr(try metal_class("MTLPrimitiveAccelerationStructureDescriptor"), metal_sel("descriptor")) else error(failed, "could not describe a Metal acceleration structure")
     let list = metal_with_object(try metal_class("NSArray"), metal_sel("arrayWithObject:"), geometry) else error(failed, "could not list Metal geometry")
     metal_object(descriptor, metal_sel("setGeometryDescriptors:"), list)
     metal_uint_arg(descriptor, metal_sel("setUsage:"), metal_usage_refit if refit else 0)
     return descriptor
+
+func metal_triangle_geometry(count: u32, opaque: bool, vertices: void*?, record: const GeometryRecord*?, indices: void*?) -> void*!:
+    let geometry = metal_ptr(try metal_class("MTLAccelerationStructureTriangleGeometryDescriptor"), metal_sel("descriptor")) else error(failed, "could not describe Metal triangles")
+    metal_uint_arg(geometry, metal_sel("setVertexFormat:"), metal_float3)
+    metal_uint_arg(geometry, metal_sel("setVertexStride:"), 12)
+    metal_uint_arg(geometry, metal_sel("setIndexType:"), metal_index_u32)
+    metal_uint_arg(geometry, metal_sel("setTriangleCount:"), (u64)count)
+    metal_bool_arg(geometry, metal_sel("setOpaque:"), opaque)
+    if let built = record:
+        metal_object(geometry, metal_sel("setVertexBuffer:"), vertices)
+        metal_uint_arg(geometry, metal_sel("setVertexBufferOffset:"), (u64)built.offset)
+        metal_uint_arg(geometry, metal_sel("setVertexStride:"), (u64)built.stride)
+        metal_object(geometry, metal_sel("setIndexBuffer:"), indices)
+        metal_uint_arg(geometry, metal_sel("setIndexBufferOffset:"), (u64)built.index_offset)
+    return geometry
+
+## Boxes (MTLAxisAlignedBoundingBox: packed float3 low and high). They are
+## never opaque, so intersection queries report every one as a candidate.
+func metal_box_geometry(count: u32, boxes: void*?, record: const GeometryRecord*?) -> void*!:
+    let geometry = metal_ptr(try metal_class("MTLAccelerationStructureBoundingBoxGeometryDescriptor"), metal_sel("descriptor")) else error(failed, "could not describe Metal boxes")
+    metal_uint_arg(geometry, metal_sel("setBoundingBoxCount:"), (u64)count)
+    metal_uint_arg(geometry, metal_sel("setBoundingBoxStride:"), 24)
+    metal_bool_arg(geometry, metal_sel("setOpaque:"), false)
+    if let built = record:
+        metal_object(geometry, metal_sel("setBoundingBoxBuffer:"), boxes)
+        metal_uint_arg(geometry, metal_sel("setBoundingBoxBufferOffset:"), (u64)built.offset)
+        metal_uint_arg(geometry, metal_sel("setBoundingBoxStride:"), (u64)built.stride)
+    return geometry
 
 ## An instance descriptor for `count` instances of `blases`, read from `instances`.
 func metal_tlas_descriptor(count: u64, blases: void*?, instances: void*?) -> void*!:
@@ -80,12 +99,13 @@ func metal_accel_storage(device: MetalDevice*, state: MetalAccel*, size: u64) ->
     state.structure = structure
     state.size = size
 
-func metal_accel_blas(device: MetalDevice*, vertex_count: u32, triangle_count: u32, opaque: bool, refit: bool) -> MetalAccel*!:
+func metal_accel_blas(device: MetalDevice*, vertex_count: u32, count: u32, opaque: bool, boxes: bool, refit: bool) -> MetalAccel*!:
+    _ = vertex_count
     let pool = objc_autoreleasePoolPush()
     defer objc_autoreleasePoolPop(pool)
-    let state = try new MetalAccel(opaque = opaque, refit = refit) in memory.heap
+    let state = try new MetalAccel(opaque = opaque, boxes = boxes, refit = refit) in memory.heap
     errdefer metal_accel_destroy(state)
-    try metal_accel_new(device, try metal_blas_descriptor(vertex_count, triangle_count, opaque, refit, none, none, none), state)
+    try metal_accel_new(device, try metal_blas_descriptor(count, opaque, boxes, refit, none, none, none), state)
     return state
 
 func metal_accel_tlas(device: MetalDevice*, capacity: u32) -> MetalAccel*!:
@@ -121,9 +141,10 @@ func metal_encode_build(device: MetalDevice*, encoder: void*, recorded: const Co
     var descriptor: void* = metal_required(native.structure)
     if recorded.kind == command_build_blas or recorded.kind == command_refit_blas:
         let vertices = recorded.buffer else trap("a Blas build lost its vertices")
-        let indices = recorded.target else trap("a Blas build lost its indices")
-        descriptor = try metal_blas_descriptor(recorded.geometry.vertex_count, recorded.geometry.triangle_count, recorded.geometry.opaque, native.refit,
-                                               vertices.native, &recorded.geometry, indices.native)
+        var indices: void*? = none
+        if let found = recorded.target: indices = found.native
+        descriptor = try metal_blas_descriptor(recorded.geometry.count, recorded.geometry.opaque, recorded.geometry.boxes, native.refit,
+                                               vertices.native, &recorded.geometry, indices)
     else:
         descriptor = try metal_tlas_build_descriptor(device, recorded)
     let refit = recorded.kind == command_refit_blas or recorded.kind == command_update_tlas

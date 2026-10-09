@@ -2,11 +2,13 @@ import c
 from luce_gpu import gpu
 import memory
 import kernels
+from luce_std import math32
 
 ## Ray queries against acceleration structures, checked against a CPU
 ## intersector: closest hits and shadow rays on a small mesh, a refit after its
-## vertices move, two instances with transforms, ids and masks, and Blases and
-## Tlases destroyed while recorded work still uses them.
+## vertices move, two instances with transforms, ids and masks, Blases and
+## Tlases destroyed while recorded work still uses them, and procedural boxes
+## (spheres) beside triangles in one Tlas.
 pub func checks(device: gpu.Device) -> !:
     let limits = try device.limits()
     if not limits.ray_query:
@@ -18,6 +20,7 @@ pub func checks(device: gpu.Device) -> !:
     try scene.refit(device)
     try scene.instances(device)
     try lifetimes(device)
+    try spheres(device, &scene)
 
 ## A 4 by 4 grid of quads (32 triangles) over x, y in 0..4, at a height that
 ## varies with x and y so no two triangles are coplanar.
@@ -316,3 +319,164 @@ func lifetimes(device: gpu.Device) -> !:
     assert(expected.t > 0.0 and near(memory.read[f32]((const void*)&result[0]), expected.t))
     try ids.read(0, result)
     assert(memory.read[u32]((const void*)&result[4]) == 3)
+
+# mark: Procedural boxes ======================================================================
+
+let sphere_count: usize = 40
+
+## Sphere `index`'s center and radius: a jittered 8 by 5 grid over the mesh's
+## x and y, below it (z from -6 to -2), radii from 0.15 to 0.45.
+func sphere(index: usize) -> f32[4]:
+    let x = (f32)(index % 8) * 0.55 + 0.1 * (f32)(index % 3)
+    let y = (f32)(index // 8) * 0.85 + 0.07 * (f32)(index % 5)
+    let z = -6.0 + 0.1 * (f32)((index * 7) % 41)
+    return [x, y, z, 0.15 + 0.3 * (f32)((index * 13) % 17) / 16.0]
+
+## Ray `index`: from z = -10 straight up, over x in -0.4..4.6 and y in -0.3..4.4.
+func sphere_ray(index: usize) -> f32[3]:
+    return [(f32)(index % 8) * 0.63 - 0.4 + 0.013 * (f32)index, (f32)(index // 8) * 0.59 - 0.3, -10.0]
+
+## The CPU's nearest sphere along +z from `origin` (t < 0: none), and whether
+## the ray enters any sphere's box.
+func nearest_sphere(origin: f32[3]) -> (f32, i64, bool):
+    var best: f32 = -1.0
+    var found: i64 = -1
+    var boxed = false
+    for index in 0..<sphere_count:
+        let s = sphere(index)
+        let dx = origin[0] - s[0]
+        let dy = origin[1] - s[1]
+        if dx >= -s[3] and dx <= s[3] and dy >= -s[3] and dy <= s[3]: boxed = true
+        let h = s[3] * s[3] - dx * dx - dy * dy
+        if h < 0.0: continue
+        let t = (s[2] - origin[2]) - (f32)math32.sqrt(h)
+        if best < 0.0 or t < best:
+            best = t
+            found = (i64)index
+    return (best, found, boxed)
+
+## A Blas of 40 boxes around spheres, instanced (mask 2) beside the mesh's
+## Blas (mask 1, from `scene`): a kernel's sphere tests over the candidates
+## commit the nearest sphere; mask 1 sees the mesh through them and reports
+## no box; and a refit moves the boxes.
+func spheres(device: gpu.Device, scene: Scene*) -> !:
+    var program = try gpu.Kernel.create(device, kernels.boxes_comp_words, kernels.boxes_comp_msl, kernels.boxes_comp_group, kernels.boxes_comp_bindings)
+    defer program.destroy()
+    var centers: f32[160]
+    var bounds: f32[240]
+    for index in 0..<sphere_count:
+        let s = sphere(index)
+        for k in 0..<(usize)4: centers[index * 4 + k] = s[k]
+        for k in 0..<(usize)3:
+            bounds[index * 6 + k] = s[k] - s[3]
+            bounds[index * 6 + 3 + k] = s[k] + s[3]
+    let center_bytes = try bytes_of_floats(centers)
+    defer free(center_bytes) in memory.heap
+    let bound_bytes = try bytes_of_floats(bounds)
+    defer free(bound_bytes) in memory.heap
+    var sphere_buffer = try gpu.Buffer.create(device, center_bytes)
+    defer sphere_buffer.destroy()
+    var box_buffer = try gpu.Buffer.create(device, bound_bytes)
+    defer box_buffer.destroy()
+    let boxes = gpu.Boxes(buffer = box_buffer, count = (u32)sphere_count)
+    var blas = try gpu.Blas.create_boxes(device, boxes)
+    defer blas.destroy()
+    var tlas = try gpu.Tlas.create(device, 2)
+    defer tlas.destroy()
+    # The mesh's Blas at rest again.
+    scene.positions = mesh_vertices(0.0)
+    let mesh_bytes = try bytes_of_floats(scene.positions)
+    defer free(mesh_bytes) in memory.heap
+    try scene.vertices.upload(0, mesh_bytes)
+    var build = try gpu.Compute.begin(device)
+    defer build.close()
+    try build.build_blas(scene.blas, scene.triangles())
+    try build.build_boxes(blas, boxes)
+    let instances: gpu.Instance[2] = [gpu.Instance(blas = blas, id = 5, mask = 2), gpu.Instance(blas = scene.blas, id = 6, mask = 1)]
+    try build.build_tlas(tlas, instances)
+    try build.submit()
+    var rays: f32[512]
+    for index in 0..<(usize)64:
+        let origin = sphere_ray(index)
+        for k in 0..<(usize)3: rays[index * 8 + k] = origin[k]
+        rays[index * 8 + 3] = 100.0
+        rays[index * 8 + 6] = 1.0
+    let ray_bytes = try bytes_of_floats(rays)
+    defer free(ray_bytes) in memory.heap
+    var ray_buffer = try gpu.Buffer.create(device, ray_bytes)
+    defer ray_buffer.destroy()
+    var hit_buffer = try gpu.Buffer.allocate(device, 64 * 16)
+    defer hit_buffer.destroy()
+    let bindings: gpu.Binding[4] = [gpu.Binding(accel = tlas), gpu.Binding(buffer = ray_buffer), gpu.Binding(buffer = sphere_buffer), gpu.Binding(buffer = hit_buffer)]
+    # Spheres only, then spheres and the mesh, then the mesh only.
+    let masks: u32[3] = [2, 3, 1]
+    var sphere_hits: usize = 0
+    for mask in masks:
+        var uniforms: u8[8]
+        memory.write[u32]((void*)&uniforms[0], 64)
+        memory.write[u32]((void*)&uniforms[4], mask)
+        var pass = try gpu.Compute.begin(device)
+        defer pass.close()
+        try pass.dispatch(program, bindings, uniforms, 1)
+        try pass.submit()
+        try pass.wait()
+        var hits: u8[1024]
+        try hit_buffer.read(0, hits)
+        for index in 0..<(usize)64:
+            let origin = sphere_ray(index)
+            let (t, found, boxed) = nearest_sphere(origin)
+            let at = index * 16
+            let got_t = memory.read[f32]((const void*)&hits[at])
+            let primitive = memory.read[f32]((const void*)&hits[at + 4])
+            let candidates = memory.read[f32]((const void*)&hits[at + 8])
+            let kind = memory.read[f32]((const void*)&hits[at + 12])
+            let mesh = closest(scene.positions, scene.corners, [origin[0], origin[1], 0.0], [0.0, 0.0, 1.0], 100.0, 0.0)
+            if mask == 1:
+                # Boxes are masked out: never candidates; the mesh as from z = 0.
+                assert(candidates == 0.0)
+                if mesh.t < 0.0:
+                    assert(kind == 0.0)
+                else:
+                    assert(kind == 2.0 and near(got_t, mesh.t + 10.0) and primitive == (f32)mesh.primitive)
+                continue
+            # Boxes a ray misses may still be reported (NVIDIA's traversal is
+            # conservative), so only hits are checked for candidates.
+            _ = boxed
+            if found >= 0:
+                assert(candidates >= 1.0)
+                assert(kind == 1.0 and near(got_t, t) and primitive == (f32)found)
+                if mask == 2: sphere_hits += 1
+            elif mask == 2 or mesh.t < 0.0:
+                assert(kind == 0.0)
+            else:
+                assert(kind == 2.0 and near(got_t, mesh.t + 10.0))
+    assert(sphere_hits > 8 and sphere_hits < 64)
+    # Refit: every box moves 20 along z, so the same rays from z = -10 meet the
+    # spheres moved there (their centers in the kernel's buffer too).
+    for index in 0..<sphere_count:
+        centers[index * 4 + 2] += 20.0
+        bounds[index * 6 + 2] += 20.0
+        bounds[index * 6 + 5] += 20.0
+    let moved_centers = try bytes_of_floats(centers)
+    defer free(moved_centers) in memory.heap
+    let moved_bounds = try bytes_of_floats(bounds)
+    defer free(moved_bounds) in memory.heap
+    try sphere_buffer.upload(0, moved_centers)
+    try box_buffer.upload(0, moved_bounds)
+    var refit = try gpu.Compute.begin(device)
+    defer refit.close()
+    try refit.refit_boxes(blas, boxes)
+    try refit.update_tlas(tlas, instances)
+    var uniforms: u8[8]
+    memory.write[u32]((void*)&uniforms[0], 64)
+    memory.write[u32]((void*)&uniforms[4], 2)
+    try refit.dispatch(program, bindings, uniforms, 1)
+    try refit.submit()
+    try refit.wait()
+    var moved: u8[1024]
+    try hit_buffer.read(0, moved)
+    for index in 0..<(usize)64:
+        let (t, found, boxed) = nearest_sphere(sphere_ray(index))
+        _ = boxed
+        if found < 0: continue
+        assert(near(memory.read[f32]((const void*)&moved[index * 16]), t + 20.0))

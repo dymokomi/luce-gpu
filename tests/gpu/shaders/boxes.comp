@@ -1,0 +1,52 @@
+#version 460
+#extension GL_EXT_ray_query : require
+// Trace rays against a Tlas of procedural boxes with a ray query. Each box
+// holds a sphere (center and radius in `spheres`): a candidate box is hit
+// where the ray meets its sphere, committed with rayQueryGenerateIntersectionEXT,
+// so the query ends at the nearest sphere. Every candidate the query reports
+// is counted, and boxes the ray never enters must not be reported.
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0) uniform accelerationStructureEXT scene;
+layout(set = 0, binding = 1, std430) readonly buffer Rays { vec4 rays[]; };       // origin, tmax; direction, unused
+layout(set = 0, binding = 2, std430) readonly buffer Spheres { vec4 spheres[]; }; // center, radius
+layout(set = 0, binding = 3, std430) writeonly buffer Hits { vec4 hits[]; };      // t, primitive, candidates, kind (0 none, 1 box, 2 triangle)
+layout(push_constant) uniform Params { uint n; uint mask; } params;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= params.n)
+        return;
+    vec4 from = rays[2u * i];
+    vec3 direction = rays[2u * i + 1u].xyz;
+    rayQueryEXT query;
+    rayQueryInitializeEXT(query, scene, gl_RayFlagsNoneEXT, params.mask, from.xyz, 0.0, direction, from.w);
+    uint candidates = 0u;
+    float best = from.w;
+    while (rayQueryProceedEXT(query)) {
+        if (rayQueryGetIntersectionTypeEXT(query, false) != gl_RayQueryCandidateIntersectionAABBEXT) {
+            rayQueryConfirmIntersectionEXT(query);
+            continue;
+        }
+        candidates++;
+        int primitive = rayQueryGetIntersectionPrimitiveIndexEXT(query, false);
+        vec4 sphere = spheres[primitive];
+        vec3 o = from.xyz - sphere.xyz;
+        float b = dot(o, direction);
+        float c = dot(o, o) - sphere.w * sphere.w;
+        float h = b * b - c;
+        if (h < 0.0) continue;
+        float t = -b - sqrt(h);
+        // Committed only inside the query's current interval.
+        if (t >= 0.0 && t < best) {
+            best = t;
+            rayQueryGenerateIntersectionEXT(query, t);
+        }
+    }
+    uint kind = rayQueryGetIntersectionTypeEXT(query, true);
+    if (kind == gl_RayQueryCommittedIntersectionGeneratedEXT)
+        hits[i] = vec4(rayQueryGetIntersectionTEXT(query, true), float(rayQueryGetIntersectionPrimitiveIndexEXT(query, true)), float(candidates), 1.0);
+    else if (kind == gl_RayQueryCommittedIntersectionTriangleEXT)
+        hits[i] = vec4(rayQueryGetIntersectionTEXT(query, true), float(rayQueryGetIntersectionPrimitiveIndexEXT(query, true)), float(candidates), 2.0);
+    else
+        hits[i] = vec4(-1.0, -1.0, float(candidates), 0.0);
+}

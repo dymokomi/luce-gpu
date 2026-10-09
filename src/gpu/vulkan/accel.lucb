@@ -45,6 +45,8 @@ let vulkan_accel_device_build: u32 = 1
 ## custom index and 8-bit mask, the shader binding offset and flags, and the
 ## Blas's device address.
 let vulkan_instance_bytes: usize = 64
+## VK_GEOMETRY_TYPE_AABBS_KHR.
+let vulkan_geometry_aabbs: u32 = 1
 
 func vulkan_ray_load(device: VulkanDevice*) -> !:
     let ray = try new VulkanRay() in memory.heap
@@ -85,6 +87,14 @@ func vulkan_triangles(vertex_count: u32, stride: u64, opaque: bool, vertices: u6
     geometry.geometry.triangles.indexData.deviceAddress = indices
     return geometry
 
+## `count` boxes (VkAabbPositionsKHR, six f32) `stride` bytes apart; the
+## address only for builds. Never opaque: ray queries see every box as a candidate.
+func vulkan_boxes(stride: u64, data: u64) -> VkAccelerationStructureGeometryKHR:
+    var geometry = VkAccelerationStructureGeometryKHR(sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR, geometryType = vulkan_geometry_aabbs)
+    geometry.geometry.aabbs = VkAccelerationStructureGeometryAabbsDataKHR(sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_AABBS_DATA_KHR, stride = stride)
+    geometry.geometry.aabbs.data.deviceAddress = data
+    return geometry
+
 func vulkan_instances(data: u64) -> VkAccelerationStructureGeometryKHR:
     var geometry = VkAccelerationStructureGeometryKHR(sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR, geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR)
     geometry.geometry.instances = VkAccelerationStructureGeometryInstancesDataKHR(sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR)
@@ -118,12 +128,12 @@ func vulkan_accel_make(device: VulkanDevice*, state: VulkanAccel*, geometry: VkA
     var address = VkAccelerationStructureDeviceAddressInfoKHR(sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR, accelerationStructure = state.structure)
     state.address = (ray.address else trap("vkGetAccelerationStructureDeviceAddressKHR is missing"))(device.device, &address)
 
-func vulkan_accel_blas(device: VulkanDevice*, vertex_count: u32, triangle_count: u32, opaque: bool, refit: bool) -> VulkanAccel*!:
+func vulkan_accel_blas(device: VulkanDevice*, vertex_count: u32, count: u32, opaque: bool, boxes: bool, refit: bool) -> VulkanAccel*!:
     try vulkan_drawing(device)
     let state = try new VulkanAccel(opaque = opaque, refit = refit) in memory.heap
     errdefer vulkan_accel_destroy(device, state)
-    var geometry = vulkan_triangles(vertex_count, 12, opaque, 0, 0)
-    try vulkan_accel_make(device, state, &geometry, triangle_count)
+    var geometry = vulkan_boxes(24, 0) if boxes else vulkan_triangles(vertex_count, 12, opaque, 0, 0)
+    try vulkan_accel_make(device, state, &geometry, count)
     return state
 
 func vulkan_accel_tlas(device: VulkanDevice*, capacity: u32) -> VulkanAccel*!:
@@ -179,25 +189,36 @@ func vulkan_scratch_bytes(commands: const ComputeCommand[]) -> u64:
         if recorded.kind < command_build_blas: continue
         let accel = recorded.accel else continue
         let native = (VulkanAccel*)accel.native
-        let needed = native.update_scratch if recorded.kind == command_refit_blas or recorded.kind == command_update_tlas else native.build_scratch
+        let needed = native.update_scratch if vulkan_updates(recorded.kind, recorded.geometry.boxes) else native.build_scratch
         if needed > bytes: bytes = needed
     return bytes
+
+## Whether a recorded refit or Tlas update is encoded as an update build. A
+## refit of boxes is encoded as a full build instead: RADV (Mesa 26.0) drops
+## boxes from an updated Blas, even when none moved, while NVIDIA keeps them.
+func vulkan_updates(kind: u8, boxes: bool) -> bool:
+    if kind == command_update_tlas: return true
+    return kind == command_refit_blas and not boxes
 
 ## Record a build, refit or update into `command`, using `scratch` (aligned).
 func vulkan_encode_build(device: VulkanDevice*, slot: VulkanSlot*, command: u64, recorded: const ComputeCommand*, scratch: u64) -> !:
     let ray = vulkan_ray(device)
     let accel = recorded.accel else trap("a build lost its acceleration structure")
     let native = (VulkanAccel*)accel.native
-    let update = recorded.kind == command_refit_blas or recorded.kind == command_update_tlas
+    let update = vulkan_updates(recorded.kind, recorded.geometry.boxes)
     var geometry: VkAccelerationStructureGeometryKHR
     var count: u32 = 0
-    if recorded.kind == command_build_blas or recorded.kind == command_refit_blas:
+    if (recorded.kind == command_build_blas or recorded.kind == command_refit_blas) and recorded.geometry.boxes:
+        let boxes = recorded.buffer else trap("a Blas build lost its boxes")
+        geometry = vulkan_boxes((u64)recorded.geometry.stride, vulkan_buffer_address(device, (VulkanBuffer*)boxes.native) + (u64)recorded.geometry.offset)
+        count = recorded.geometry.count
+    elif recorded.kind == command_build_blas or recorded.kind == command_refit_blas:
         let vertices = recorded.buffer else trap("a Blas build lost its vertices")
         let indices = recorded.target else trap("a Blas build lost its indices")
-        let base_vertices = vulkan_buffer_address(device, (VulkanBuffer*)vertices.native) + (u64)recorded.geometry.vertex_offset
+        let base_vertices = vulkan_buffer_address(device, (VulkanBuffer*)vertices.native) + (u64)recorded.geometry.offset
         let base_indices = vulkan_buffer_address(device, (VulkanBuffer*)indices.native) + (u64)recorded.geometry.index_offset
         geometry = vulkan_triangles(recorded.geometry.vertex_count, (u64)recorded.geometry.stride, recorded.geometry.opaque, base_vertices, base_indices)
-        count = recorded.geometry.triangle_count
+        count = recorded.geometry.count
     else:
         count = (u32)recorded.instances.length
         let staged = try vulkan_transient(device, slot, (u64)(recorded.instances.length * vulkan_instance_bytes),

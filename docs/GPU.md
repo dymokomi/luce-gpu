@@ -860,6 +860,14 @@ committed hit. The scene lives in two levels of acceleration structure:
   triangle, with offsets into their buffers. `opaque` triangles skip any-hit
   handling. `Blas.create(device, triangles, refit = true)` sizes storage from
   the counts; build it on a pass.
+- **`Blas.create_boxes(device, boxes, refit = true)`** holds procedural
+  primitives instead: `Boxes` names `count` axis-aligned boxes of six f32
+  (low x, y, z, high x, y, z), `stride` bytes apart (24 by default; offset and
+  stride multiples of eight) from `offset` in `buffer`. A ray query reports
+  every box the ray may enter as a candidate (NVIDIA's traversal also reports
+  some it misses), and the kernel decides whether and where it is hit. Build
+  it with `build_boxes`, refit it with `refit_boxes`. Splats, spheres and
+  curves are traced this way.
 - **`Tlas`** holds instances: `Instance { blas, transform, id, mask }`, where
   `transform` is the object-to-world matrix as 3 rows of 4 (row-major, as in
   Vulkan and DXR), `id` the 24-bit custom index a query reports and `mask` the
@@ -896,7 +904,26 @@ if (rayQueryGetIntersectionTypeEXT(query, true) == gl_RayQueryCommittedIntersect
 ```
 
 A shadow ray adds `gl_RayFlagsTerminateOnFirstHitEXT` and only asks whether
-anything was hit. Blases, Tlases and the buffers they were built from may be
+anything was hit. Boxes come as candidates, which the kernel tests itself;
+`rayQueryGenerateIntersectionEXT(query, t)` commits one at `t` (no farther than
+what is committed already), so later boxes beyond it are culled. A kernel may
+also commit nothing and only gather what the candidates report:
+
+```glsl
+while (rayQueryProceedEXT(query)) {
+    if (rayQueryGetIntersectionTypeEXT(query, false) != gl_RayQueryCandidateIntersectionAABBEXT) continue;
+    int box = rayQueryGetIntersectionPrimitiveIndexEXT(query, false);
+    float t;
+    if (hit_my_primitive(box, origin, direction, t) && t < best) {
+        best = t;
+        rayQueryGenerateIntersectionEXT(query, t);   // Metal: commit_bounding_box_intersection
+    }
+}
+```
+
+Instance masks keep the two kinds apart where a kernel wants only one: a
+triangle-only closest-hit query passes a mask that excludes the boxes'
+instances. Blases, Tlases and the buffers they were built from may be
 destroyed once recorded: the pass, and then the submitted work, keep them.
 Compaction is not offered yet.
 
@@ -906,7 +933,9 @@ build whose descriptor needs more, since a Tlas's size depends on the Blases it
 instances. On Vulkan, the device enables `VK_KHR_acceleration_structure`,
 `VK_KHR_ray_query` and `VK_KHR_deferred_host_operations` where offered, with
 buffer addresses. Builds use `vkCmdBuildAccelerationStructuresKHR`, and a Tlas's
-instances go in a buffer of their own for each build.
+instances go in a buffer of their own for each build. A refit of boxes is a
+full build on Vulkan: RADV (Mesa 26.0) drops boxes from an updated Blas even
+when none moved.
 
 ### Buffers for compute
 
@@ -1070,5 +1099,6 @@ images of each 32-bit format written, sampled, read and written in place, read
 back and drawn for display, float atomics, submissions, GPU times and
 timestamps, buffers reached by address, texture tables, and (in `rays.lucb`)
 ray queries checked against a CPU intersector: closest hits and shadow rays,
-a refit, two instances with transforms, ids and masks, and structures
-destroyed after recording.
+a refit, two instances with transforms, ids and masks, structures
+destroyed after recording, and a Blas of boxes around spheres beside the
+mesh's in one Tlas (nearest sphere by generated intersections, masks, a refit).

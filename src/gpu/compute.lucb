@@ -228,7 +228,7 @@ struct ComputeCommand:
     ## A build's Blas or Tlas; a Blas build's geometry (from `buffer` and
     ## `target`), or a Tlas build's instances and the Blases they instance.
     var accel: AccelState*?
-    var geometry: TriangleRecord
+    var geometry: GeometryRecord
     var instances: InstanceRecord[]
     var instanced: AccelState*[]
 
@@ -329,6 +329,15 @@ pub struct Compute:
     pub func refit_blas(blas: Blas, triangles: Triangles) -> !:
         try self.record_blas(command_refit_blas, blas, &triangles)
 
+    ## Build a Blas of boxes from `boxes` (the count it was created for).
+    pub func build_boxes(blas: Blas, boxes: Boxes) -> !:
+        try self.record_boxes(command_build_blas, blas, &boxes)
+
+    ## Refit a Blas of boxes to `boxes` moved or resized: the same count,
+    ## where the Blas was created with `refit` and built.
+    pub func refit_boxes(blas: Blas, boxes: Boxes) -> !:
+        try self.record_boxes(command_refit_blas, blas, &boxes)
+
     ## Build `tlas` from `instances` (at most its capacity), each a built Blas
     ## of the device. The Tlas holds the Blases until it is built again.
     pub func build_tlas(tlas: Tlas, instances: const Instance[]) -> !:
@@ -341,22 +350,40 @@ pub struct Compute:
 
     func record_blas(kind: u8, blas: Blas, triangles: const Triangles*) -> !:
         let state = try self.recording()
-        let target = try blas.checked()
-        if target.device != state.device:
-            error(wrong_device, "a compute pass builds Blases of its own device")
+        let target = try self.blas_target(kind, blas)
         try check_triangles(state.device, target, triangles)
-        if kind == command_refit_blas and not (target.refit and target.built):
-            error(invalid_geometry, "a refit needs a Blas created with refit and built before")
         let vertices = triangles.vertices.state else trap("checked vertices went missing")
         let indices = triangles.indices.state else trap("checked indices went missing")
         var command = ComputeCommand(kind = kind, accel = target, buffer = vertices, target = indices,
-                                     geometry = TriangleRecord(vertex_offset = triangles.vertex_offset, stride = triangles.stride, vertex_count = triangles.vertex_count,
-                                                               index_offset = triangles.index_offset, triangle_count = triangles.triangle_count, opaque = triangles.opaque))
+                                     geometry = GeometryRecord(offset = triangles.vertex_offset, stride = triangles.stride, vertex_count = triangles.vertex_count,
+                                                               index_offset = triangles.index_offset, count = triangles.triangle_count, opaque = triangles.opaque))
         target.references += 1
         vertices.references += 1
         indices.references += 1
         try state.append(&command)
         target.built = true
+
+    func record_boxes(kind: u8, blas: Blas, boxes: const Boxes*) -> !:
+        let state = try self.recording()
+        let target = try self.blas_target(kind, blas)
+        try check_boxes(state.device, target, boxes)
+        let source = boxes.buffer.state else trap("checked boxes went missing")
+        var command = ComputeCommand(kind = kind, accel = target, buffer = source,
+                                     geometry = GeometryRecord(boxes = true, offset = boxes.offset, stride = boxes.stride, count = boxes.count))
+        target.references += 1
+        source.references += 1
+        try state.append(&command)
+        target.built = true
+
+    ## The Blas a build or refit of `kind` records into, checked.
+    func blas_target(kind: u8, blas: Blas) -> AccelState*!:
+        let state = try self.recording()
+        let target = try blas.checked()
+        if target.device != state.device:
+            error(wrong_device, "a compute pass builds Blases of its own device")
+        if kind == command_refit_blas and not (target.refit and target.built):
+            error(invalid_geometry, "a refit needs a Blas created with refit and built before")
+        return target
 
     func record_tlas(kind: u8, tlas: Tlas, instances: const Instance[]) -> !:
         let state = try self.recording()

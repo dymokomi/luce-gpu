@@ -3,7 +3,9 @@
 #   accel - Acceleration structures for ray queries
 #
 #   DESCRIPTION:
-#       A Blas (bottom-level acceleration structure) holds one triangle mesh's BVH; a Tlas
+#       A Blas (bottom-level acceleration structure) holds one triangle mesh's BVH, or one set
+#       of axis-aligned boxes around procedural primitives (splats, spheres, curves) whose
+#       intersections the tracing kernel computes itself; a Tlas
 #       (top-level) holds instances of Blases, each with a transform, a custom id and a mask.
 #       Kernels trace rays against a Tlas with GL_EXT_ray_query (Metal's intersection_query,
 #       Vulkan's VK_KHR_ray_query), where `limits().ray_query`. Both are manual Base resources
@@ -27,6 +29,19 @@ pub struct Triangles:
     pub var triangle_count: u32
     pub var opaque: bool = true
 
+## Axis-aligned boxes for a Blas: procedural primitives. A ray query reports
+## each box the ray enters as a candidate (`gl_RayQueryCandidateIntersectionAABBEXT`,
+## its primitive index the box's), and the kernel decides whether and where it
+## is hit, committing a distance with `rayQueryGenerateIntersectionEXT`.
+## `count` boxes of six f32 (low x, y, z, then high x, y, z), `stride` bytes
+## apart from `offset` in `buffer`; offset and stride are multiples of eight
+## (Vulkan's rule), the stride at least 24.
+pub struct Boxes:
+    pub var buffer: Buffer
+    pub var offset: usize = 0
+    pub var stride: u32 = 24
+    pub var count: u32
+
 ## One instance of a Blas in a Tlas. `transform` is the object-to-world matrix,
 ## 3 rows of 4 (row-major, the Vulkan and DXR layout: x' = row 0 · (x, y, z, 1));
 ## `id` is the custom index a ray query reports (24 bits); a ray's cull mask
@@ -40,7 +55,7 @@ pub struct Instance:
 ## The largest instance id: 24 bits, as Vulkan stores it.
 pub let instance_id_limit: u32 = 0xffffff
 
-## A bottom-level acceleration structure: one mesh. The zero value is closed;
+## A bottom-level acceleration structure: one mesh, or one set of boxes. The zero value is closed;
 ## copies alias ownership; one owner destroys it on the main thread, and
 ## recorded builds, Tlases built from it and submitted work keep it alive.
 pub struct Blas:
@@ -55,10 +70,25 @@ pub struct Blas:
             error(unsupported, "the device has no ray queries")
         if triangles.vertex_count == 0 or triangles.triangle_count == 0:
             error(invalid_geometry, "a Blas holds at least one triangle")
-        let native = try backend_accel_blas(owner, triangles.vertex_count, triangles.triangle_count, triangles.opaque, refit)
+        let native = try backend_accel_blas(owner, triangles.vertex_count, triangles.triangle_count, triangles.opaque, false, refit)
         errdefer backend_accel_destroy(owner, native)
         let state = try new AccelState(device = owner, native = native, vertex_count = triangles.vertex_count,
                                        triangle_count = triangles.triangle_count, refit = refit) in memory.heap
+        owner.references += 1
+        return Blas(state = state)
+
+    ## Storage for `boxes`' count of procedural boxes (the buffer is not read
+    ## yet: build it on a pass with `build_boxes`). `refit` lets later passes
+    ## refit it after the boxes move or resize.
+    pub static func create_boxes(device: Device, boxes: Boxes, refit: bool = true) -> Blas!:
+        let owner = try device.checked()
+        if not owner.limits.ray_query:
+            error(unsupported, "the device has no ray queries")
+        if boxes.count == 0:
+            error(invalid_geometry, "a Blas holds at least one box")
+        let native = try backend_accel_blas(owner, 0, boxes.count, false, true, refit)
+        errdefer backend_accel_destroy(owner, native)
+        let state = try new AccelState(device = owner, native = native, triangle_count = boxes.count, boxes = true, refit = refit) in memory.heap
         owner.references += 1
         return Blas(state = state)
 
@@ -112,7 +142,9 @@ struct AccelState:
     var native: void*
     var references: usize = 1
     var top: bool
-    ## A Blas's counts, or a Tlas's capacity.
+    ## A Blas of boxes rather than triangles.
+    var boxes: bool
+    ## A Blas's counts (its triangles, or its boxes), or a Tlas's capacity.
     var vertex_count: u32
     var triangle_count: u32
     var capacity: u32
@@ -152,13 +184,16 @@ func release_accel(state: AccelState*):
         release_device(state.device)
         free(state) in memory.heap
 
-## A recorded Blas build's geometry, its buffers referenced by the command.
-struct TriangleRecord:
-    var vertex_offset: usize
+## A recorded Blas build's geometry, its buffers referenced by the command:
+## triangles (vertices from `offset`, indices from `index_offset`) or `boxes`
+## (from `offset`), `count` of them.
+struct GeometryRecord:
+    var boxes: bool
+    var offset: usize
     var stride: u32
     var vertex_count: u32
     var index_offset: usize
-    var triangle_count: u32
+    var count: u32
     var opaque: bool
 
 ## A recorded instance: its Blas is the command's `instanced[index]`.
@@ -169,8 +204,8 @@ struct InstanceRecord:
 
 ## Check `triangles` against `blas` and the pass's device.
 func check_triangles(device: DeviceState*, blas: AccelState*, triangles: const Triangles*) -> !:
-    if blas.top:
-        error(invalid_geometry, "a Tlas is built from instances, not triangles")
+    if blas.top or blas.boxes:
+        error(invalid_geometry, "a Tlas is built from instances, a Blas of boxes from boxes, not triangles")
     if triangles.vertex_count != blas.vertex_count or triangles.triangle_count != blas.triangle_count:
         error(invalid_geometry, "a Blas is built from the counts it was created for")
     let vertices = triangles.vertices.state else error(closed, "a Blas build was given a closed vertex buffer")
@@ -184,14 +219,30 @@ func check_triangles(device: DeviceState*, blas: AccelState*, triangles: const T
     if vertex_end > (u64)vertices.bytes or index_end > (u64)indices.bytes:
         error(invalid_geometry, "a Blas's vertices and indices lie inside their buffers")
 
+## Check `boxes` against `blas` and the pass's device.
+func check_boxes(device: DeviceState*, blas: AccelState*, boxes: const Boxes*) -> !:
+    if not blas.boxes:
+        error(invalid_geometry, "a Blas of triangles is built from triangles, not boxes")
+    if boxes.count != blas.triangle_count:
+        error(invalid_geometry, "a Blas is built from the count it was created for")
+    let buffer = boxes.buffer.state else error(closed, "a Blas build was given a closed box buffer")
+    if buffer.device != device:
+        error(wrong_device, "a Blas build reads buffers of its own device")
+    if boxes.stride < 24 or boxes.stride % 8 != 0 or boxes.offset % 8 != 0:
+        error(invalid_geometry, "box strides and offsets are multiples of eight, strides at least 24")
+    let end = (u64)boxes.offset + ((u64)boxes.count - 1) * (u64)boxes.stride + 24
+    if end > (u64)buffer.bytes:
+        error(invalid_geometry, "a Blas's boxes lie inside their buffer")
+
 # mark: Dispatch ==============================================================================
 
-func backend_accel_blas(device: DeviceState*, vertex_count: u32, triangle_count: u32, opaque: bool, refit: bool) -> void*!:
+## A Blas's storage: `count` triangles over `vertex_count` vertices, or `count` boxes.
+func backend_accel_blas(device: DeviceState*, vertex_count: u32, count: u32, opaque: bool, boxes: bool, refit: bool) -> void*!:
     if (platform.windows or platform.linux) and device.backend == Backend.vulkan:
-        return (void*)try vulkan_accel_blas((VulkanDevice*)device.native, vertex_count, triangle_count, opaque, refit)
+        return (void*)try vulkan_accel_blas((VulkanDevice*)device.native, vertex_count, count, opaque, boxes, refit)
     if platform.macos and platform.arm64:
         if device.backend == Backend.metal:
-            return (void*)try metal_accel_blas((MetalDevice*)device.native, vertex_count, triangle_count, opaque, refit)
+            return (void*)try metal_accel_blas((MetalDevice*)device.native, vertex_count, count, opaque, boxes, refit)
     error(unsupported, "ray queries are unavailable on this backend")
 
 func backend_accel_tlas(device: DeviceState*, capacity: u32) -> void*!:
