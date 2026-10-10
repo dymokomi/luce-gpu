@@ -858,14 +858,16 @@ committed hit. The scene lives in two levels of acceleration structure:
 - **`Blas`** holds one mesh's triangles: `Triangles` names world-space float3
   positions (`stride` bytes apart, 12 by default) and three u32 indices per
   triangle, with offsets into their buffers. `opaque` triangles skip any-hit
-  handling. `Blas.create(device, triangles, refit = true)` sizes storage from
+  handling; a query meets each triangle that is not opaque once (Vulkan's
+  no-duplicate any-hit flag, Metal's duplicate intersection invocations off),
+  as kernels that count what they meet need. `Blas.create(device, triangles, refit = true)` sizes storage from
   the counts; build it on a pass.
 - **`Blas.create_boxes(device, boxes, refit = true)`** holds procedural
   primitives instead: `Boxes` names `count` axis-aligned boxes of six f32
   (low x, y, z, high x, y, z), `stride` bytes apart (24 by default; offset and
   stride multiples of eight) from `offset` in `buffer`. A ray query reports
   every box the ray may enter as a candidate (NVIDIA's traversal also reports
-  some it misses), and the kernel decides whether and where it is hit. Build
+  some it misses), each once, and the kernel decides whether and where it is hit. Build
   it with `build_boxes`, refit it with `refit_boxes`. Splats, spheres and
   curves are traced this way.
 - **`Tlas`** holds instances: `Instance { blas, transform, id, mask }`, where

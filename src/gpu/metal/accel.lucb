@@ -55,6 +55,8 @@ func metal_triangle_geometry(count: u32, opaque: bool, vertices: void*?, record:
     metal_uint_arg(geometry, metal_sel("setIndexType:"), metal_index_u32)
     metal_uint_arg(geometry, metal_sel("setTriangleCount:"), (u64)count)
     metal_bool_arg(geometry, metal_sel("setOpaque:"), opaque)
+    # Candidates that are not opaque come once each, as kernels that count what they meet need.
+    metal_bool_arg(geometry, metal_sel("setAllowDuplicateIntersectionFunctionInvocation:"), opaque)
     if let built = record:
         metal_object(geometry, metal_sel("setVertexBuffer:"), vertices)
         metal_uint_arg(geometry, metal_sel("setVertexBufferOffset:"), (u64)built.offset)
@@ -70,6 +72,7 @@ func metal_box_geometry(count: u32, boxes: void*?, record: const GeometryRecord*
     metal_uint_arg(geometry, metal_sel("setBoundingBoxCount:"), (u64)count)
     metal_uint_arg(geometry, metal_sel("setBoundingBoxStride:"), 24)
     metal_bool_arg(geometry, metal_sel("setOpaque:"), false)
+    metal_bool_arg(geometry, metal_sel("setAllowDuplicateIntersectionFunctionInvocation:"), false)
     if let built = record:
         metal_object(geometry, metal_sel("setBoundingBoxBuffer:"), boxes)
         metal_uint_arg(geometry, metal_sel("setBoundingBoxBufferOffset:"), (u64)built.offset)
