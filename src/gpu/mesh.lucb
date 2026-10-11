@@ -37,7 +37,7 @@ pub struct MeshBuffers:
 ## `mesh_base_parameter_count` values up to this size and fills the values
 ## a shorter block leaves out with zeros, so a caller written against an
 ## older layout draws as it did.
-pub let mesh_parameter_count: usize = 124
+pub let mesh_parameter_count: usize = 128
 ## The block's first layout, through `mesh_accent`.
 pub let mesh_base_parameter_count: usize = 120
 
@@ -61,6 +61,10 @@ pub let mesh_accent: usize = 116
 ## larger |k|), y the value the color map spans (only read by the curvature
 ## shading).
 pub let mesh_curvature: usize = 120
+## Fading: x from 0 (opaque, as shaded) to 1 (most see-through and grey),
+## for objects drawn as context around what is being edited. Faded draws
+## blend over what is already drawn, so they go last.
+pub let mesh_fade: usize = 124
 
 ## Shading modes (the block's mode.x).
 pub enum Shading as u8:
@@ -77,8 +81,18 @@ pub enum Shading as u8:
 ## A recorded mesh draw: retained buffers and its parameter block.
 struct MeshDraw:
     var buffers: BufferState*?[7]
-    var parameters: f32[124]
+    var parameters: f32[128]
     var kind: MeshKind
+
+## A faded draw (its mesh_fade above 0) blends over the scene without
+## writing depth, so what lies behind it, drawn after it, still shows.
+func mesh_faded(draw: const MeshDraw*) -> bool:
+    return draw.kind != MeshKind.ids and draw.parameters[mesh_fade] > 0.0
+
+## The pipeline variant a draw takes: its kind, or past the kinds for a
+## faded surface or wire (no depth writes).
+func mesh_variant(draw: const MeshDraw*) -> usize:
+    return (usize)(u8)draw.kind + (3 if mesh_faded(draw) else 0)
 
 func release_mesh_draw(draw: MeshDraw*):
     for buffer in draw.buffers:

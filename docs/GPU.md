@@ -62,7 +62,7 @@ safe.
 `draw_mesh(target, buffers, vertices, parameters, kind, slope_bias)` draws an
 indexed mesh by vertex pulling from up to seven buffers (`MeshBuffers`,
 bindings 8..14 of `shaders/mesh.glsl`) with one parameter block (binding 15;
-`mesh_parameter_count` floats, 496 bytes, at the `mesh_*` offsets).
+`mesh_parameter_count` floats, 512 bytes, at the `mesh_*` offsets).
 
 The block only grows at its end. A new parameter is appended after the last
 one, and its default, zero, leaves its feature off (`mesh_curvature`, added
@@ -90,6 +90,10 @@ normal), `zebra` (reflected stripes of a cylinder or plane around
 alias), `isophote` (lines of equal N · axis), `normals`, `unlit` and
 `curvature` (a blue-green-red map of a value of the principal curvatures the
 colors buffer carries unclamped, over `mesh_curvature`'s range). `MeshKind.wires` expands point pairs into constant-pixel-width lines.
+A `mesh_fade` above zero draws a surface or its wires faded, toward a
+see-through grey (at 1, grey and a fifth as opaque), blended over what is
+drawn and depth tested without writing depth, so what lies behind it and is
+drawn later still shows: an editor's context around what is edited.
 `MeshKind.ids` writes `id base + face + 1` little-endian into an `rgba8_linear`
 target for picking; zero is nothing. Shading is a parameter, so changing it
 re-uploads no buffer. tests/gpu/mesh_pixels.lucb checks pixels on

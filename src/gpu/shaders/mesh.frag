@@ -23,7 +23,7 @@ float stripe(float x, float duty) {
     return mix(clamp(value, 0.0, 1.0), 1.0 - duty, clamp((w - 0.3) * 4.0, 0.0, 1.0));
 }
 
-void main() {
+void shade() {
     int shading = int(p.mode.x);
     vec3 base = vertex_color.rgb;
     if (shading == shade_unlit || ((shading == shade_lit || shading == shade_flat) && p.tint.a < 0.5)) {
@@ -79,4 +79,18 @@ void main() {
     if (p.zebra.w < 0.5 && p.light_direction[0].w > 0.5)
         color *= 0.85 + 0.15 * max(0.0, dot(n, p.light_direction[0].xyz));
     fragment_color = vec4(color, 1.0);
+}
+
+// A faded surface (fade.x > 0) draws toward a see-through grey: its color
+// mixed toward its luminance, its coverage lowered, premultiplied for the
+// `over` blend. Faded draws go after the opaque scene.
+void main() {
+    shade();
+    float fade = clamp(p.fade.x, 0.0, 1.0);
+    if (fade > 0.0) {
+        vec3 color = fragment_color.rgb;
+        float grey = dot(color, vec3(0.2126, 0.7152, 0.0722));
+        float alpha = 1.0 - 0.8 * fade;
+        fragment_color = vec4(mix(color, vec3(grey), fade) * alpha, alpha);
+    }
 }

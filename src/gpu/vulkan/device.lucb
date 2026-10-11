@@ -23,7 +23,7 @@ struct VulkanFormatState:
     var depth_test: u64
     var geometry: u64
     # Mesh pipelines by MeshKind (vulkan/mesh.lucb).
-    var mesh: u64[3]
+    var mesh: u64[6]
     # The passes of a frame split for scene depth copies, made on first use
     # (vulkan_split_pass): opening cleared or loaded, middle, closing to
     # presentation or to sampling.

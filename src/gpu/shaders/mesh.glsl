@@ -25,6 +25,7 @@ layout(std430, binding = 15) readonly buffer Parameters {
     vec4 line;               // x wire width in pixels; y, z logical viewport size; w depth bias
     vec4 accent;             // rgb selection highlight; w > 0: flagged faces take it
     vec4 curvature;          // x value kind; y the value the colour map spans
+    vec4 fade;               // x 0..1: how far the surface fades to see-through grey (0 off)
 } p;
 
 // Shading modes (mode.x).

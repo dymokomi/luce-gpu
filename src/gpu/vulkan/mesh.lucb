@@ -117,15 +117,17 @@ func vulkan_mesh_destroy(device: VulkanDevice*):
     device.mesh_pipeline_layout = 0
     device.mesh_layout = 0
 
-## The pipeline for `kind` in `formats`' passes, built on first use.
-func vulkan_mesh_pipeline(device: VulkanDevice*, formats: VulkanFormatState*, kind: MeshKind) -> u64!:
+## The pipeline for `draw`'s variant (its kind; faded, no depth writes) in
+## `formats`' passes, built on first use.
+func vulkan_mesh_pipeline(device: VulkanDevice*, formats: VulkanFormatState*, draw: const MeshDraw*) -> u64!:
     try vulkan_mesh_ready(device)
-    let index = (usize)(u8)kind
+    let kind = draw.kind
+    let index = mesh_variant(draw)
     if formats.mesh[index] != 0:
         return formats.mesh[index]
     let vertex: const u32[] = mesh_wire_vert_words[..<mesh_wire_vert_words.length] if kind == MeshKind.wires else mesh_vert_words[..<mesh_vert_words.length]
     let fragment: const u32[] = mesh_id_frag_words[..<mesh_id_frag_words.length] if kind == MeshKind.ids else mesh_frag_words[..<mesh_frag_words.length]
-    formats.mesh[index] = try vulkan_stage_pipeline(device, formats.pass_texture, vertex, fragment, device.mesh_pipeline_layout, Blend.replace if kind == MeshKind.ids else Blend.over)
+    formats.mesh[index] = try vulkan_stage_pipeline(device, formats.pass_texture, vertex, fragment, device.mesh_pipeline_layout, Blend.replace if kind == MeshKind.ids else Blend.over, not mesh_faded(draw))
     return formats.mesh[index]
 
 ## Point `set` at the mesh draw's buffers and at its parameters in `upload`.

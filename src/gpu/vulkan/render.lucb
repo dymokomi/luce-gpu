@@ -168,7 +168,7 @@ func vulkan_encode(device: VulkanDevice*, command: u64, formats: VulkanFormatSta
     for index in 0..<canvas.draw_count:
         if let mesh = canvas.draws[index].mesh:
             vulkan_mesh_used(mesh, serial)
-            _ = try vulkan_mesh_pipeline(device, formats, mesh.kind)
+            _ = try vulkan_mesh_pipeline(device, formats, mesh)
         if let geometry = canvas.draws[index].geometry:
             if serial != 0: ((VulkanGeometry*)geometry.native).last_use = serial
             if formats.geometry == 0:
@@ -228,7 +228,7 @@ func vulkan_encode(device: VulkanDevice*, command: u64, formats: VulkanFormatSta
                 # Zero clamp requires no optional depthBiasClamp device feature.
                 vkCmdSetDepthBias(command,0.0,0.0,draw.depth_slope)
                 if let mesh = draw.mesh:
-                    vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, formats.mesh[(usize)(u8)mesh.kind])
+                    vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, formats.mesh[mesh_variant(mesh)])
                     var mesh_set = upload.mesh_descriptors[index]
                     vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, device.mesh_pipeline_layout, 0, 1, &mesh_set, 0, none)
                     vkCmdDraw(command, (u32)draw.count, 1, 0, 0)

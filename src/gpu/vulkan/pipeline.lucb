@@ -148,12 +148,13 @@ func vulkan_build_pipeline(device: VulkanDevice*, pass: u64, fragment: u64, blen
 
 ## A depth-tested pipeline of the vertex stage `vertex` pulling from storage
 ## buffers and the fragment stage `fragment`, laid out by `layout`.
-func vulkan_stage_pipeline(device: VulkanDevice*, pass: u64, vertex: const u32[], fragment: const u32[], layout: u64, blend: Blend) -> u64!:
+## `depth_write` off: depth tested but not written (a faded mesh).
+func vulkan_stage_pipeline(device: VulkanDevice*, pass: u64, vertex: const u32[], fragment: const u32[], layout: u64, blend: Blend, depth_write: bool = true) -> u64!:
     let vertex_shader = try vulkan_shader(device, vertex)
     defer vkDestroyShaderModule(device.device, vertex_shader, none)
     let fragment_shader = try vulkan_shader(device, fragment)
     defer vkDestroyShaderModule(device.device, fragment_shader, none)
-    return try vulkan_graphics_pipeline(device, pass, vertex_shader, fragment_shader, layout, blend, true, VulkanVertexInput.pulled)
+    return try vulkan_graphics_pipeline(device, pass, vertex_shader, fragment_shader, layout, blend, depth_write, VulkanVertexInput.pulled, not depth_write)
 
 ## What a pipeline's vertex stage reads from bound vertex buffers.
 enum VulkanVertexInput as u8:
