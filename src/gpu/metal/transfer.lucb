@@ -71,9 +71,10 @@ func metal_read_wait(ticket: Ticket) -> !:
     defer objc_autoreleasePoolPop(pool)
     metal_void(command, metal_sel("waitUntilCompleted"))
     let status = metal_uint(command, metal_sel("status"))
+    let code = metal_failure_code(command) if status != 4 else 0
     metal_void(command, metal_sel("release"))
     if status != 4:
-        error(execution_failed, "Metal command execution failed")
+        error(execution_failed, metal_failure_reason(code))
 
 ## Whether a batch's command buffer has finished, completed or failed
 ## (MTLCommandBufferStatus 4 or 5), without waiting.

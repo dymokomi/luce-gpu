@@ -24,6 +24,8 @@ struct MetalSubmission:
     var start: u64
     var end: u64
     var failed: bool
+    ## The first failed command buffer's MTLCommandBufferError code.
+    var failure: u64
 
 ## How many encodings (passes, uploads, copies) the open command buffer takes
 ## before it is committed on its own: what bounds the latency and the upload
@@ -97,7 +99,9 @@ func metal_submission_finish(slot: MetalSubmission*, wait: bool):
     slot.start = metal_nanoseconds(metal_double(slot.commands[0], metal_sel("GPUStartTime")))
     slot.end = metal_nanoseconds(metal_double(slot.commands[slot.count - 1], metal_sel("GPUEndTime")))
     for index in 0..<slot.count:
-        if metal_uint(slot.commands[index], metal_sel("status")) != 4: slot.failed = true
+        if metal_uint(slot.commands[index], metal_sel("status")) != 4 and not slot.failed:
+            slot.failed = true
+            slot.failure = metal_failure_code(slot.commands[index])
     metal_release_buffers(slot.commands, slot.count)
     var none_left: void*[]
     slot.commands = none_left
@@ -130,13 +134,32 @@ func metal_submission_wait(device: MetalDevice*, serial: u64) -> !:
     let slot = metal_submission_slot(device, serial) else return
     metal_submission_finish(slot, true)
     if slot.failed:
-        error(execution_failed, "the GPU failed while running submitted work")
+        error(execution_failed, metal_failure_reason(slot.failure))
 
 func metal_submission_time(device: MetalDevice*, serial: u64) -> GpuTime?:
     let slot = metal_submission_slot(device, serial) else return none
     metal_submission_finish(slot, false)
     if slot.count > 0: return none
     return GpuTime(start = slot.start, end = slot.end)
+
+## The MTLCommandBufferError code of a failed command buffer; 0 when it has no error.
+func metal_failure_code(command: void*) -> u64:
+    let failure = metal_ptr(command, metal_sel("error")) else return 0
+    return metal_uint(failure, metal_sel("code"))
+
+## What failed, by MTLCommandBufferError code, so a failure names its cause.
+func metal_failure_reason(code: u64) -> str:
+    match code:
+        2: return "the GPU failed while running submitted work: a command buffer ran too long (Metal timeout)"
+        3: return "the GPU failed while running submitted work: a page fault, a shader reading or writing outside a resource"
+        4: return "the GPU failed while running submitted work: the process's GPU access was revoked"
+        7: return "the GPU failed while running submitted work: not permitted (a background process may not use the GPU)"
+        8: return "the GPU failed while running submitted work: out of GPU memory"
+        9: return "the GPU failed while running submitted work: a resource it used was invalid (destroyed or purged)"
+        10: return "the GPU failed while running submitted work: a memoryless attachment was loaded or stored"
+        11: return "the GPU failed while running submitted work: the device was removed"
+        12: return "the GPU failed while running submitted work: a shader's call stack overflowed"
+        _: return "the GPU failed while running submitted work (Metal internal error)"
 
 ## Metal reports GPU times as host-time seconds.
 func metal_nanoseconds(seconds: f64) -> u64:
