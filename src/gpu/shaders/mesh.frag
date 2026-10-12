@@ -36,6 +36,17 @@ void shade() {
     vec3 view = p.eye.xyz - world_position;
     float vl = length(view);
     view = vl > 1e-30 ? view / vl : vec3(0.0, 0.0, 1.0);
+    if (shading == shade_draft) {
+        // The draft against the pull direction, from the outward normal
+        // (before the two-sided flip): green past the angle asked for,
+        // yellow within it either way, red past it facing away.
+        float draft = degrees(asin(clamp(dot(n, normalize(p.zebra_axis.xyz)), -1.0, 1.0)));
+        float need = max(p.zebra_axis.w, 0.0);
+        vec3 color = draft >= need ? vec3(0.25, 0.75, 0.3) : (draft > -need ? vec3(0.95, 0.8, 0.2) : vec3(0.9, 0.2, 0.15));
+        if (p.light_direction[0].w > 0.5) color *= 0.75 + 0.25 * abs(dot(n, p.light_direction[0].xyz));
+        fragment_color = vec4(mix(color, p.accent.rgb, vertex_color.a), 1.0);
+        return;
+    }
     // Two-sided: shade the side facing the eye.
     if (dot(n, view) < 0.0) n = -n;
     if (shading == shade_lit || shading == shade_flat) {
@@ -55,6 +66,11 @@ void shade() {
         float t = clamp(value / max(p.curvature.y, 1e-20), -1.0, 1.0);
         vec3 zero = vec3(0.25, 0.75, 0.3);
         vec3 color = t < 0.0 ? mix(zero, vec3(0.15, 0.3, 0.95), -t) : mix(zero, vec3(0.95, 0.2, 0.15), t);
+        // The radius band: tighter than its least radius magenta, flatter
+        // than its greatest grey (the smallest radius at the point).
+        float radius = 1.0 / max(max(abs(k1), abs(k2)), 1e-30);
+        if (p.curvature.z > 0.0 && radius < p.curvature.z) color = vec3(0.85, 0.25, 0.85);
+        else if (p.curvature.w > 0.0 && radius > p.curvature.w) color = vec3(0.42);
         if (p.light_direction[0].w > 0.5) color *= 0.8 + 0.2 * max(0.0, dot(n, p.light_direction[0].xyz));
         fragment_color = vec4(mix(color, p.accent.rgb, vertex_color.a), 1.0);
         return;

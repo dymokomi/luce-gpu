@@ -89,7 +89,7 @@ normal), `zebra` (reflected stripes of a cylinder or plane around
 `zebra_axis`, antialiased with `fwidth` and fading to their mean before they
 alias), `isophote` (lines of equal N · axis), `normals`, `unlit` and
 `curvature` (a blue-green-red map of a value of the principal curvatures the
-colors buffer carries unclamped, over `mesh_curvature`'s range). `MeshKind.wires` expands point pairs into constant-pixel-width lines.
+colors buffer carries unclamped, over `mesh_curvature`'s range; its z and w a radius band: smallest radii under z magenta, over w grey) and `draft` (the draft angle against the pull direction `mesh_zebra_axis` holds, its w the angle asked for in degrees: green past it, yellow within it either way, red past it facing away). `MeshKind.wires` expands point pairs into constant-pixel-width lines.
 A `mesh_fade` above zero draws a surface or its wires faded, toward a
 see-through grey (at 1, grey and a fifth as opaque), blended over what is
 drawn and depth tested without writing depth, so what lies behind it and is

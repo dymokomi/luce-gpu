@@ -19,12 +19,12 @@ layout(std430, binding = 15) readonly buffer Parameters {
     vec4 eye;                // xyz world eye; w: clip-space y sign
     vec4 mode;               // x shading; y normal domain; z color domain; w id base (bits)
     vec4 zebra;              // x stripes; y duty; z model (0 cylinder, 1 planar); w > 0.5: stripes only
-    vec4 zebra_axis;         // xyz world stripe axis
+    vec4 zebra_axis;         // xyz world stripe axis, or draft's pull direction; w draft's angle (degrees)
     vec4 zebra_dark;         // rgb
     vec4 zebra_light;        // rgb
     vec4 line;               // x wire width in pixels; y, z logical viewport size; w depth bias
     vec4 accent;             // rgb selection highlight; w > 0: flagged faces take it
-    vec4 curvature;          // x value kind; y the value the colour map spans
+    vec4 curvature;          // x value kind; y the value the colour map spans; z, w the radius band (0 off)
     vec4 fade;               // x 0..1: how far the surface fades to see-through grey (0 off)
 } p;
 
@@ -36,6 +36,7 @@ const int shade_isophote = 3;
 const int shade_normals = 4;
 const int shade_unlit = 5;
 const int shade_curvature = 6;
+const int shade_draft = 7;
 
 vec3 point_at(uint point) {
     return vec3(positions[point * 3u], positions[point * 3u + 1u], positions[point * 3u + 2u]);

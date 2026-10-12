@@ -52,14 +52,17 @@ pub let mesh_light_color: usize = 72
 pub let mesh_eye: usize = 88
 pub let mesh_mode: usize = 92
 pub let mesh_zebra: usize = 96
+## Zebra's stripe axis (xyz); draft shading's pull direction (xyz) and the
+## draft angle it asks for in degrees (w).
 pub let mesh_zebra_axis: usize = 100
 pub let mesh_zebra_dark: usize = 104
 pub let mesh_zebra_light: usize = 108
 pub let mesh_line: usize = 112
 pub let mesh_accent: usize = 116
 ## Curvature shading: x the value (0 mean, 1 Gaussian, 2 k1, 3 k2, 4 the
-## larger |k|), y the value the color map spans (only read by the curvature
-## shading).
+## larger |k|), y the value the color map spans, z and w a radius band: a
+## point whose smallest radius of curvature is under z draws magenta, over w
+## grey (0: no limit). Only the curvature shading reads it.
 pub let mesh_curvature: usize = 120
 ## Fading: x from 0 (opaque, as shaded) to 1 (most see-through and grey),
 ## for objects drawn as context around what is being edited. Faded draws
@@ -77,6 +80,10 @@ pub enum Shading as u8:
     ## A diverging colour map of principal curvatures (k1, k2) the colors
     ## buffer carries: blue below zero, green at zero, red above.
     curvature = 6
+    ## Draft angle against a pull direction (mesh_zebra_axis): green past
+    ## the angle asked for, yellow within it either way, red past it facing
+    ## away (Fusion's and Alias's draft analysis).
+    draft = 7
 
 ## A recorded mesh draw: retained buffers and its parameter block.
 struct MeshDraw:
