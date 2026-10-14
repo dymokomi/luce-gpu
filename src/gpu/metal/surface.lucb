@@ -9,7 +9,10 @@
 
 struct MetalSurface:
     var layer: void*?
+    # The last frame's submission and the one before it: a frame waits only for
+    # the one before last, so encoding a frame overlaps the GPU drawing the last.
     var pending: void*?
+    var earlier: void*?
     var faulted: bool
     # A UNORM drawable tagged sRGB: blending on encoded values.
     var encoded: bool
@@ -47,19 +50,33 @@ func metal_surface_open(device: MetalDevice*, host: window.Presentation, encoded
     metal_bool_arg(view, metal_sel("setWantsLayer:"), true)
     return state
 
+## Wait for every frame this surface submitted.
 func metal_surface_wait(state: MetalSurface*) -> !:
     let pool = objc_autoreleasePoolPush()
     defer objc_autoreleasePoolPop(pool)
-    if let command = state.pending:
-        state.pending = none
-        defer metal_void(command, metal_sel("release"))
-        metal_void(command, metal_sel("waitUntilCompleted"))
-        # MTLCommandBufferStatusCompleted is 4. Errors remain sticky; continuing
-        # a failed surface requires explicit destruction and recreation.
-        if metal_uint(command, metal_sel("status")) != 4:
-            state.faulted = true
+    metal_surface_settle(state, &state.earlier)
+    metal_surface_settle(state, &state.pending)
     if state.faulted:
         error(execution_failed, "Metal command execution failed; recreate the GPU surface")
+
+## Before a frame: wait for the frame before last, keeping one in flight.
+func metal_surface_ready(state: MetalSurface*) -> !:
+    metal_surface_settle(state, &state.earlier)
+    state.earlier = state.pending
+    state.pending = none
+    if state.faulted:
+        error(execution_failed, "Metal command execution failed; recreate the GPU surface")
+
+## Wait for the submission in `slot`, if any, and release it.
+func metal_surface_settle(state: MetalSurface*, slot: (void*?)*):
+    let command = *slot else return
+    *slot = none
+    defer metal_void(command, metal_sel("release"))
+    metal_void(command, metal_sel("waitUntilCompleted"))
+    # MTLCommandBufferStatusCompleted is 4. Errors remain sticky; continuing
+    # a failed surface requires explicit destruction and recreation.
+    if metal_uint(command, metal_sel("status")) != 4:
+        state.faulted = true
 
 func metal_clear_present(device: MetalDevice*, host: window.Presentation, state: MetalSurface*, color: Color) -> PresentResult!:
     return try metal_render(device, host, state, Canvas(), color)
@@ -67,7 +84,7 @@ func metal_clear_present(device: MetalDevice*, host: window.Presentation, state:
 func metal_render(device: MetalDevice*, host: window.Presentation, state: MetalSurface*, canvas: Canvas, color: Color) -> PresentResult!:
     let pool = objc_autoreleasePoolPush()
     defer objc_autoreleasePoolPop(pool)
-    try metal_surface_wait(state)
+    try metal_surface_ready(state)
     if not try host.visible():
         return PresentResult.skipped
     let size = try host.size()
