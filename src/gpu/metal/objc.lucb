@@ -83,8 +83,32 @@ extern func metal_uint as "objc_msgSend"(object: void*, selector: void*) -> u64
 extern func metal_index as "objc_msgSend"(object: void*, selector: void*, index: u64) -> void*?
 extern func metal_with_object as "objc_msgSend"(object: void*, selector: void*, value: void*) -> void*?
 
+## The selector for `name`, a string literal. sel_registerName hashes the name
+## and takes the runtime's lock; encoding a draw asks for about fifteen, so each
+## literal's selector is kept by the literal's address. The table holds what the
+## backend's source names (some 150 literals), so it never fills in practice; a
+## name past a full table is simply registered each time.
 func metal_sel(name: c.str) -> void*:
+    let key = (u64)(usize)(void*)name
+    var slot = (key >> 3) & (u64)(metal_selector_slots - 1)
+    for probe in 0..<metal_selector_slots:
+        _ = probe
+        let held = metal_selector_names[(usize)slot]
+        if held == key:
+            return metal_selector_values[(usize)slot] else trap("a cached Metal selector is missing")
+        if held == 0:
+            let selector = sel_registerName(name)
+            metal_selector_names[(usize)slot] = key
+            metal_selector_values[(usize)slot] = selector
+            return selector
+        slot = (slot + 1) & (u64)(metal_selector_slots - 1)
     return sel_registerName(name)
+
+## The selector table: literal addresses (0 empty) and their selectors. The
+## backend runs on the main thread only (`check_thread`).
+let metal_selector_slots: usize = 512
+var metal_selector_names: u64[512]
+var metal_selector_values: (void*?)[512]
 
 func metal_class(name: c.str) -> void*!:
     return objc_getClass(name) else error(failed, "a required Metal class is unavailable; check framework linkage")
