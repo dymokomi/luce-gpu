@@ -41,40 +41,26 @@ func vulkan_buffer_create(device: VulkanDevice*, data: const u8[]) -> VulkanBuff
     return state
 
 ## Copy `data` to `offset` on the queue: submissions before this one read the
-## old bytes, later ones the new.
+## old bytes, later ones the new. It goes through the upload ring a slot's worth
+## at a time, so a large upload allocates nothing of its own.
 func vulkan_buffer_upload(device: VulkanDevice*, state: VulkanBuffer*, offset: usize, data: const u8[]) -> !:
     try vulkan_drawing(device)
-    var source: u64 = 0
-    var source_offset: u64 = 0
-    var ring: VulkanRingSlot*? = none
-    var staging = VulkanStaging()
-    errdefer vulkan_staging_destroy(device, staging)
-    if (u64)data.length <= vulkan_upload_slot_bytes:
-        let room = try vulkan_upload_room(device, (u64)data.length)
+    var done: usize = 0
+    while done < data.length:
+        let piece = canvas_min(data.length - done, (usize)vulkan_upload_slot_bytes)
+        let room = try vulkan_upload_room(device, (u64)piece)
         let base = room.mapped else trap("a mapped Vulkan ring slot lost its mapping")
-        memory.copy(u8[]((u8*)base + (usize)room.used, data.length), data, data.length)
-        source = room.buffer
-        source_offset = room.used
-        room.used += (u64)data.length
-        ring = room
-    else:
-        staging = try vulkan_staging(device, data.length, VK_BUFFER_USAGE_TRANSFER_SRC_BIT)
-        var mapped: void*? = none
-        try vulkan_check(vkMapMemory(device.device, staging.block, 0, (u64)data.length, 0, &mapped), "Vulkan staging memory could not be mapped")
-        let destination = mapped else error(failed, "Vulkan returned an empty memory mapping")
-        memory.copy(u8[]((u8*)destination, data.length), data, data.length)
-        vkUnmapMemory(device.device, staging.block)
-        source = staging.buffer
-    let slot = try vulkan_begin(device)
-    var region = VkBufferCopy(srcOffset = source_offset, dstOffset = (u64)offset, size = (u64)data.length)
-    vkCmdCopyBuffer(slot.command, source, state.buffer, 1, &region)
-    vulkan_compute_barrier(slot.command, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT)
-    if staging.buffer != 0:
-        try vulkan_retire(slot, VulkanRetired(kind = vulkan_retired_buffer, handle = staging.buffer, allocation = VulkanAllocation(memory = staging.block)))
-        staging = VulkanStaging()
-    let serial = try vulkan_end(device, slot)
-    state.last_use = serial
-    if let used = ring: used.serial = serial
+        memory.copy(u8[]((u8*)base + (usize)room.used, piece), data[done..<done + piece], piece)
+        let source_offset = room.used
+        room.used += (u64)piece
+        let slot = try vulkan_begin(device)
+        var region = VkBufferCopy(srcOffset = source_offset, dstOffset = (u64)(offset + done), size = (u64)piece)
+        vkCmdCopyBuffer(slot.command, room.buffer, state.buffer, 1, &region)
+        vulkan_compute_barrier(slot.command, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT)
+        let serial = try vulkan_end(device, slot)
+        state.last_use = serial
+        room.serial = serial
+        done += piece
 
 ## Release once every submission that read the buffer has completed.
 func vulkan_buffer_release(raw_device: void*, raw_state: void*):

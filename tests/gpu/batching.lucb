@@ -29,6 +29,7 @@ pub func main(arguments: str[]) -> i32!:
     try mesh_pixels.pixels(device)
     try compute.checks(device)
     try textures.ieee_fragments(device)
+    try textures.large_uploads(device)
     try rays.checks(device)
     try targets.pixels(device)
     try copies.pixels(device)

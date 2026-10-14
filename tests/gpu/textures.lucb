@@ -12,6 +12,7 @@ pub func pixels(device: gpu.Device) -> !:
     let held = try device.memory()
     assert(held.used >= before.used)
     large.destroy()
+    try large_uploads(device)
     # A 2x2 sRGB texture: red, green / blue, opaque white with half alpha.
     var source = try gpu.Texture.create(device, 2, 2, gpu.Format.rgba8)
     defer source.destroy()
@@ -408,3 +409,35 @@ pub func upload_batches(device: gpu.Device) -> !:
         try many[index].read(half, gpu.Region(128, 200, 1, 1))
         assert(half[0] == (u8)(index + 1) and half[7] == (u8)(index + 1))
         many[index].destroy()
+
+## Uploads larger than a staging slot (8 MiB) arrive whole: a 20 MiB buffer and
+## a 12 MiB texture, checked where the pieces meet and at the ends.
+pub func large_uploads(device: gpu.Device) -> !:
+    let bytes: usize = 20 << 20
+    var data = try new u8[bytes] --- in memory.heap
+    defer free(data) in memory.heap
+    for index in 0..<bytes:
+        data[index] = (u8)((index * 7 + index // 4099) % 251)
+    var buffer = try gpu.Buffer.create(device, data)
+    defer buffer.destroy()
+    var back: u8[64]
+    for at in [(usize)0, (8 << 20) - 32, (16 << 20) - 32, bytes - 64]:
+        try buffer.read(at, back)
+        for index in 0..<back.length:
+            assert(back[index] == data[at + index])
+    let width: u32 = 2048
+    let height: u32 = 1536
+    var picture = try gpu.Texture.create(device, width, height, gpu.Format.rgba8_linear)
+    defer picture.destroy()
+    let texels = (usize)width * (usize)height * 4
+    var image = try new u8[texels] --- in memory.heap
+    defer free(image) in memory.heap
+    for index in 0..<texels:
+        image[index] = (u8)((index // 4 + index % 4 * 37) % 253)
+    try picture.upload(image)
+    var row: u8[8192]
+    for y in [(u32)0, 1023, 1024, height - 1]:
+        try picture.read(row, gpu.Region(0, y, width, 1))
+        let start = (usize)y * 8192
+        for index in 0..<row.length:
+            assert(row[index] == image[start + index])
