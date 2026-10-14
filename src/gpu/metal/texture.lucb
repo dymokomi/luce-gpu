@@ -85,5 +85,5 @@ func metal_texture_mipmaps(device: MetalDevice*, state: MetalTexture*) -> !:
 func metal_texture_render(device: MetalDevice*, state: MetalTexture*, canvas: Canvas, color: Color, keep: bool) -> !:
     let pool = objc_autoreleasePoolPush()
     defer objc_autoreleasePoolPop(pool)
-    try metal_pass(device, try metal_open(device), metal_required(state.texture), metal_format_slot(state.format), canvas, color, (u64)state.width, (u64)state.height, keep)
+    try metal_pass(device, try metal_open(device), metal_required(state.texture), metal_format_slot(state.format), canvas, color, (u64)state.width, (u64)state.height, keep, offscreen = true)
     metal_encoded(device)

@@ -43,12 +43,23 @@ struct MetalDrawing:
     var linear: void*?
     var trilinear: void*?
     var placeholder: void*?
-    var depth_texture: void*?
+    # The window's depth and the texture passes': a frame that renders tiles and
+    # then presents keeps both, instead of remaking one at each size in turn.
+    var window_depth: MetalDepth
+    var pass_depth: MetalDepth
+
+## A depth attachment at one exact size, and the copy (r32float) of it that draws
+## reading the scene depth sample, made only once a pass has such a draw.
+struct MetalDepth:
+    var texture: void*?
+    var copy: void*?
     var width: u64
     var height: u64
-    # The depth copied for draws that read the scene depth (r32float), sized
-    # with the depth attachment.
-    var depth_copy: void*?
+
+    func release():
+        metal_release_optional(self.texture)
+        metal_release_optional(self.copy)
+        self = MetalDepth()
 
 func metal_text(value: c.str) -> void*!:
     return metal_string(try metal_class("NSString"), metal_sel("stringWithUTF8String:"), value) else error(failed, "could not create Metal shader text")
@@ -242,36 +253,44 @@ func metal_pipeline_destroy(pipeline: void*):
             metal_void(value, metal_sel("release"))
     free(state) in memory.heap
 
-func metal_depth(device: MetalDevice*, state: MetalDrawing*, width: u64, height: u64) -> void*!:
-    if state.width == width and state.height == height:
-        return metal_required(state.depth_texture)
-    let descriptor = metal_ptr(try metal_class("MTLTextureDescriptor"), metal_sel("new")) else error(failed, "could not create a GPU depth texture descriptor")
+## `depth`'s attachment at `width` by `height`, made again only when the size changes.
+func metal_depth(device: MetalDevice*, depth: MetalDepth*, width: u64, height: u64) -> void*!:
+    if depth.width == width and depth.height == height:
+        return metal_required(depth.texture)
+    let descriptor = try metal_depth_descriptor(width, height, 252)
     defer metal_void(descriptor, metal_sel("release"))
+    let texture = metal_with_object(metal_required(device.device), metal_sel("newTextureWithDescriptor:"), descriptor) else error(failed, "could not allocate GPU depth storage")
+    depth.release()
+    depth.texture = texture
+    depth.width = width
+    depth.height = height
+    return texture
+
+## `depth`'s r32float copy at its size, made on first use.
+func metal_depth_copy(device: MetalDevice*, depth: MetalDepth*) -> void*!:
+    if let made = depth.copy:
+        return made
+    let descriptor = try metal_depth_descriptor(depth.width, depth.height, 55)
+    defer metal_void(descriptor, metal_sel("release"))
+    let copy = metal_with_object(metal_required(device.device), metal_sel("newTextureWithDescriptor:"), descriptor) else error(failed, "could not allocate GPU depth storage")
+    depth.copy = copy
+    return copy
+
+## A private 2D texture descriptor of `format` that passes render to and shaders read.
+func metal_depth_descriptor(width: u64, height: u64, format: u64) -> void*!:
+    let descriptor = metal_ptr(try metal_class("MTLTextureDescriptor"), metal_sel("new")) else error(failed, "could not create a GPU depth texture descriptor")
     metal_uint_arg(descriptor, metal_sel("setTextureType:"), 2)
-    metal_uint_arg(descriptor, metal_sel("setPixelFormat:"), 252)
+    metal_uint_arg(descriptor, metal_sel("setPixelFormat:"), format)
     metal_uint_arg(descriptor, metal_sel("setWidth:"), width)
     metal_uint_arg(descriptor, metal_sel("setHeight:"), height)
     metal_uint_arg(descriptor, metal_sel("setStorageMode:"), 2)
-    # MTLTextureUsageRenderTarget | ShaderRead: a scene depth copy reads it.
+    # MTLTextureUsageRenderTarget | ShaderRead: a scene depth copy reads the depth.
     metal_uint_arg(descriptor, metal_sel("setUsage:"), 5)
-    let texture = metal_with_object(metal_required(device.device), metal_sel("newTextureWithDescriptor:"), descriptor) else error(failed, "could not allocate GPU depth storage")
-    # The copy for scene depth draws: r32float, made again at this size.
-    metal_uint_arg(descriptor, metal_sel("setPixelFormat:"), 55)
-    errdefer metal_void(texture, metal_sel("release"))
-    let copy = metal_with_object(metal_required(device.device), metal_sel("newTextureWithDescriptor:"), descriptor) else error(failed, "could not allocate GPU depth storage")
-    if let previous = state.depth_texture:
-        metal_void(previous, metal_sel("release"))
-    metal_release_optional(state.depth_copy)
-    state.depth_texture = texture
-    state.depth_copy = copy
-    state.width = width
-    state.height = height
-    return texture
+    return descriptor
 
 func metal_drawing_destroy(state: MetalDrawing*):
-    if let texture = state.depth_texture:
-        metal_void(texture, metal_sel("release"))
-    metal_release_optional(state.depth_copy)
+    state.window_depth.release()
+    state.pass_depth.release()
     if let texture = state.placeholder:
         metal_void(texture, metal_sel("release"))
     for pipeline in state.pipelines:
@@ -288,14 +307,16 @@ func metal_drawing_destroy(state: MetalDrawing*):
     free(state) in memory.heap
 
 ## Record `canvas` into `target` (a color texture of `slot`'s format) cleared to
-## `color`, or over its contents when `keep`, as render passes of `command`. Its
+## `color`, or over its contents when `keep`, as render passes of `command`;
+## `offscreen` for a texture's pass, which keeps its own depth. Its
 ## vertices, coverage and instances go in the upload ring. The encoded slot
 ## clears to the encoded color and has the built-in draws encode theirs. One
 ## pass draws everything, unless draws read the scene depth: before each that
 ## needs a fresh copy (`depth_copy_before`), the pass ends storing its depth,
-## a copy pass writes the depth to `depth_copy`, and a new pass resumes over
+## a copy pass writes the depth to its copy, and a new pass resumes over
 ## both attachments.
-func metal_pass(device: MetalDevice*, command: void*, target: void*, slot: usize, canvas: Canvas, color: Color, width: u64, height: u64, keep: bool = false) -> !:
+func metal_pass(device: MetalDevice*, command: void*, target: void*, slot: usize, canvas: Canvas, color: Color, width: u64, height: u64, keep: bool = false,
+               offscreen: bool = false) -> !:
     let encoded = slot == metal_encoded_slot
     let descriptor = metal_ptr(try metal_class("MTLRenderPassDescriptor"), metal_sel("renderPassDescriptor")) else error(failed, "could not create a Metal render pass")
     let attachments = metal_required(metal_ptr(descriptor, metal_sel("colorAttachments")))
@@ -311,8 +332,9 @@ func metal_pass(device: MetalDevice*, command: void*, target: void*, slot: usize
         metal_void(encoder, metal_sel("endEncoding"))
         return
     let state = try metal_drawing(device)
+    let scene = &state.pass_depth if offscreen else &state.window_depth
     let depth = metal_required(metal_ptr(descriptor, metal_sel("depthAttachment")))
-    metal_object(depth, metal_sel("setTexture:"), try metal_depth(device, state, width, height))
+    metal_object(depth, metal_sel("setTexture:"), try metal_depth(device, scene, width, height))
     metal_uint_arg(depth, metal_sel("setLoadAction:"), 2)
     metal_double_arg(depth, metal_sel("setClearDepth:"), 1.0)
     # Empty arrays still bind a span: the shaders' buffers are never unbound.
@@ -336,6 +358,7 @@ func metal_pass(device: MetalDevice*, command: void*, target: void*, slot: usize
         if copies == none and depth_copy_before(&canvas, index):
             let made = try metal_copies(device)
             _ = try metal_copy_pipeline(device, made, metal_copy_depth, 55)
+            _ = try metal_depth_copy(device, scene)
             copies = made
     var start: usize = 0
     var first = true
@@ -348,11 +371,11 @@ func metal_pass(device: MetalDevice*, command: void*, target: void*, slot: usize
         # MTLStoreActionStore (1) keeps the depth for the copy; DontCare (0) drops it.
         metal_uint_arg(depth, metal_sel("setStoreAction:"), 0 if last else 1)
         let encoder = metal_with_object(command, metal_sel("renderCommandEncoderWithDescriptor:"), descriptor) else error(failed, "could not create a Metal render encoder")
-        metal_encode(encoder, state, pipeline, geometry_pipeline, vertices, coverage, instances, canvas, start, end, width, height, slot)
+        metal_encode(encoder, state, scene.copy, pipeline, geometry_pipeline, vertices, coverage, instances, canvas, start, end, width, height, slot)
         metal_void(encoder, metal_sel("endEncoding"))
         if last: return
-        try metal_copy_depth_texture(device, command, copies else trap("a Metal depth copy lost its pipeline"), metal_required(state.depth_texture),
-                                     metal_required(state.depth_copy), width, height)
+        try metal_copy_depth_texture(device, command, copies else trap("a Metal depth copy lost its pipeline"), metal_required(scene.texture),
+                                     metal_required(scene.copy), width, height)
         # The next pass draws over what this one left, color and depth.
         metal_uint_arg(attachment, metal_sel("setLoadAction:"), 1)
         metal_uint_arg(depth, metal_sel("setLoadAction:"), 1)
@@ -360,8 +383,8 @@ func metal_pass(device: MetalDevice*, command: void*, target: void*, slot: usize
         first = false
 
 ## Encode draws `first..<end` of `canvas`; draws reading the scene depth get
-## `drawing.depth_copy` at binding 4.
-func metal_encode(encoder: void*, drawing: MetalDrawing*, pipeline: void*, geometry_pipeline: void*, buffer: MetalSpan, masks: MetalSpan, instances: MetalSpan?, canvas: Canvas,
+## `scene_depth` (the pass's depth copy) at binding 4.
+func metal_encode(encoder: void*, drawing: MetalDrawing*, scene_depth: void*?, pipeline: void*, geometry_pipeline: void*, buffer: MetalSpan, masks: MetalSpan, instances: MetalSpan?, canvas: Canvas,
                   first: usize, end: usize, width: u64, height: u64, slot: usize):
     metal_bind_buffer(encoder, metal_sel("setVertexBuffer:offset:atIndex:"), buffer.buffer, buffer.offset, 0)
     if let instance_buffer = instances:
@@ -415,7 +438,7 @@ func metal_encode(encoder: void*, drawing: MetalDrawing*, pipeline: void*, geome
             if let texture = draw.images[index]:
                 image = metal_required(((MetalTexture*)texture.native).texture)
             if index == image_limit - 1 and reads_scene_depth(&draw):
-                image = metal_required(drawing.depth_copy)
+                image = metal_required(scene_depth)
             metal_bind_texture(encoder, metal_sel("setFragmentTexture:atIndex:"), image, (u64)index + 1)
             metal_bind_texture(encoder, metal_sel("setFragmentSamplerState:atIndex:"), sampler, (u64)index + 1)
         if draw.instanced:
