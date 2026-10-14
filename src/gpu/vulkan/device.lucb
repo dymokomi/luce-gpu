@@ -142,6 +142,9 @@ struct VulkanDevice:
     var depth_view: u64
     var depth_width: u32
     var depth_height: u32
+    # Counts the texture-pass depth attachments made: a texture's cached
+    # framebuffer names the one it was made with.
+    var depth_generation: u64
     # The depth copied for draws reading the scene depth (vulkan_depth_copy_for);
     # it only grows, and its layout is tracked across submissions.
     var depth_copy_image: u64

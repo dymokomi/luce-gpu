@@ -29,6 +29,10 @@ struct VulkanTexture:
     ## Whether the device filters the format linearly; sampling falls back to
     ## nearest where it does not (32-bit floats on some devices).
     var filterable: bool
+    ## The framebuffer its frames render through, made with the device's
+    ## texture-pass depth of generation `framebuffer_depth`; 0 until a frame.
+    var framebuffer: u64
+    var framebuffer_depth: u64
 
 func vulkan_native_format(pixel_format: Format) -> u32:
     if pixel_format == Format.rgba8_linear: return VK_FORMAT_R8G8B8A8_UNORM
@@ -186,6 +190,7 @@ func vulkan_depth_for(device: VulkanDevice*, width: u32, height: u32) -> u64!:
     try vulkan_depth_create(device, grown_width, grown_height, &device.depth_image, &device.depth_memory, &device.depth_view)
     device.depth_width = grown_width
     device.depth_height = grown_height
+    device.depth_generation += 1
     return device.depth_view
 
 ## The image draws reading the scene depth sample, at least `width` by
@@ -253,8 +258,15 @@ func vulkan_texture_create(device: VulkanDevice*, width: u32, height: u32, pixel
 ## when the last of them does.
 func vulkan_texture_destroy(device: VulkanDevice*, state: VulkanTexture*):
     let item = VulkanRetired(kind = vulkan_retired_image, handle = state.image, view = state.view, extra = state.attachment, allocation = state.memory)
+    let framebuffer = state.framebuffer
     let last_use = state.last_use
     free(state) in memory.heap
+    if framebuffer != 0:
+        vulkan_retire_at(device, last_use, VulkanRetired(kind = vulkan_retired_framebuffer, handle = framebuffer))
+    vulkan_retire_at(device, last_use, item)
+
+## Free `item` once submission `last_use` has completed: now, if it has.
+func vulkan_retire_at(device: VulkanDevice*, last_use: u64, item: VulkanRetired):
     vulkan_poll(device)
     if last_use <= device.completed:
         vulkan_retired_free(device, item)
@@ -405,22 +417,24 @@ func vulkan_sampler_for(device: VulkanDevice*, filter: Filter, filterable: bool)
         return device.nearest
     return device.trilinear if filter == Filter.trilinear else device.linear
 
-## Destroy a framebuffer this call still owns; zero once it has been retired.
-func vulkan_framebuffer_release(device: VulkanDevice*, framebuffer: u64):
-    if framebuffer != 0: vkDestroyFramebuffer(device.device, framebuffer, none)
-
 ## Render `canvas` into the image cleared to `color` (over its contents when
 ## `keep`) and submit it without waiting. The pass leaves the image ready for
-## sampling; its framebuffer and uploads are freed when the submission completes.
+## sampling; its uploads are freed when the submission completes. The texture
+## keeps its framebuffer for its next frames until the shared depth grows.
 func vulkan_texture_render(device: VulkanDevice*, state: VulkanTexture*, canvas: Canvas, color: Color, keep: bool) -> !:
     let formats = try vulkan_format_state(device, state.native_format)
     let depth = try vulkan_depth_for(device, state.width, state.height)
-    var attachments: u64[2] = [state.attachment if state.levels > 1 else state.view, depth]
-    var framebuffer_info = VkFramebufferCreateInfo(sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
-                                                   renderPass = formats.pass_texture, attachmentCount = 2, pAttachments = &attachments[0], width = state.width, height = state.height, layers = 1)
-    var framebuffer: u64 = 0
-    try vulkan_check(vkCreateFramebuffer(device.device, &framebuffer_info, none, &framebuffer), "a Vulkan framebuffer could not be created")
-    defer vulkan_framebuffer_release(device, framebuffer)
+    if state.framebuffer == 0 or state.framebuffer_depth != device.depth_generation:
+        if state.framebuffer != 0:
+            let stale = state.framebuffer
+            state.framebuffer = 0
+            vulkan_retire_at(device, state.last_use, VulkanRetired(kind = vulkan_retired_framebuffer, handle = stale))
+        var attachments: u64[2] = [state.attachment if state.levels > 1 else state.view, depth]
+        var framebuffer_info = VkFramebufferCreateInfo(sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+                                                       renderPass = formats.pass_texture, attachmentCount = 2, pAttachments = &attachments[0], width = state.width, height = state.height, layers = 1)
+        try vulkan_check(vkCreateFramebuffer(device.device, &framebuffer_info, none, &state.framebuffer), "a Vulkan framebuffer could not be created")
+        state.framebuffer_depth = device.depth_generation
+    let framebuffer = state.framebuffer
     if reads_scene_depth_anywhere(&canvas): try vulkan_depth_copy_for(device, state.width, state.height)
     var upload = try vulkan_upload(device, canvas)
     defer vulkan_upload_destroy(device, upload)
@@ -444,7 +458,5 @@ func vulkan_texture_render(device: VulkanDevice*, state: VulkanTexture*, canvas:
         state.layout = VK_IMAGE_LAYOUT_UNDEFINED
     try vulkan_encode(device, slot.command, formats, pass, framebuffer, canvas, upload, color, state.width, state.height, serial, depth_image = device.depth_image)
     state.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-    try vulkan_retire(slot, VulkanRetired(kind = vulkan_retired_framebuffer, handle = framebuffer))
-    framebuffer = 0
     try vulkan_upload_retire(slot, &upload)
     state.last_use = try vulkan_end(device, slot)
