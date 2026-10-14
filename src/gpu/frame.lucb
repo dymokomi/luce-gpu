@@ -50,6 +50,9 @@ struct FrameState:
     var validate: (func(void*, window.Size, bool) -> unit!)?
     var submit: (func(void*, Canvas, Color) -> PresentResult!)?
     var release: (func(void*) -> unit)?
+    ## Takes the canvas back when the frame closes, for the next frame to record
+    ## into: storage regrown from nothing each frame is the alternative.
+    var keep: (func(void*, Canvas) -> unit)?
     var ended: bool
 
     ## Whether the frame still records. Draws ask without `extent`: the window's
@@ -66,10 +69,19 @@ struct FrameState:
         if self.counted:
             self.counted = false
             frames_open -= 1
-        self.canvas.destroy()
+        let canvas = self.canvas
+        self.canvas = Canvas()
         if let context = self.presentation:
             self.presentation = none
+            if let keep = self.keep:
+                keep(context, canvas)
+            else:
+                var dropped = canvas
+                dropped.destroy()
             (self.release else trap("frame presentation has no release operation"))(context)
+        else:
+            var dropped = canvas
+            dropped.destroy()
 
 let frame_state_type: interop.Type[FrameState] = interop.Type[FrameState]("GPU frame state", FrameState.close, closeable = true)
 

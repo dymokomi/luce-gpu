@@ -164,10 +164,14 @@ struct DeviceState:
     # pass counts as using them.
     var addressed: BufferState*[]
     var addressed_count: usize
+    # The last texture frame's canvas, cleared, for the next texture frame:
+    # rendering tiles records into one canvas instead of growing one per tile.
+    var spare: Canvas
 
 func release_device(state: DeviceState*):
     state.references -= 1
     if state.references == 0:
+        state.spare.destroy()
         state.destroy_device(state.backend, state.native)
         if state.addressed.length > 0: free(state.addressed) in memory.heap
         if state.kernels.length > 0: free(state.kernels) in memory.heap

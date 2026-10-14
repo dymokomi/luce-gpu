@@ -109,6 +109,9 @@ pub struct Texture:
         recording.validate = check_texture_frame
         recording.submit = submit_texture_frame
         recording.release = release_texture_frame
+        recording.keep = keep_texture_canvas
+        recording.canvas = state.device.spare
+        state.device.spare = Canvas()
         state.references += 1
         state.active_frame = true
         state.keep = keep
@@ -225,6 +228,16 @@ func submit_texture_frame(context: void*, canvas: Canvas, color: Color) -> Prese
                     error(invalid_geometry, "a texture frame cannot sample the texture it renders into")
     try backend_texture_render(state.device, state.native, canvas, color, state.keep)
     return PresentResult.submitted
+
+## Keep a finished texture frame's canvas for the device's next one.
+func keep_texture_canvas(context: void*, canvas: Canvas):
+    let state = (TextureState*)context
+    var kept = canvas
+    kept.recycle()
+    let previous = state.device.spare
+    state.device.spare = kept
+    var dropped = previous
+    dropped.destroy()
 
 func release_texture_frame(context: void*):
     require_thread()

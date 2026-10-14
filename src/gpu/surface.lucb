@@ -81,6 +81,9 @@ pub struct Surface:
         recording.validate = check_surface_frame
         recording.submit = submit_surface_frame
         recording.release = release_surface_frame
+        recording.keep = keep_surface_canvas
+        recording.canvas = state.spare
+        state.spare = Canvas()
         state.references += 1
         state.active_frame = true
         return owner
@@ -116,12 +119,15 @@ struct SurfaceState:
     var references: usize = 1
     var closed: bool
     var active_frame: bool
+    ## The last frame's canvas, cleared, which the next frame records into.
+    var spare: Canvas
 
 ## Frames retain physical surface storage after operational closure. Backend work
 ## and its presentation lease are released only when every frame has finished.
 func release_surface(state: SurfaceState*):
     state.references -= 1
     if state.references == 0:
+        state.spare.destroy()
         backend_surface_destroy(state.device, state.host, state.native)
         state.host.destroy()
         release_device(state.device)
@@ -153,6 +159,16 @@ func check_canvas_blending(canvas: Canvas, blending: Blending) -> !:
         for draw in canvas.draws[..<canvas.draw_count]:
             if draw.mesh != none:
                 error(wrong_target, "mesh draws need a linear surface, not an encoded one")
+
+## Keep a finished frame's canvas for the surface's next frame.
+func keep_surface_canvas(context: void*, canvas: Canvas):
+    let state = (SurfaceState*)context
+    var kept = canvas
+    kept.recycle()
+    let previous = state.spare
+    state.spare = kept
+    var dropped = previous
+    dropped.destroy()
 
 func release_surface_frame(context: void*):
     require_thread()

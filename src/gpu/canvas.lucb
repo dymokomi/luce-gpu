@@ -125,6 +125,13 @@ pub struct Canvas:
         self.coverage_count = 0
         self.instance_count = 0
 
+    ## Clear for another frame: the storage stays at what the frames before
+    ## needed, and the budgets go back to their defaults.
+    func recycle():
+        self.clear()
+        self.vertex_budget = 0
+        self.draw_budget = 0
+
     func release_textures():
         for draw in self.draws[..<self.draw_count]:
             for image in draw.images:
@@ -399,3 +406,16 @@ func canvas_min(a: usize, b: usize) -> usize:
 
 func canvas_max(a: usize, b: usize) -> usize:
     return a if a > b else b
+
+test "a recycled canvas keeps its storage and drops its budgets":
+    var canvas = Canvas()
+    defer canvas.destroy()
+    try canvas.allow_draws(8192)
+    let vertices: Vertex[3] = [Vertex(), Vertex(x = 1.0), Vertex(y = 1.0)]
+    for index in 0..<(usize)100:
+        _ = index
+        try canvas.triangles(vertices, Clip(width = 4, height = 4))
+    let storage = canvas.draws.length
+    canvas.recycle()
+    assert(canvas.draw_count == 0 and canvas.vertex_count == 0)
+    assert(canvas.draws.length == storage and canvas.draw_limit() == canvas_draw_default)
