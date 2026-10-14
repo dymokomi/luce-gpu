@@ -84,57 +84,54 @@ func vulkan_upload(device: VulkanDevice*, canvas: Canvas) -> VulkanUpload!:
             var parameters = mesh.parameters
             memory.copy(u8[]((u8*)destination + mesh_offset + placed * 512, mesh_parameter_count * 4), u8[]((u8*)&parameters, mesh_parameter_count * 4), mesh_parameter_count * 4)
             placed += 1
-    let count = (u32)canvas.draw_count
-    var pool_sizes: VkDescriptorPoolSize[2] = [
-        VkDescriptorPoolSize(descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, descriptorCount = count * 4 + (u32)meshes * 8),
-        VkDescriptorPoolSize(descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, descriptorCount = count * (u32)image_limit)]
-    var pool_info = VkDescriptorPoolCreateInfo(sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, maxSets = count + (u32)meshes, poolSizeCount = 2, pPoolSizes = &pool_sizes[0])
-    try vulkan_check(vkCreateDescriptorPool(device.device, &pool_info, none, &upload.descriptor_pool), "Vulkan draw descriptors could not be created")
+    # A draw's set names its images, its vertex-stage buffers and the frame's
+    # coverage; its parameters are bound at a dynamic offset. A draw whose set
+    # would match the draw before's shares it, so a run of fills and text
+    # (placeholder images, the same buffers) takes one set, not one each.
     upload.descriptors = try new u64[canvas.draw_count] --- in memory.heap
-    let layouts = try new u64[canvas.draw_count] --- in memory.heap
+    let shared = try new usize[canvas.draw_count] --- in memory.heap
+    defer free(shared) in memory.heap
+    var unique: usize = 0
+    var previous = VulkanDrawBindings()
+    for index in 0..<canvas.draw_count:
+        let bindings = vulkan_draw_bindings(device, &canvas.draws[index], upload.buffer, upload.base)
+        if index == 0 or not vulkan_same_bindings(&bindings, &previous):
+            unique += 1
+        shared[index] = unique - 1
+        previous = bindings
+    let sets = (u32)unique
+    var pool_sizes: VkDescriptorPoolSize[3] = [
+        VkDescriptorPoolSize(descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, descriptorCount = sets * 3 + (u32)meshes * 8),
+        VkDescriptorPoolSize(descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, descriptorCount = sets),
+        VkDescriptorPoolSize(descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, descriptorCount = sets * (u32)image_limit)]
+    var pool_info = VkDescriptorPoolCreateInfo(sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, maxSets = sets + (u32)meshes, poolSizeCount = 3, pPoolSizes = &pool_sizes[0])
+    try vulkan_check(vkCreateDescriptorPool(device.device, &pool_info, none, &upload.descriptor_pool), "Vulkan draw descriptors could not be created")
+    let layouts = try new u64[unique] --- in memory.heap
     defer free(layouts) in memory.heap
-    for index in 0..<canvas.draw_count:
+    let made = try new u64[unique] --- in memory.heap
+    defer free(made) in memory.heap
+    for index in 0..<unique:
         layouts[index] = device.descriptor_layout
-    var set_info = VkDescriptorSetAllocateInfo(sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, descriptorPool = upload.descriptor_pool, descriptorSetCount = count, pSetLayouts = layouts.data)
-    try vulkan_check(vkAllocateDescriptorSets(device.device, &set_info, upload.descriptors.data), "Vulkan draw descriptors could not be allocated")
+    var set_info = VkDescriptorSetAllocateInfo(sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, descriptorPool = upload.descriptor_pool, descriptorSetCount = sets, pSetLayouts = layouts.data)
+    try vulkan_check(vkAllocateDescriptorSets(device.device, &set_info, made.data), "Vulkan draw descriptors could not be allocated")
     var buffer_info = VkDescriptorBufferInfo(buffer = upload.buffer, offset = upload.base, range = (u64)mask_bytes)
-    let placeholder = device.placeholder else trap("Vulkan drawing state has no placeholder image")
+    # Every draw's parameters, from the first draw's block; a draw adds its own offset.
+    var parameter_info = VkDescriptorBufferInfo(buffer = upload.buffer, offset = upload.base + (u64)parameter_offset, range = 112)
     for index in 0..<canvas.draw_count:
-        let draw = canvas.draws[index]
-        var image_infos: VkDescriptorImageInfo[4]
+        upload.descriptors[index] = made[shared[index]]
+        if index > 0 and shared[index] == shared[index - 1]:
+            continue
+        var bindings = vulkan_draw_bindings(device, &canvas.draws[index], upload.buffer, upload.base)
+        let set = made[shared[index]]
         var writes: VkWriteDescriptorSet[8]
         for slot in 0..<image_limit:
-            var image = placeholder
-            if let texture = draw.images[slot]:
-                image = (VulkanTexture*)texture.native
-            image_infos[slot] = VkDescriptorImageInfo(sampler = vulkan_sampler_for(device, draw.filter, image.filterable),
-                                                      imageView = image.view, imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
-            if slot == image_limit - 1 and reads_scene_depth(&draw):
-                # The scene depth copy, read texel by texel.
-                image_infos[slot] = VkDescriptorImageInfo(sampler = device.nearest, imageView = device.depth_copy_view, imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
-            writes[slot] = VkWriteDescriptorSet(sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, dstSet = upload.descriptors[index], dstBinding = (u32)slot + 1, descriptorCount = 1,
-                                                descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, pImageInfo = &image_infos[slot])
-        writes[4] = VkWriteDescriptorSet(sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, dstSet = upload.descriptors[index], dstBinding = 5, descriptorCount = 1,
+            writes[slot] = VkWriteDescriptorSet(sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, dstSet = set, dstBinding = (u32)slot + 1, descriptorCount = 1,
+                                                descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, pImageInfo = &bindings.images[slot])
+        writes[4] = VkWriteDescriptorSet(sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, dstSet = set, dstBinding = 5, descriptorCount = 1,
                                          descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, pBufferInfo = &buffer_info)
-        var geometry_info = VkDescriptorBufferInfo(buffer = upload.buffer, offset = upload.base, range = 32)
-        if let geometry = draw.geometry:
-            let native = (VulkanGeometry*)geometry.native
-            geometry_info.buffer = native.buffer
-            geometry_info.offset = 0
-            geometry_info.range = native.bytes
-        # Binding 8 is read only by shade_quads' vertex stage (its order).
-        var order_info = geometry_info
-        if let quads = draw.quads:
-            let records = (VulkanBuffer*)quads.records.native
-            geometry_info = VkDescriptorBufferInfo(buffer = records.buffer, range = records.bytes)
-            order_info = geometry_info
-            if let order = quads.order:
-                let native = (VulkanBuffer*)order.native
-                order_info = VkDescriptorBufferInfo(buffer = native.buffer, range = native.bytes)
-        var parameter_info = VkDescriptorBufferInfo(buffer = upload.buffer, offset = upload.base + (u64)(parameter_offset + index * 256), range = 112)
-        writes[5] = VkWriteDescriptorSet(sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, dstSet = upload.descriptors[index], dstBinding = 6, descriptorCount = 1, descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, pBufferInfo = &geometry_info)
-        writes[6] = VkWriteDescriptorSet(sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, dstSet = upload.descriptors[index], dstBinding = 7, descriptorCount = 1, descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, pBufferInfo = &parameter_info)
-        writes[7] = VkWriteDescriptorSet(sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, dstSet = upload.descriptors[index], dstBinding = 8, descriptorCount = 1, descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, pBufferInfo = &order_info)
+        writes[5] = VkWriteDescriptorSet(sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, dstSet = set, dstBinding = 6, descriptorCount = 1, descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, pBufferInfo = &bindings.geometry)
+        writes[6] = VkWriteDescriptorSet(sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, dstSet = set, dstBinding = 7, descriptorCount = 1, descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, pBufferInfo = &parameter_info)
+        writes[7] = VkWriteDescriptorSet(sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, dstSet = set, dstBinding = 8, descriptorCount = 1, descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, pBufferInfo = &bindings.order)
         vkUpdateDescriptorSets(device.device, 8, &writes[0], 0, none)
     if meshes > 0:
         upload.mesh_descriptors = try new u64[canvas.draw_count] --- in memory.heap
@@ -147,6 +144,50 @@ func vulkan_upload(device: VulkanDevice*, canvas: Canvas) -> VulkanUpload!:
             try vulkan_mesh_descriptors(device, upload.mesh_descriptors[index], mesh, upload.buffer, upload.base + (u64)(mesh_offset + placed * 512))
             placed += 1
     return upload
+
+## What a draw's set names besides the frame's coverage and parameters: its
+## images (the placeholder where it has none, the scene depth copy where it
+## reads it) and its vertex stage's geometry and order buffers.
+struct VulkanDrawBindings:
+    var images: VkDescriptorImageInfo[4]
+    var geometry: VkDescriptorBufferInfo
+    var order: VkDescriptorBufferInfo
+
+func vulkan_draw_bindings(device: VulkanDevice*, draw: const Draw*, buffer: u64, base: u64) -> VulkanDrawBindings:
+    var bindings = VulkanDrawBindings()
+    let placeholder = device.placeholder else trap("Vulkan drawing state has no placeholder image")
+    for slot in 0..<image_limit:
+        var image = placeholder
+        if let texture = draw.images[slot]:
+            image = (VulkanTexture*)texture.native
+        bindings.images[slot] = VkDescriptorImageInfo(sampler = vulkan_sampler_for(device, draw.filter, image.filterable),
+                                                      imageView = image.view, imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+        if slot == image_limit - 1 and reads_scene_depth(draw):
+            # The scene depth copy, read texel by texel.
+            bindings.images[slot] = VkDescriptorImageInfo(sampler = device.nearest, imageView = device.depth_copy_view, imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+    bindings.geometry = VkDescriptorBufferInfo(buffer = buffer, offset = base, range = 32)
+    if let geometry = draw.geometry:
+        let native = (VulkanGeometry*)geometry.native
+        bindings.geometry = VkDescriptorBufferInfo(buffer = native.buffer, offset = 0, range = native.bytes)
+    # Binding 8 is read only by shade_quads' vertex stage (its order).
+    bindings.order = bindings.geometry
+    if let quads = draw.quads:
+        let records = (VulkanBuffer*)quads.records.native
+        bindings.geometry = VkDescriptorBufferInfo(buffer = records.buffer, range = records.bytes)
+        bindings.order = bindings.geometry
+        if let order = quads.order:
+            let native = (VulkanBuffer*)order.native
+            bindings.order = VkDescriptorBufferInfo(buffer = native.buffer, range = native.bytes)
+    return bindings
+
+func vulkan_same_bindings(a: const VulkanDrawBindings*, b: const VulkanDrawBindings*) -> bool:
+    for slot in 0..<image_limit:
+        if a.images[slot].sampler != b.images[slot].sampler or a.images[slot].imageView != b.images[slot].imageView:
+            return false
+    return vulkan_same_buffer(a.geometry, b.geometry) and vulkan_same_buffer(a.order, b.order)
+
+func vulkan_same_buffer(a: VkDescriptorBufferInfo, b: VkDescriptorBufferInfo) -> bool:
+    return a.buffer == b.buffer and a.offset == b.offset and a.range == b.range
 
 # mark: Encoding and rendering ================================================================
 ## Record `canvas` into `framebuffer` on `command` as `pass`, clearing to
@@ -239,7 +280,8 @@ func vulkan_encode(device: VulkanDevice*, command: u64, formats: VulkanFormatSta
                 if draw.geometry != none: selected = formats.geometry
                 vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, selected)
                 var descriptor = upload.descriptors[index]
-                vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, device.layout, 0, 1, &descriptor, 0, none)
+                var parameters = (u32)(index * 256)
+                vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, device.layout, 0, 1, &descriptor, 1, &parameters)
                 if draw.uniform_count > 0:
                     var uniforms = draw.uniforms
                     vkCmdPushConstants(command, device.layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, (u32)uniform_limit, &uniforms)
