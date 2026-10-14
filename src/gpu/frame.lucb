@@ -45,16 +45,21 @@ struct FrameState:
     var format: Format?
     # How a surface frame's target blends; linear for the others.
     var blending: Blending
-    var validate: (func(void*, window.Size) -> unit!)?
+    ## Whether the surface or texture still takes this frame's drawing; with
+    ## `extent`, also whether its size is still the one the frame began at.
+    var validate: (func(void*, window.Size, bool) -> unit!)?
     var submit: (func(void*, Canvas, Color) -> PresentResult!)?
     var release: (func(void*) -> unit)?
     var ended: bool
 
-    func check() -> !:
+    ## Whether the frame still records. Draws ask without `extent`: the window's
+    ## size is read once when the frame hands out its target and once at present,
+    ## which drops a frame the window outgrew, not before each of its draws.
+    func check(extent: bool = false) -> !:
         if self.ended:
             error(frame_finished, "the recording frame is finished")
         if let context = self.presentation:
-            try (self.validate else trap("frame presentation has no validator"))(context, self.size)
+            try (self.validate else trap("frame presentation has no validator"))(context, self.size, extent)
 
     func close():
         self.ended = true
@@ -97,13 +102,13 @@ pub struct Frame:
     ## The frame's extent in logical points and backing pixels.
     pub func size() -> window.Size!:
         let state = try self.state_value()
-        try state.value().check()
+        try state.value().check(extent = true)
         return state.value().size
 
     ## The root drawing target covering the whole frame.
     pub func target() -> interop.View[RenderTarget]!:
         let state = (try self.state_value()).value()
-        try state.check()
+        try state.check(extent = true)
         let lease = self.lease else error(frame_finished, "the recording frame is finished")
         let region = Rect(width = state.size.width, height = state.size.height)
         let clip = Clip(width = (u32)state.size.pixel_width, height = (u32)state.size.pixel_height)
@@ -114,7 +119,7 @@ pub struct Frame:
     pub func present(color: Color = Color()) -> PresentResult!:
         let state = (try self.state_value()).value()
         defer self.close()
-        try state.check()
+        try state.check(extent = true)
         try check_color(color)
         let context = state.presentation else error(unavailable, "a standalone frame has no presentation surface")
         let submit = state.submit else trap("frame presentation has no submit operation")

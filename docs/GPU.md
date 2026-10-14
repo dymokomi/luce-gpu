@@ -236,8 +236,9 @@ Pixel scissors round outward at fractional backing coordinates.
 Presentation ends the frame on success, skipped acquisition, or failure. Explicit
 `close()` cancels recording and is idempotent. Both invalidate every target and
 bound method immediately. Keeping a view alive retains only the storage needed
-for safe expiry checks. Resize rejects stale drawing with `frame_resized`; begin
-a new frame. Window or surface closure also rejects drawing. A frame keeps the
+for safe expiry checks. A resize is caught where the window's size is read: `Frame.target`, `Frame.size`
+and `present` fail with `frame_resized` (draws do not ask the window each time,
+so a frame the window outgrew is dropped at present); begin a new frame. Window or surface closure also rejects drawing. A frame keeps the
 surface’s physical resources alive until closure; a closed surface releases its
 window presentation lease when its last frame finishes.
 

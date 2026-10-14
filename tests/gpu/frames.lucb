@@ -129,14 +129,14 @@ pub func pixels() -> !:
     let stale = try resized.value().target()
     defer stale.release()
     try host.resize(96, 64)
+    # Draws do not read the window's size; present does, and drops the frame.
+    try stale.value().triangles(quad(gpu.Vertex()))
     refused = false
-    stale.value().triangles(quad(gpu.Vertex())) catch failure:
-        assert(failure.code == gpu.frame_resized)
-        refused = true
-    assert(refused)
     _ = resized.value().present() catch failure:
         assert(failure.code == gpu.frame_resized)
+        refused = true
         recover gpu.PresentResult.skipped
+    assert(refused)
     assert(not stale.is_valid())
     let closing = try surface.frame()
     defer closing.release()

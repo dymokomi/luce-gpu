@@ -206,8 +206,9 @@ func check_canvas_device(canvas: Canvas, device: DeviceState*) -> !:
             if pipeline.device != device:
                 error(wrong_device, "a draw uses a pipeline from another GPU device")
 
-func check_texture_frame(context: void*, acquired: window.Size) -> !:
+func check_texture_frame(context: void*, acquired: window.Size, extent: bool) -> !:
     _ = acquired
+    _ = extent
     let state = (TextureState*)context
     try check_thread()
     if state.closed:

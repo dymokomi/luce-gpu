@@ -128,11 +128,13 @@ func release_surface(state: SurfaceState*):
         free(state) in memory.heap
 
 ## Adapter from portable recording ownership to this presentation resource.
-func check_surface_frame(context: void*, acquired: window.Size) -> !:
+func check_surface_frame(context: void*, acquired: window.Size, extent: bool) -> !:
     let state = (SurfaceState*)context
     try check_thread()
     if state.closed:
         error(closed, "the frame's surface is closed")
+    if not extent:
+        return
     let size = try state.host.size()
     if size.width != acquired.width or size.height != acquired.height or size.pixel_width != acquired.pixel_width or size.pixel_height != acquired.pixel_height:
         error(frame_resized, "the surface changed size; begin a new frame")
