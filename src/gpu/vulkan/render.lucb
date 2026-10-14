@@ -41,12 +41,23 @@ func vulkan_vertex_offset(canvas: Canvas) -> usize:
 func vulkan_instance_offset(canvas: Canvas) -> usize:
     return (vulkan_vertex_offset(canvas) + canvas_max(1, canvas.vertex_count) * memory.size_of(Vertex) + 63) // 64 * 64
 
+## Make what drawing `canvas` needs on first use: the shared drawing state and,
+## for mesh draws, the mesh layouts. Both record uploads of their placeholders
+## into the open recording, so a frame makes them before it submits that
+## recording and takes the next slot for its own.
+func vulkan_upload_ready(device: VulkanDevice*, canvas: Canvas) -> !:
+    try vulkan_drawing(device)
+    for draw in canvas.draws[..<canvas.draw_count]:
+        if draw.mesh != none:
+            try vulkan_mesh_ready(device)
+            return
+
 func vulkan_upload(device: VulkanDevice*, canvas: Canvas) -> VulkanUpload!:
     var upload: VulkanUpload
     errdefer vulkan_upload_destroy(device, upload)
     if canvas.draw_count == 0:
         return upload
-    try vulkan_drawing(device)
+    try vulkan_upload_ready(device, canvas)
     let vertex_bytes = canvas_max(1, canvas.vertex_count) * memory.size_of(Vertex)
     let mask_bytes = canvas_max(1, canvas.coverage_count) * 4
     let vertex_offset = vulkan_vertex_offset(canvas)
@@ -56,7 +67,6 @@ func vulkan_upload(device: VulkanDevice*, canvas: Canvas) -> VulkanUpload!:
     var meshes: usize = 0
     for draw in canvas.draws[..<canvas.draw_count]:
         if draw.mesh != none: meshes += 1
-    if meshes > 0: try vulkan_mesh_ready(device)
     # Mesh parameter blocks follow, 512 bytes apart.
     let mesh_offset = parameter_offset + canvas.draw_count * 256
     let bytes = mesh_offset + meshes * 512
@@ -368,8 +378,10 @@ func vulkan_render(device: VulkanDevice*, host: window.Presentation, state: Vulk
     if state.swapchain == 0:
         return PresentResult.skipped
     let formats = try vulkan_format_state(device, state.format)
-    # What was recorded before the frame (its textures' passes, uploads) is
-    # submitted first; the frame's draw data is then for its own submission.
+    # What was recorded before the frame (its textures' passes, uploads, and
+    # the uploads of state its draws make on first use) is submitted first; the
+    # frame's draw data is then for its own submission.
+    try vulkan_upload_ready(device, canvas)
     try vulkan_flush(device)
     if reads_scene_depth_anywhere(&canvas): try vulkan_depth_copy_for(device, width, height)
     var upload = try vulkan_upload(device, canvas)

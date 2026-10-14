@@ -691,10 +691,11 @@ func vulkan_begin(device: VulkanDevice*) -> VulkanSlot*!:
     device.open_uses = 1
     return slot
 
-## The ring slot the next submission takes, once free: a submission recorded
-## in a command buffer of its own (a surface's) still takes its serial and
-## fence from the ring.
+## The ring slot the next submission takes, once free, with its command
+## buffer: a frame records into it directly. That slot is the open recording's
+## when there is one, so a frame submits that recording first.
 func vulkan_reserve(device: VulkanDevice*) -> VulkanSlot*!:
+    if device.open != none: trap("a Vulkan submission was reserved over the open recording")
     vulkan_poll(device)
     let serial = device.submitted + 1
     if serial > (u64)vulkan_slot_limit:

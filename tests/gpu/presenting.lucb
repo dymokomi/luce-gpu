@@ -1,0 +1,122 @@
+## Window frames in the orders applications present them, on a fresh device:
+## an empty frame, empty frames in a row, the first mesh the device draws drawn
+## straight into a window frame, an empty frame then one that draws, and a
+## frame after a texture pass alone. Run on Metal and Vulkan when a window
+## system is there; on Vulkan under the Khronos validation layer when installed.
+##
+## The first mesh draw makes the device's mesh state, which records an upload:
+## a Vulkan frame once took the slot of that open recording, recorded over its
+## command buffer, and the next present crashed ending it again.
+from luce_gpu import gpu
+from luce_window import window
+import memory
+import thread
+
+func bytes_of[T](values: const T[]) -> const u8[]:
+    return u8[]((u8*)values.data, values.length * memory.size_of(T))
+
+func pump(target: window.Window*) -> !:
+    while let event = try target.poll(): _ = event
+
+## Present one frame, recorded by `record`, retrying while the window is not
+## yet shown or an image is not ready; whether the device submitted it.
+func present(surface: gpu.Surface*, target: window.Window*, record: func(const gpu.RenderTarget*, void*?) -> unit!, context: void*?) -> bool!:
+    for attempt in 0..<(usize)300:
+        _ = attempt
+        try pump(target)
+        let frame = try surface.frame()
+        defer frame.release()
+        let view = try frame.value().target()
+        defer view.release()
+        try record(try view.get(), context)
+        if (try frame.value().present(gpu.Color(red = 0.1, green = 0.1, blue = 0.1))) == gpu.PresentResult.submitted:
+            return true
+        thread.sleep(10)
+    return false
+
+## Present one frame that must be submitted: the window has shown one already.
+func presents(surface: gpu.Surface*, target: window.Window*, record: func(const gpu.RenderTarget*, void*?) -> unit!, context: void*?) -> !:
+    if not try present(surface, target, record, context):
+        error(gpu.unavailable, "a shown window stopped taking frames")
+
+func nothing(target: const gpu.RenderTarget*, context: void*?) -> !:
+    _ = target
+    _ = context
+
+func mesh(target: const gpu.RenderTarget*, context: void*?) -> !:
+    let buffers = (const gpu.MeshBuffers*)(context else trap("no mesh"))
+    var block: f32[128]
+    for at in 0..<(usize)4:
+        block[gpu.mesh_clip + at * 5] = 1.0
+        block[gpu.mesh_world + at * 5] = 1.0
+        block[gpu.mesh_normal_matrix + at * 5] = 1.0
+    block[gpu.mesh_tint] = 1.0
+    block[gpu.mesh_eye + 2] = 5.0
+    block[gpu.mesh_mode] = (f32)(u8)gpu.Shading.unlit
+    block[gpu.mesh_mode + 1] = -1.0
+    block[gpu.mesh_mode + 2] = -1.0
+    try gpu.draw_mesh(target, buffers, 6, block, gpu.MeshKind.surface)
+
+func triangle(target: const gpu.RenderTarget*, context: void*?) -> !:
+    _ = context
+    let vertices: gpu.Vertex[3] = [gpu.Vertex(x = -0.8, y = -0.8, red = 1.0), gpu.Vertex(x = 0.8, y = -0.8, green = 1.0), gpu.Vertex(x = 0.0, y = 0.8, blue = 1.0)]
+    try target.triangles(vertices)
+
+func image(target: const gpu.RenderTarget*, context: void*?) -> !:
+    let texture = (gpu.Texture*)(context else trap("no texture"))
+    try gpu.draw_image(target, *texture, gpu.Rect(x = 8.0, y = 8.0, width = 32.0, height = 32.0))
+
+pub func main(arguments: str[]) -> i32!:
+    _ = arguments
+    var device = gpu.Device.open() catch failure:
+        if failure.code == gpu.unavailable:
+            print("skip no GPU device")
+            return 0
+        error(failure.code, failure.message)
+    defer device.destroy()
+    var target = window.Window.open(window.Options(title = "luce-gpu presenting", width = 160, height = 120)) catch failure:
+        print(f"skip no window system: {failure.message}")
+        return 0
+    defer target.destroy()
+    var surface = try gpu.Surface.open(device, target)
+    defer surface.destroy()
+    try target.show()
+    # The mesh's buffers record their uploads before any frame.
+    let corners: f32[12] = [-0.5, -0.5, 0.5, 0.5, -0.5, 0.5, 0.5, 0.5, 0.5, -0.5, 0.5, 0.5]
+    let triangles: u32[6] = [0, 1, 2, 0, 2, 3]
+    let indices: u32[4] = [0, 1, 2, 3]
+    let faces: u32[2] = [0, 0]
+    var buffers = gpu.MeshBuffers()
+    buffers.triangles = try gpu.Buffer.create(device, bytes_of[u32](triangles))
+    defer buffers.triangles.destroy()
+    buffers.corners = try gpu.Buffer.create(device, bytes_of[u32](indices))
+    defer buffers.corners.destroy()
+    buffers.positions = try gpu.Buffer.create(device, bytes_of[f32](corners))
+    defer buffers.positions.destroy()
+    buffers.faces = try gpu.Buffer.create(device, bytes_of[u32](faces))
+    defer buffers.faces.destroy()
+    # An empty frame, then empty frames in a row. A window that never shows
+    # (a Windows service session, as over SSH) takes none.
+    if not try present(&surface, &target, nothing, none):
+        print("skip no window shown")
+        return 0
+    for round in 0..<(usize)3:
+        _ = round
+        try presents(&surface, &target, nothing, none)
+    # The device's first mesh, drawn in a window frame, then again.
+    try presents(&surface, &target, mesh, (void*)&buffers)
+    try presents(&surface, &target, mesh, (void*)&buffers)
+    # An empty frame, then one that draws.
+    try presents(&surface, &target, nothing, none)
+    try presents(&surface, &target, triangle, none)
+    # A texture pass alone, then an empty frame, then a frame drawing its result.
+    var texture = try gpu.Texture.create(device, 32, 32, gpu.Format.rgba8_linear)
+    defer texture.destroy()
+    let pass = try texture.frame()
+    defer pass.release()
+    _ = try pass.value().present(gpu.Color(red = 1.0, alpha = 1.0))
+    try presents(&surface, &target, nothing, none)
+    try presents(&surface, &target, image, (void*)&texture)
+    try surface.wait_idle()
+    print("ok GPU window frames: empty, first mesh, empty then drawn, texture pass only")
+    return 0

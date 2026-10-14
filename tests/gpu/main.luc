@@ -5,6 +5,9 @@
 #                     (presentation, sRGB, resize, ownership) when a desktop session is there
 #   batching.lucb     Vulkan batching, deferred destruction, pooled memory and compute, on Linux and Windows,
 #                     under the Khronos validation layer when it is installed
+#   presenting.lucb   window frames in the orders apps present them (empty, first mesh, texture
+#                     pass only), on Metal and on Vulkan under the validation layer, when a window
+#                     system is there
 #   unsupported.lucb  a target with no GPU backend refuses a device; it is also emitted for
 #                     every target, which must type-check without Cocoa helpers
 #   values.lucb       portable GPU values link no graphics library
@@ -71,7 +74,7 @@ pub func main(arguments: list[str]) -> int!:
     if platform.macos:
         metal(checks, gpu_policy, window_policy)
     elif platform.linux or platform.windows:
-        vulkan(checks, gpu_policy)
+        vulkan(checks, gpu_policy, window_policy)
     else:
         checks.expect(checks.build("unsupported.lucb", "unsupported", []), [], "ok unsupported GPU target")
         print("ok gpu unsupported target")
@@ -121,6 +124,7 @@ func metal(checks: Checks, gpu_policy: str, window_policy: str) -> unit!:
         error(failed, "GPU tests require a Metal device (LUCE_TEST_GPU=optional skips)")
     if hardware and has_desktop:
         checks.expect(probe, ["gui"], "ok GPU pixels, sRGB, resize, acquisition, ownership, and isolation")
+        checks.expect(checks.build("presenting.lucb", "presenting", []), [], presented)
     checks.links_none(probe, ["SDL"])
     print("ok gpu metal" + (" (pixels and presentation)" if hardware and has_desktop else " (contracts)"))
     if not hardware:
@@ -136,7 +140,10 @@ func validation_available() -> bool!:
             return true
     return false
 
-func vulkan(checks: Checks, gpu_policy: str) -> unit!:
+## What presenting.lucb prints when every frame was submitted.
+let presented = "ok GPU window frames: empty, first mesh, empty then drawn, texture pass only"
+
+func vulkan(checks: Checks, gpu_policy: str, window_policy: str) -> unit!:
     let batching = checks.build("batching.lucb", "batching", [])
     let log = paths.join(checks.work, "validation.log")
     let validated = validation_available()
@@ -158,3 +165,21 @@ func vulkan(checks: Checks, gpu_policy: str) -> unit!:
     if files.exists(log) and "Validation" in files.read_text(log):
         error(failed, files.read_text(log))
     print("ok vulkan batching" + (" (validation, sync validation)" if validated else ""))
+    if window_policy == "off":
+        return
+    let presenting = checks.build("presenting.lucb", "presenting", [])
+    let shown = process.run(presenting, [], "", environment)
+    if shown.exit_code != 0:
+        error(failed, f"presenting: exit status {shown.exit_code}\n{shown.output}{shown.error_output}")
+    if files.exists(log) and "Validation" in files.read_text(log):
+        error(failed, files.read_text(log))
+    # The validation layer also prints where it logs.
+    for line in shown.output.lines():
+        if line.starts_with("skip"):
+            if window_policy == "required":
+                error(failed, f"Vulkan presentation tests require a window system: {line}")
+            print(f"skip vulkan presentation: {line}")
+            return
+    if not (presented in shown.output.lines()):
+        error(failed, f"presenting printed {shown.output}")
+    print("ok vulkan presentation" + (" (validation, sync validation)" if validated else ""))
