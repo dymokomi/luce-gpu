@@ -330,11 +330,17 @@ func vulkan_render(device: VulkanDevice*, host: window.Presentation, state: Vulk
     # submitted first; the frame's draw data is then for its own submission.
     try vulkan_flush(device)
     if reads_scene_depth_anywhere(&canvas): try vulkan_depth_copy_for(device, width, height)
-    let upload = try vulkan_upload(device, canvas)
+    var upload = try vulkan_upload(device, canvas)
     defer vulkan_upload_destroy(device, upload)
-    try vulkan_check(vkResetCommandPool(device.device, state.pool, 0), "the Vulkan command pool could not be reset")
+    # The frame takes the next serial, fence and command buffer of the device's
+    # ring, and is timed like every submission. Taking the slot waits, if the
+    # ring is full, for the oldest submission: the only wait on the GPU here.
+    let slot = try vulkan_reserve(device)
+    let serial = device.submitted + 1
+    let semaphore = state.acquired[(usize)(serial % (u64)vulkan_slot_limit)]
+    try vulkan_check(vkResetCommandPool(device.device, slot.pool, 0), "the Vulkan command pool could not be reset")
     var index: u32 = 0
-    let acquired = vkAcquireNextImageKHR(device.device, state.swapchain, 1000000000, state.acquired, 0, &index)
+    let acquired = vkAcquireNextImageKHR(device.device, state.swapchain, 1000000000, semaphore, 0, &index)
     if acquired == VK_NOT_READY or acquired == VK_TIMEOUT:
         return PresentResult.skipped
     if acquired == VK_ERROR_OUT_OF_DATE_KHR:
@@ -346,28 +352,28 @@ func vulkan_render(device: VulkanDevice*, host: window.Presentation, state: Vulk
     errdefer vulkan_poison(state)
     # A failure after queue submission still waits before releasing upload memory.
     errdefer vulkan_drain(device)
-    # The frame takes the next serial and fence of the device's ring, and is
-    # timed like every submission.
-    let slot = try vulkan_reserve(device)
     var begin = VkCommandBufferBeginInfo(sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT)
-    try vulkan_check(vkBeginCommandBuffer(state.command, &begin), "Vulkan command recording could not begin")
-    vulkan_time_start(device, state.command)
-    # Presentation waits for the queue below, so the images it samples need no serial.
-    try vulkan_encode(device, state.command, formats, formats.pass_present, state.images[(usize)index].framebuffer, canvas, upload,
-                      Color(color.red, color.green, color.blue, 1.0), state.width, state.height, 0, state.encoded, state.depth_image)
-    vulkan_time_end(device, state.command)
-    try vulkan_check(vkEndCommandBuffer(state.command), "Vulkan command recording could not finish")
+    try vulkan_check(vkBeginCommandBuffer(slot.command, &begin), "Vulkan command recording could not begin")
+    vulkan_time_start(device, slot.command)
+    # The images the frame samples carry its serial, so none goes while it runs.
+    try vulkan_encode(device, slot.command, formats, formats.pass_present, state.images[(usize)index].framebuffer, canvas, upload,
+                      Color(color.red, color.green, color.blue, 1.0), state.width, state.height, serial, state.encoded, state.depth_image)
+    vulkan_time_end(device, slot.command)
+    try vulkan_check(vkEndCommandBuffer(slot.command), "Vulkan command recording could not finish")
+    # Its descriptors are freed when the frame's submission completes.
+    try vulkan_upload_retire(slot, &upload)
     var wait_stage: u32 = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
     var signal = state.images[(usize)index].presented
-    var submit = VkSubmitInfo(sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, waitSemaphoreCount = 1, pWaitSemaphores = &state.acquired,
-                              pWaitDstStageMask = &wait_stage, commandBufferCount = 1, pCommandBuffers = &state.command,
+    var waited = semaphore
+    var submit = VkSubmitInfo(sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, waitSemaphoreCount = 1, pWaitSemaphores = &waited,
+                              pWaitDstStageMask = &wait_stage, commandBufferCount = 1, pCommandBuffers = &slot.command,
                               signalSemaphoreCount = 1, pSignalSemaphores = &signal)
     _ = try vulkan_submit_reserved(device, slot, &submit)
     var present = VkPresentInfoKHR(sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, waitSemaphoreCount = 1, pWaitSemaphores = &signal,
                                    swapchainCount = 1, pSwapchains = &state.swapchain, pImageIndices = &index)
+    # No wait for the GPU: the next frame records while this one runs, and
+    # acquiring an image paces the loop to the display.
     let result = vkQueuePresentKHR(device.queue, &present)
-    try vulkan_check(vkQueueWaitIdle(device.queue), "Vulkan execution failed")
-    vulkan_idle(device)
     if result == VK_ERROR_OUT_OF_DATE_KHR or result == VK_SUBOPTIMAL_KHR or acquired == VK_SUBOPTIMAL_KHR:
         state.dirty = true
     if result != VK_SUCCESS and result != VK_ERROR_OUT_OF_DATE_KHR and result != VK_SUBOPTIMAL_KHR:
