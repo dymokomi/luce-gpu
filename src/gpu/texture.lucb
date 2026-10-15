@@ -83,22 +83,27 @@ pub struct Texture:
     pub func storage() -> bool!:
         return (try self.checked()).storage
 
-    ## Begin one recording frame whose target is this texture; its points equal
-    ## texels. The 32-bit formats are not rendered into (`invalid_geometry`).
+    ## Begin one recording frame whose target is this texture; a point is `scale`
+    ## texels (in 1..16, a window's backing scale for a layer drawn as the window
+    ## draws), one by default. The 32-bit formats are not rendered into
+    ## (`invalid_geometry`).
     ## `present` clears the texture to the given color and draws, ordered
     ## before every later submission, so the result can be read or sampled
     ## immediately after without waiting for the GPU: only `read` waits. With
     ## `keep`, `present` draws over the texture's contents instead of clearing
     ## them (its color is then unused): a frame adds to what earlier frames,
     ## uploads and copies left.
-    pub func frame(keep: bool = false) -> interop.Reference[Frame]!:
+    pub func frame(keep: bool = false, scale: f64 = 1.0) -> interop.Reference[Frame]!:
         let state = try self.checked()
         if not renderable(state.format):
             error(invalid_geometry, "32-bit textures are written by compute kernels, not rendered into")
         if state.active_frame:
             error(frame_in_use, "the texture already has an active frame")
-        let extent = (f64)state.width
-        let size = window.Size(width = extent, height = (f64)state.height, pixel_width = extent, pixel_height = (f64)state.height, scale = 1.0)
+        if not (scale >= 1.0 and scale <= 16.0):
+            error(invalid_geometry, "a texture frame's scale must be in 1..16")
+        let columns = (f64)state.width
+        let rows = (f64)state.height
+        let size = window.Size(width = columns / scale, height = rows / scale, pixel_width = columns, pixel_height = rows, scale = scale)
         let native = try new Frame(size)
         let owner = try interop.Reference[Frame].adopt(native, frame_type)
         errdefer owner.release()

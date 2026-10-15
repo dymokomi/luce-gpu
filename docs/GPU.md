@@ -428,7 +428,8 @@ slot. `tests/readbench` times each phase on a device; `tests/framebench` times
 frames and the driver memory they leave (see Per-draw memory below).
 
 `texture.frame()` begins a recording frame whose target is the texture (points
-equal texels). Its `present(color)` clears to `color` — alpha included — draws
+equal texels; `texture.frame(scale = 2.0)` makes a point two texels, as a window's
+backing scale does, for a layer drawn the way the window draws). Its `present(color)` clears to `color` — alpha included — draws
 and returns `submitted` without waiting; the pass is ordered before every later
 submission, so the texture can be read or sampled at once. `texture.frame(keep = true)`
 draws over the texture's contents instead (its `present` color is unused): a frame adds

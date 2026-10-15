@@ -36,6 +36,7 @@ pub func pixels(device: gpu.Device) -> !:
     assert((try mask_root.value().pixel_format()) == gpu.Format.r8)
     try kept(device)
     try clip_masks(device)
+    try scaled(device)
 
 ## An r8 texture as a clip mask: frames render coverage into it, a nested clip
 ## multiplies what is there (an `over` draw of color 0 and alpha 1 - coverage
@@ -90,6 +91,32 @@ func cover(level: f32, alpha: f32) -> gpu.Vertex[6]:
     var d = a
     d.y = -1.0
     return [a, b, c, a, c, d]
+
+## A frame at scale 2 measures the texture in points of two texels: a region of
+## 2 by 2 points covers 4 by 4 texels.
+func scaled(device: gpu.Device) -> !:
+    var texture = try gpu.Texture.create(device, 8, 8, gpu.Format.rgba8_linear)
+    defer texture.destroy()
+    let frame = try texture.frame(scale = 2.0)
+    defer frame.release()
+    let root = try frame.value().target()
+    let size = try root.value().size()
+    assert(size.width == 4.0 and size.pixel_width == 8.0 and size.scale == 2.0)
+    let corner = try root.value().region(gpu.Rect(width = 2.0, height = 2.0))
+    try corner.value().triangles(cover(1.0, 1.0))
+    corner.release()
+    root.release()
+    assert((try frame.value().present(gpu.Color(1.0, 0.0, 0.0, 1.0))) == gpu.PresentResult.submitted)
+    var texels: u8[256]
+    try texture.read(texels)
+    assert(texels[(3 * 8 + 3) * 4 + 1] == 255 and texels[(4 * 8 + 4) * 4 + 1] == 0)
+    assert(texels[(4 * 8 + 4) * 4] == 255)
+    var other = try gpu.Texture.create(device, 4, 4, gpu.Format.rgba8_linear)
+    defer other.destroy()
+    _ = other.frame(scale = 0.5) catch failure:
+        assert(failure.code == gpu.invalid_geometry)
+        return
+    assert(false)
 
 ## Frames begun with `keep` draw over the texture's contents: what a cleared
 ## frame left, and what an upload wrote.
